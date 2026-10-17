@@ -115,3 +115,4 @@ Thumbs.db
 !/docs/synchronization.md
 !/docs/github-release.md
 !/scripts/sync-difference-test.mjs
+!/scripts/ppk-fixtures.mjs

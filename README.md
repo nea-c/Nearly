@@ -33,6 +33,7 @@ npm run tauri -- dev
 npm test
 npm run test:ui
 npm run test:ui:production
+node scripts/ppk-fixtures.mjs
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 

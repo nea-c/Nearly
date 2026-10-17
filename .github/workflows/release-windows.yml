@@ -92,6 +92,9 @@ jobs:
       - name: Installer contract tests
         working-directory: source
         run: npm run test:installer
+      - name: Generate disposable PPK test inputs without publishing keys
+        working-directory: source
+        run: node scripts/ppk-fixtures.mjs
       - name: Native tests (serial; ignored fixture cases run below)
         working-directory: source
         run: cargo test --offline --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1

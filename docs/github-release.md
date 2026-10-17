@@ -1,5 +1,7 @@
 # GitHub Actions での手動 Windows ビルドと正式公開
 
+PPK のネイティブテスト入力は `node scripts/ppk-fixtures.mjs` で生成します。Actions は Cargo のコンパイル前にこの処理を行います。ローカルで Cargo テストを直接実行する場合も先に実行してください。新しい RSA 鍵を使った暗号化済みの使い捨てテスト入力で、実際の鍵を読み取らず、既存ファイルも上書きしません。生成ファイルは Git の対象外で、配布にも含めません。
+
 `.github/workflows/release-windows.yml` は **workflow_dispatch 専用**です。通常の push、タグの push、PR、定期実行では動きません。この設定を main に反映しただけではリリースしません。設定の commit・push、Actions の検証実行、正式公開は、それぞれ依頼された時点で行います。
 
 ## 使い方
