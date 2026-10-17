@@ -1,0 +1,16 @@
+{
+  "identifier": "local.syncfiles.native.test",
+  "app": {
+    "windows": [
+      {
+        "title": "Nearly isolated native test",
+        "width": 1180,
+        "height": 850,
+        "minWidth": 800,
+        "minHeight": 650,
+        "decorations": false,
+        "resizable": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {tError,setLanguage} from '../.test-build/i18n.js';
+test('approved ambiguous key-unlock wording localizes exactly without claiming wrong secret',()=>{for(const [lang,expected]of [['ja','パスフレーズまたは鍵ファイルを確認してください'],['en','Check the passphrase or key file']]){setLanguage(lang);assert.equal(tError('Check the passphrase or key file'),expected);}});

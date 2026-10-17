@@ -1,0 +1,31 @@
+.preset-removal-dialog {
+  box-sizing: border-box;
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  margin: auto;
+  padding: 22px;
+  border: 1px solid var(--border-main, var(--theme-control-border, #b9c8d9));
+  border-radius: 8px;
+  background: var(--surface-panel, var(--theme-control-bg, #fff));
+  color: var(--text-main, var(--theme-control-fg, #24364c));
+  box-shadow: 0 16px 56px #0007;
+}
+.preset-removal-dialog::backdrop { background: #0007; }
+.preset-removal-dialog h2 { margin: 0 0 14px; font-size: 16px; overflow-wrap: anywhere; }
+.preset-removal-dialog p { color: var(--text-main, var(--theme-control-fg, #24364c)); margin: 0; line-height: 1.65; font-size: 13px; overflow-wrap: anywhere; }
+.preset-removal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.preset-removal-actions button {
+  min-width: 90px;
+  background: var(--surface-raised, var(--theme-control-bg, #f4f7fb));
+  border-color: var(--border-main, var(--theme-control-border, #b9c8d9));
+  color: var(--text-main, var(--theme-control-fg, #24364c));
+}
+.preset-removal-actions button:hover { background: var(--surface-hover, #e8eef5); }
+.preset-removal-dialog .preset-removal-actions button.preset-removal-danger {
+  background: var(--danger-bg, #a53932);
+  border-color: var(--danger-bg, #a53932);
+  color: #fff;
+}
+.preset-removal-dialog .preset-removal-actions button.preset-removal-danger:hover { background: var(--danger-hover, #852f2a); }
+.preset-removal-actions button:focus-visible { outline: 2px solid var(--focus-ring, #3c82ce); outline-offset: 3px; }

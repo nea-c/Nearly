@@ -1,0 +1,6 @@
+import {test,expect} from '@playwright/test';
+for(const language of ['ja','en'])for(const theme of ['light','dark','midnight'])for(const compact of [false,true])test(`settings dropdown alignment ${language} ${theme} compact=${compact}`,async({page})=>{
+ await page.addInitScript(({language,theme,compact})=>localStorage.setItem('syncfiles-v1',JSON.stringify({version:1,profiles:[],history:{},language,theme,compactExplorer:compact})),{language,theme,compact});await page.goto('/');await page.locator('#settings-toggle').click();
+ for(const width of [640,800,1180]){await page.setViewportSize({width,height:850});const languageBox=await page.locator('#language-select').boundingBox(),themeBox=await page.locator('#theme-select').boundingBox();expect(Math.abs(languageBox.x-themeBox.x)).toBeLessThanOrEqual(1);expect(Math.abs(languageBox.width-themeBox.width)).toBeLessThanOrEqual(1);expect(languageBox.y).toBeLessThan(themeBox.y);expect(languageBox.x+languageBox.width).toBeLessThanOrEqual(width);const rows=await page.locator('.language-picker,.theme-picker').evaluateAll(nodes=>nodes.map(n=>({display:getComputedStyle(n).display,gap:getComputedStyle(n).gap})));expect(rows[0]).toEqual(rows[1]);}
+ await page.screenshot({path:`test-results/settings-alignment-${language}-${theme}-${compact}.png`});
+});

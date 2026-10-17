@@ -1,0 +1,341 @@
+/* Green variants share complete component rules; colors remain semantic per palette.
+   Existing Light, Dark and Midnight palettes and first-run selection are untouched. */
+:root:is([data-theme="forest"], [data-theme="mint"]) { accent-color: var(--action-bg); }
+:root[data-theme="forest"] {
+  color-scheme: dark;
+  --surface-base: #111e19;
+  --surface-panel: #192a23;
+  --surface-raised: #243a30;
+  --surface-input: #13231c;
+  --surface-hover: #2c493b;
+  --surface-selected: #305b46;
+  --surface-selected-hover: #38674e;
+  --surface-active: #315440;
+  --text-main: #e7f2eb;
+  --text-muted: #afc6b8;
+  --text-accent: #a5ddbc;
+  --border-main: #607e6c;
+  --border-soft: #3c5849;
+  --focus-ring: #8fdfb0;
+  --action-bg: #286444;
+  --action-hover: #2c704b;
+  --action-text: #ffffff;
+  --action-border: #73b991;
+  --danger-text: #ffb8ae;
+  --danger-bg: #903b34;
+  --danger-hover: #a43f36;
+  --danger-border: #d78478;
+  --danger-subtle: #50312c;
+  --warning-bg: #3a3220;
+  --warning-text: #f3d6a0;
+  --warning-border: #9c8254;
+  --success-text: #9bdbb5;
+  --disabled-text: #abc0b3;
+  --selection-marquee: #8fdfb025;
+  --overlay: #04110ba6;
+  --shadow-dialog: #00000088;
+  --shadow-toast: #00000066;
+  --theme-control-bg: var(--surface-input);
+  --theme-control-fg: var(--text-main);
+  --theme-control-border: var(--border-main);
+  --theme-label: var(--text-muted);
+  scrollbar-color: var(--border-main) var(--surface-base);
+}
+:root[data-theme="mint"] {
+  color-scheme: light;
+  --surface-base: #eef7f1;
+  --surface-panel: #fbfefb;
+  --surface-raised: #e0eee5;
+  --surface-input: #ffffff;
+  --surface-hover: #d3e8dc;
+  --surface-selected: #bee1cb;
+  --surface-selected-hover: #acd5bb;
+  --surface-active: #bfdcc9;
+  --text-main: #203d2d;
+  --text-muted: #466452;
+  --text-accent: #285d3e;
+  --border-main: #769780;
+  --border-soft: #b5ccbd;
+  --focus-ring: #24653d;
+  --action-bg: #286444;
+  --action-hover: #1f5739;
+  --action-text: #ffffff;
+  --action-border: #286444;
+  --danger-text: #9e3027;
+  --danger-bg: #a3342c;
+  --danger-hover: #8b2922;
+  --danger-border: #9e3027;
+  --danger-subtle: #f9e7e2;
+  --warning-bg: #fff2cf;
+  --warning-text: #725015;
+  --warning-border: #a58a50;
+  --success-text: #26613d;
+  --disabled-text: #536e5e;
+  --selection-marquee: #24653d25;
+  --overlay: #12332166;
+  --shadow-dialog: #17332230;
+  --shadow-toast: #17332230;
+  --theme-control-bg: var(--surface-input);
+  --theme-control-fg: var(--text-main);
+  --theme-control-border: var(--border-main);
+  --theme-label: var(--text-muted);
+  scrollbar-color: var(--border-main) var(--surface-base);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) body {
+  color: var(--text-main);
+  background: var(--surface-base);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(button, input, select, textarea) {
+  color: var(--text-main);
+  border-color: var(--border-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) button {
+  background: var(--surface-raised);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) button:hover {
+  background: var(--surface-hover);
+  border-color: var(--focus-ring);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(input, select, textarea),
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.path input, .dialog input, .dialog select, .connection-picker select) {
+  background: var(--surface-input);
+  color: var(--text-main);
+  border-color: var(--border-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(input, textarea)::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(button, input, select, textarea, tr, .table-scroll):focus-visible {
+  outline-color: var(--focus-ring);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.toolbar, .panes, .sync, .hint, .statusbar, .dialog, .file-menu) {
+  background: var(--surface-panel);
+  border-color: var(--border-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.titlebar, .tab, th, .tree-caption, .badge) {
+  background: var(--surface-raised);
+  border-color: var(--border-soft);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .tab.active {
+  background: var(--surface-panel);
+  border-color: var(--border-main);
+  border-bottom-color: var(--surface-panel);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button, .add-tab, .window-controls button, .tree-row button, .notice button) {
+  background: transparent;
+  color: inherit;
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
+  background: var(--surface-hover);
+  color: var(--text-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.folder-tree, .roots, .target, .operation-targets) {
+  background: var(--surface-input);
+  border-color: var(--border-soft);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.pane + .pane, .pane > footer, td, th, details, .metrics > div, .operation-results li) {
+  border-color: var(--border-soft);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(p, .app-name span, .connection-picker label, .mode, .workspace-heading p, .history-note strong, .history-note span, .pane > header span, th, .empty, .pane > footer, .hint p, .badge, .roots small, .roots > span, .metrics small, .metrics span, .demo-controls span, summary span, .logs, .statusbar, .subtle, .tree-caption, .tree-note, .tree-toggle, .menu-context, .file-menu > button small, .menu-explanation, .operation-targets span) {
+  color: var(--text-muted);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.dialog label, .tab [data-close]) {
+  color: var(--text-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.hint > span, .hint strong, .metrics strong, summary, .target small, .operation-endpoint, .operation-summary) {
+  color: var(--text-accent);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tree-row.selected, .table-scroll tr.selected) {
+  background: var(--surface-selected);
+  color: var(--text-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tree-row.selected:hover, .table-scroll tr.selected:hover) {
+  background: var(--surface-selected-hover);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-row.selected button {
+  color: var(--text-main);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .selection-marquee {
+  border-color: var(--focus-ring);
+  background: var(--selection-marquee);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .menu-rule {
+  background: var(--border-soft);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.warning, .notice) {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  border-color: var(--warning-border);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .mock-note {
+  background: var(--surface-raised);
+  color: var(--text-accent);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.form-error, .tree-error, .file-menu .danger, .operation-results li.failed strong, .operation-results li.failed p) {
+  color: var(--danger-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .operation-results li strong {
+  color: var(--success-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .operation-results li.failed strong {
+  color: var(--danger-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .primary {
+  background: var(--action-bg);
+  border-color: var(--action-border);
+  color: var(--action-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .primary:hover {
+  background: var(--action-hover);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .destructive {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--action-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .destructive:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .window-controls #window-close:hover {
+  background: var(--danger-hover);
+  color: var(--action-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(button, input, select, textarea):disabled {
+  opacity: 1;
+  color: var(--disabled-text);
+  background: var(--surface-raised);
+  border-color: var(--border-soft);
+  cursor: default;
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-row button:disabled {
+  background: transparent;
+  color: var(--disabled-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .overlay {
+  background: var(--overlay);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.dialog, .file-menu) {
+  box-shadow: 0 12px 40px var(--shadow-dialog);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .file-toast {
+  color: var(--text-main);
+  background: var(--surface-active);
+  box-shadow: 0 3px 15px var(--shadow-toast);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .document-glyph {
+  background: var(--border-soft);
+  border-color: var(--text-muted);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .dot {
+  background: var(--success-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .dot.off {
+  background: var(--disabled-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .dot.error {
+  background: var(--danger-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter { background: var(--surface-raised); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:focus-visible { background: var(--focus-ring); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .exclusion-editor textarea { background: var(--surface-input); color: var(--text-main); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .log-drawer { background: var(--surface-panel); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar button { background: transparent; }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar button:hover { background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar #error-count.has-errors { color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #prepare.destructive:focus-visible {
+  outline-color: var(--danger-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) #prepare.destructive:disabled {
+  background: var(--surface-raised);
+  border-color: var(--border-main);
+  color: var(--disabled-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-card { border-color: var(--border-main); box-shadow: none; }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-empty h1,
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-status { color: var(--text-muted); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .settings-toggle { color: var(--text-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .settings-toggle:hover { background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .caption-divider { background: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .settings-popup { color: var(--text-main); background: var(--surface-panel); border-color: var(--border-main); box-shadow: 0 8px 28px var(--shadow-dialog); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter { background: var(--surface-raised); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:focus-visible { background: var(--focus-ring); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(#preset-name, #exclusion-rules)::placeholder { color: var(--text-muted); opacity: 1; }
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter { position:relative; background:transparent; border:0; }
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:focus-visible,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:focus-visible { background:transparent; outline:none; }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar { background:var(--surface-panel); border-color:var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.bookmark-empty,.bookmark-paths span) { color:var(--text-muted); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .pair-row { border-color:var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .column-menu { background:var(--surface-panel); border-color:var(--border-main); color:var(--text-main); box-shadow:0 8px 24px var(--shadow-dialog); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .column-heading:hover { background:var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .column-resize::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter::after { background:var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .column-resize:hover::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) .column-resize:focus-visible::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:hover::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) #pane-splitter:focus-visible::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:hover::after,
+:root:is([data-theme="forest"], [data-theme="mint"]) .tree-splitter:focus-visible::after { background:var(--focus-ring); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu { background:var(--surface-panel); color:var(--text-main); border-color:var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > button:hover { background:var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > header { border-color:var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #connection-tree { background: var(--surface-input); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node.selected { background: var(--surface-selected); color: var(--text-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node:hover { background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node.selected:hover { background: var(--surface-selected-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node-icon { color: var(--text-accent); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node button { background: transparent; border-color: transparent; }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-context-menu { background: var(--surface-panel); border-color: var(--border-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-context-menu button:hover { background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) [data-drop=inside] { background: var(--surface-selected); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node[data-drop] .connection-node-row::after { color: var(--text-accent); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .hidden-item-label { color: var(--text-muted); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-node[data-drop] .connection-node-row::after { background: var(--surface-selected); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-menu-empty { color: var(--text-muted); }
+:root:is([data-theme="forest"], [data-theme="mint"]) [data-bookmark-drop=inside] { background: var(--surface-selected); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .selected .hidden-item-label { color: inherit; }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar #bookmark-more,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item,
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation { border-color: transparent; background: transparent; color: var(--text-main); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar #bookmark-more:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:hover:not(:disabled) { background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item:active,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item[aria-expanded=true],
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item:active,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item[aria-expanded=true],
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:active:not(:disabled) { background: var(--surface-active); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-item .bookmark-item-icon { color: var(--text-muted); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item:focus-visible,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar #bookmark-more:focus-visible,
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item:focus-visible,
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:focus-visible { outline-color: var(--focus-ring); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs) { border-color: var(--border-main); background: var(--surface-raised); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):hover { border-color: var(--focus-ring); background: var(--surface-hover); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):active { background: var(--surface-active); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #bookmark-tree-context [data-bookmark-action=delete] { color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #bookmark-tree-context [data-bookmark-action=delete]:is(:hover,:focus-visible) { color: var(--danger-text); background: var(--danger-subtle); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #bookmark-tree-context [data-bookmark-action=delete]:focus-visible { outline-color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
+:root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { background: var(--surface-selected); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled,
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled:hover,
+:root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled:active {
+  color: var(--disabled-text);
+}
+:root:is([data-theme="forest"], [data-theme="mint"]) #connection-context-menu [data-menu-action=delete] { color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #connection-context-menu [data-menu-action=delete]:is(:hover,:focus-visible):not(:disabled) { color: var(--danger-text); background: var(--danger-subtle); }
+:root:is([data-theme="forest"], [data-theme="mint"]) #connection-context-menu [data-menu-action=delete]:focus-visible { outline-color: var(--danger-text); }
+
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.connection-tree-overlay, .bookmark-tree-overlay) { background: var(--overlay); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.brandmark, .connection-node[data-drop] .connection-node-row::after) { color: var(--text-accent); }
+:root:is([data-theme="forest"], [data-theme="mint"]) .connection-details .passphrase-error { color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(button, input, select, textarea, summary, a):focus-visible { outline-color: var(--focus-ring); }

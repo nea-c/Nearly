@@ -1,0 +1,20 @@
+/** Context-specific stopped registrations; paths and connection names stay opaque. */
+export const retainedTranslations: Record<string,string> = {
+  "同期一覧":"Sync list",
+  "同期中":"Syncing",
+  "停止処理中…":"Stopping…",
+  "失敗・停止が必要":"Failed · stop required",
+  "開始失敗・停止中":"Start failed · stopped",
+  "停止中・未反映あり":"Stopped · pending changes",
+  "反映状態は再開時に確認":"Changes will be checked on resume.",
+  "場所を開く":"Open locations",
+  "再開":"Resume",
+  "登録解除":"Remove entry",
+  "登録だけを解除します。ファイルは削除しません":"Remove the registration only. Files are not deleted.",
+  "登録時の接続設定と異なります。接続先を確認して新しい同期を登録してください。":"Connection settings differ from this entry. Check the connection and register a new sync.",
+  "接続は自動で開始しません。接続後にもう一度「場所を開く」または「再開」を押してください。":"Connect manually, then choose Open locations or Resume again.",
+  "フォルダーの読込完了後に再試行してください。":"Wait for the folders to finish loading, then try again.",
+  "同期を停止してから登録を解除してください。":"Stop the sync before removing its entry.",
+  "この登録は開始中または同期中です。":"This entry is already starting or syncing.",
+  "接続・開始・タブ終了の処理が終わってから再試行してください。":"Wait for the connection, start, or tab close to finish, then try again.",
+};

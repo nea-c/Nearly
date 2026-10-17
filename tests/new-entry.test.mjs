@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+globalThis.document={body:{append(){}},createElement:()=>({}),addEventListener(){}};globalThis.window={addEventListener(){}};
+const mod=await import('../.test-build/file-actions.js');
+test('creation destination is one opaque child and supports actual drive and remote roots',()=>{assert.equal(mod.createTargetPath('local','D:\\','設定.txt'),'D:\\設定.txt');assert.equal(mod.createTargetPath('remote','/','設定'),'/設定');assert.equal(mod.createTargetPath('remote','/dir','CON.txt'),'/dir/CON.txt');});
+test('creation names reject traversal Windows aliases controls and UTF16 overflow',()=>{for(const n of ['',' ','..','.','a/b','a\\b','a\u0085b','😀'.repeat(128),'\ud800'])assert.throws(()=>mod.createTargetPath('remote','/',n));for(const n of ['CON.txt','COM¹','LPT9','CON .txt','name.','name ','a:b','a?b'])assert.throws(()=>mod.createTargetPath('local','D:\\',n));assert.throws(()=>mod.createTargetPath('local','@pc','ok'));assert.throws(()=>mod.createTargetPath('local','D:','ok'));assert.throws(()=>mod.createTargetPath('local','D:\\..\\x','ok'));});

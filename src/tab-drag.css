@@ -1,0 +1,34 @@
+/* Keep the floating original tab clipped to the strip, clear of caption controls. */
+.tabs.tab-reordering {
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  isolation: isolate;
+  scroll-behavior: auto;
+  overflow-anchor: none;
+}
+.tabs .tab-drag-source {
+  position: absolute;
+  z-index: 2;
+  margin: 0;
+  opacity: 1;
+  pointer-events: none;
+  box-shadow: 0 2px 6px #0003;
+  outline: 1px solid var(--border-main, #a2b8d3);
+  transition: none;
+}
+.tab-drag-placeholder {
+  flex: none;
+  box-sizing: border-box;
+  align-self: flex-end;
+  border: 1px dashed var(--border-main, #a2b8d3);
+  border-radius: 7px 7px 0 0;
+  background: var(--surface-hover, #cad8eb);
+  opacity: .55;
+  pointer-events: none;
+}
+.tabs .tab, .tabs .tab button { touch-action: none; }
+@media (prefers-reduced-motion: reduce) {
+  .tabs.tab-reordering .tab { transition: none; }
+}
+.tab-drop-indicator{position:fixed;width:3px;border-radius:2px;background:var(--accent,#3b8c65);box-shadow:0 0 0 1px #fff8;pointer-events:none;z-index:10000}

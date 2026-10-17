@@ -1,0 +1,26 @@
+{
+  "name": "nearly",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "test": "tsc && node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:ui": "playwright test",
+    "tauri": "tauri",
+    "build:windows": "node scripts/build-windows.mjs",
+    "test:native": "node scripts/native-drag-launch-test.mjs",
+    "test:ui:production": "npm run build && playwright test --config playwright.production.config.ts"
+  },
+  "devDependencies": {
+    "@noble/hashes": "^2.4.0",
+    "@playwright/test": "^1.64.1",
+    "@tauri-apps/cli": "^2.12.3",
+    "prettier": "^3.9.10",
+    "ssh2": "^1.17.0",
+    "typescript": "^7.0.2",
+    "vite": "^6.4.4"
+  }
+}
