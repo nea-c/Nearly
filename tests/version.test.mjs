@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {displayVersion, internalVersion, compareReleaseTags, checkVersions, versionFiles, projectRoot} from '../scripts/version.mjs';
+import {execFileSync} from 'node:child_process';
+import {displayVersion, internalVersion, compareReleaseTags, checkVersions, versionFiles, generatedFrontend, readVersion, projectRoot} from '../scripts/version.mjs';
 
 test('release labels have a lossless stable internal mapping and numeric order', () => {
   for (const [internal, label] of [['1.0.0','r1.0'], ['1.1.0','r1.1'], ['2.0.0','r2.0'], ['1.10.0','r1.10']]) {
@@ -14,6 +15,27 @@ test('release labels have a lossless stable internal mapping and numeric order',
   assert.equal(compareReleaseTags('r2.0', 'r1.10'), 1);
   assert.equal(compareReleaseTags('r1.0', 'r1.0'), 0);
   assert.equal(compareReleaseTags('r1.9', 'r1.10'), -1);
+});
+
+test('Windows autocrlf checkout preserves the canonical generated frontend version bytes', async () => {
+  const base = await fs.realpath(os.tmpdir());
+  const root = await fs.mkdtemp(path.join(base, 'nearly-version-checkout-'));
+  const git = args => execFileSync('git', ['-C', root, ...args], {encoding:'utf8',stdio:['pipe','pipe','pipe']});
+  try {
+    git(['init','-b','main']);git(['config','user.name','Generated fixture']);git(['config','user.email','fixture@users.noreply.github.com']);git(['config','core.autocrlf','true']);
+    await fs.mkdir(path.join(root,'src'));
+    const expected = generatedFrontend(await readVersion());
+    await fs.writeFile(path.join(root,'src/version.ts'), expected);
+    const attributes = await fs.readFile(path.join(projectRoot,'.gitattributes'),'utf8').catch(e => {if(e.code==='ENOENT')return '';throw e;});
+    await fs.writeFile(path.join(root,'.gitattributes'), attributes);
+    git(['add','--','.gitattributes','src/version.ts']);git(['commit','-m','Generated checkout fixture']);
+    await fs.unlink(path.join(root,'src/version.ts'));git(['checkout','--','src/version.ts']);
+    assert.equal(await fs.readFile(path.join(root,'src/version.ts'),'utf8'), expected);
+  } finally {
+    const resolved = await fs.realpath(root), stat = await fs.lstat(root);
+    assert.equal(stat.isSymbolicLink(),false);assert.equal(path.dirname(resolved).toLowerCase(),base.toLowerCase());assert.match(path.basename(resolved),/^nearly-version-checkout-/);
+    await fs.rm(root,{recursive:true,force:true});
+  }
 });
 test('patches, prereleases, ambiguous aliases and incompatible Windows values fail closed', () => {
   for (const value of ['1.0.1','1.0.0-beta.1','1.0.0+build','01.0.0','1.00.0','1.0','65536.0.0','1.0.0\n','../escape']) assert.throws(() => displayVersion(value));
