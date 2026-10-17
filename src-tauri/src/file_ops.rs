@@ -687,7 +687,9 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        path
+        // Engine reservations receive canonical paths from local_path in production.
+        // Windows runners can expose an 8.3 alias through the temporary directory.
+        dunce::canonicalize(path).unwrap()
     }
     #[test]
     fn creation_final_cancel_after_reservation_and_locked_validation_has_zero_mutations() {
