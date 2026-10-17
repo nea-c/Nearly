@@ -113,4 +113,5 @@ Thumbs.db
 !/docs/r2-refinement.md
 !/docs/window-size.md
 !/docs/synchronization.md
+!/docs/github-release.md
 !/scripts/sync-difference-test.mjs

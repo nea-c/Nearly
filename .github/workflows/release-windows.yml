@@ -1,0 +1,159 @@
+name: Manual Windows build and release
+run-name: Nearly ${{ inputs.version }} / ${{ inputs.mode }} / ${{ inputs.commit }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate only, or deliberately publish a stable release
+        type: choice
+        options: [validate, release]
+        default: validate
+        required: true
+      commit:
+        description: Exact reviewed main-history commit (40 lowercase hexadecimal digits)
+        type: string
+        required: true
+      version:
+        description: Exact public version already in the selected source, e.g. r1.0
+        type: string
+        required: true
+      confirmation:
+        description: For release only, type release rX.Y followed by the exact commit SHA
+        type: string
+        default: ''
+        required: false
+
+permissions: {}
+concurrency:
+  group: nearly-manual-windows-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_MODE: ${{ inputs.mode }}
+  RELEASE_COMMIT: ${{ inputs.commit }}
+  RELEASE_TAG: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirmation }}
+
+jobs:
+  build:
+    if: github.repository == 'nea-c/Nearly' && github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout trusted controller from the dispatch workflow revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Validate dispatch inputs before selecting source
+        run: node control/.github/scripts/manual-release.mjs inputs
+      - name: Checkout only the exact selected source commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.commit }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source, version, disabled updater and reachable history privacy
+        run: node control/.github/scripts/manual-release.mjs preflight source
+      - name: Install locked JavaScript dependencies in the ephemeral runner
+        working-directory: source
+        run: npm ci
+      - name: Test the trusted release controller
+        env:
+          NEARLY_TEST_DEPENDENCY_ROOT: ${{ github.workspace }}/source
+        run: node --test control/tests/manual-release.test.mjs control/tests/manual-release-workflow.test.mjs
+      - name: Select the reviewed Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
+      - name: Prepare hash-pinned portable NSIS and anonymous build paths
+        run: ./control/.github/scripts/prepare-windows.ps1 -SourceRoot ./source
+      - name: Fetch locked native dependencies
+        working-directory: source
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Model and TypeScript tests
+        working-directory: source
+        run: npm test
+      - name: Installer contract tests
+        working-directory: source
+        run: npm run test:installer
+      - name: Native tests (serial; ignored fixture cases run below)
+        working-directory: source
+        run: cargo test --offline --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+      - name: Generated localhost difference-sync tests
+        working-directory: source
+        run: node scripts/sync-difference-test.mjs sync_difference_generated_localhost
+      - name: Generated localhost directory-safety tests
+        working-directory: source
+        run: node scripts/sync-difference-test.mjs directory_deletion_generated_localhost
+      - name: Browser regression tests (preinstalled Microsoft Edge)
+        working-directory: source
+        run: npm run test:ui
+      - name: Production browser tests
+        working-directory: source
+        run: npm run test:ui:production
+      - name: Build unsigned installer without running it
+        working-directory: source
+        run: npm run build:installer -- --offline --locked
+      - name: Reaudit exact source and package only the verified distribution
+        id: package
+        run: node control/.github/scripts/manual-release.mjs package source "$env:RUNNER_TEMP/nearly-release"
+      - name: Retain only audited files from this successful run
+        id: artifact
+        if: inputs.mode == 'release'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nearly-windows-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/nearly-release/Nearly_${{ inputs.version }}_x64-setup.exe
+            ${{ runner.temp }}/nearly-release/Nearly_${{ inputs.version }}_x64-setup.exe.sha256
+            ${{ runner.temp }}/nearly-release/manifest.json
+          if-no-files-found: error
+          overwrite: false
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: inputs.mode == 'release' && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout only the trusted controller; never execute target-source code here
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Download the exact immutable artifact ID from this build job
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/nearly-release
+          merge-multiple: true
+      - name: Verify bindings, safely resume owned draft, and publish both assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MANIFEST_SHA256: ${{ needs.build.outputs.manifest-sha256 }}
+        run: node control/.github/scripts/manual-release.mjs publish "$RUNNER_TEMP/nearly-release"
