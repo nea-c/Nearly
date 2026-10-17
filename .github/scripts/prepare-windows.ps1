@@ -31,19 +31,26 @@ Push-Location -LiteralPath $source
 try { node --input-type=module -e "import {requireCachedTools} from './scripts/build-installer.mjs'; await requireCachedTools(process.env.LOCALAPPDATA);" }
 finally { Pop-Location }
 
-$prefixes = @(
-  @($env:USERPROFILE, '/build/profile'),
-  @($env:GITHUB_WORKSPACE, '/build/workspace'),
-  @($env:RUNNER_TEMP, '/build/temp')
-)
+. (Join-Path $PSScriptRoot 'windows-build-paths.ps1')
+foreach($requiredRoot in @($env:USERPROFILE,$env:GITHUB_WORKSPACE,$env:RUNNER_TEMP)) {
+  if (!$requiredRoot) {throw 'Required hosted build root is missing'}
+}
+$prefixes = @(Get-NearlyBuildPathMappings -Roots @(
+  @{From=$env:USERPROFILE;To='/build/profile'},
+  @{From=$env:GITHUB_WORKSPACE;To='/build/workspace'},
+  @{From=$env:RUNNER_TEMP;To='/build/temp'},
+  @{From=$env:TEMP;To='/build/os-temp'},
+  @{From=$env:TMP;To='/build/os-temp'},
+  @{From=$env:CARGO_HOME;To='/build/cargo'},
+  @{From=$env:RUSTUP_HOME;To='/build/toolchain'}
+))
 $flags = @()
 if ($env:CARGO_ENCODED_RUSTFLAGS) { $flags += $env:CARGO_ENCODED_RUSTFLAGS.Split([char]31) }
 elseif ($env:RUSTFLAGS) { throw 'Unexpected free-form RUSTFLAGS; review rather than reparse shell quoting.' }
 $cflags = @($env:CFLAGS, '/experimental:deterministic')
 foreach ($pair in $prefixes) {
-  if (!$pair[0] -or $pair[0] -match '[\s\r\n]') { throw 'Build roots must be explicit and need a reviewed quoting policy if they contain whitespace.' }
-  $flags += "--remap-path-prefix=$($pair[0])=$($pair[1])"
-  $cflags += "/pathmap:$($pair[0])=$($pair[1])"
+  $flags += "--remap-path-prefix=$($pair.From)=$($pair.To)"
+  $cflags += "/pathmap:$($pair.From)=$($pair.To)"
 }
 @(
   "CARGO_ENCODED_RUSTFLAGS=$($flags -join [char]31)",

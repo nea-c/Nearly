@@ -21,10 +21,12 @@ export function parseRequest(env) {
 }
 
 export function auditBytes(bytes, prefixes = [], reviewedExamples = []) {
-  for (const text of [bytes.toString('utf8'), bytes.toString('utf16le'), bytes.subarray(1).toString('utf16le')]) {
+  for (const [encoding,text] of [['utf8',bytes.toString('utf8')], ['utf16le',bytes.toString('utf16le')], ['utf16le-offset1',bytes.subarray(1).toString('utf16le')]]) {
     let normalized = text.replace(/\\+/g, '/').toLowerCase();
     for (const example of reviewedExamples) normalized = normalized.replaceAll(example, 'reviewed-public-source-example');
-    if (/[a-z]:\/+users\/+[^/\s\0]+/.test(normalized) || prefixes.filter(Boolean).some(p => normalized.includes(p.replace(/\\+/g, '/').toLowerCase()))) fail('Release privacy check failed: personal build path');
+    const userPath = /[a-z]:\/+users\/+[^/\s\0]+/.test(normalized);
+    const prefixIndex = prefixes.findIndex(p => p && normalized.includes(p.replace(/\\+/g, '/').toLowerCase()));
+    if (userPath || prefixIndex >= 0) fail(`Release privacy check failed: personal build path (encoding=${encoding}; path=${userPath ? 'windows-user' : 'known-prefix-'+prefixIndex})`);
     // SSH/crypto parsers legitimately embed format markers. A marker alone is
     // not key material; reject PEM bodies, including JSON-escaped key strings.
     const pem = text.replace(/\\r\\n|\\n/g, '\n');
@@ -99,7 +101,8 @@ export async function createPackage(root, output, request, {payloadPath, tree}) 
   pe(installer, 0x14c); pe(payload, 0x8664);
   if (metadata.version !== request.version || metadata.displayVersion !== request.tag || metadata.identifier !== 'local.syncfiles.native' || metadata.payloadArchitecture !== 'x64' || metadata.installMode !== 'currentUser' || metadata.settingsIncluded !== false || metadata.adjacentSettingsPreserved !== true || metadata.updaterInstallationEnabled !== false || metadata.signed !== false || metadata.bytes !== installer.length || metadata.sha256 !== sha256(installer) || metadata.embeddedApplicationSha256 !== sha256(payload)) fail('Installer source/payload metadata mismatch');
   const prefixes = [process.env.USERPROFILE, process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP, root];
-  auditBytes(installer, prefixes); auditBytes(payload, prefixes);
+  try {auditBytes(installer, prefixes);} catch(error) {fail('Installer: '+error.message);}
+  try {auditBytes(payload, prefixes);} catch(error) {fail('Payload: '+error.message);}
   const checksum = Buffer.from(`${sha256(installer)}  ${name}\n`, 'utf8');
   const assets = [{name, data: installer}, {name: checksumName, data: checksum}].map(a => ({name: a.name, bytes: a.data.length, sha256: sha256(a.data)}));
   const manifest = {schemaVersion: 1, repository, commit: request.commit, tree, tag: request.tag, version: request.version, workflowCommit: request.workflowCommit, runId: request.runId, assets};
