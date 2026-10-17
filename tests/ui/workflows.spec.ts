@@ -20,7 +20,7 @@ for (const fail of [false, true]) {
                       user: "test",
                       auth: "key",
                       mode: "sftp",
-                  hostKey: "SHA256:fixture-existing-pin",
+                      hostKey: "SHA256:fixture-existing-pin",
                     },
                   ],
                   history: {},
@@ -69,7 +69,8 @@ for (const fail of [false, true]) {
     await expect(page.locator("#retry")).toBeDisabled();
     await page.locator("[data-close]").click();
     await expect(page.locator(".sync-roots")).toHaveCount(0);
-    await expect(page.locator("[data-close]")).toHaveCount(1);
+    await expect(page.locator("[data-close]")).toHaveCount(0);
+    await expect(page.locator("#restore-tab")).toHaveCount(0);
   });
 }
 test("late directory response cannot replace the current folder", async ({
@@ -80,7 +81,21 @@ test("late directory response cannot replace the current folder", async ({
       core: {
         invoke: async (cmd, args) => {
           if (cmd === "load_settings")
-            return { version: 1, profiles: [{ id: "fixture", name: "Fixture", mode: "mock", host: "fixture.invalid", port: 22, user: "test", auth: "key" }], history: {} };
+            return {
+              version: 1,
+              profiles: [
+                {
+                  id: "fixture",
+                  name: "Fixture",
+                  mode: "mock",
+                  host: "fixture.invalid",
+                  port: 22,
+                  user: "test",
+                  auth: "key",
+                },
+              ],
+              history: {},
+            };
           if (cmd === "connect_session") return { path: "/", entries: [] };
           if (cmd === "list_drives") return [{ path: "C:\\", name: "C:" }];
           if (cmd === "default_folder") return "C:\\default";
@@ -194,7 +209,7 @@ test("pending sync startup freezes settings and cancellation restores them", asy
     window.__TAURI__ = {
       event: {
         listen: async (_name, handler) => {
-          window.closeBlockedHandler = handler;
+          if (_name === "sync-close-blocked") window.closeBlockedHandler = handler;
           return () => {};
         },
       },
@@ -278,3 +293,4 @@ test.beforeEach(async ({ page }) => {
     page.getByRole("heading", { name: "リモート", exact: true }),
   ).toBeVisible();
 });
+

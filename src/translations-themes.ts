@@ -1,4 +1,4 @@
 export const themeTranslations: Record<string, string> = {
-  "フォレスト": "Forest",
+  "ジェイド": "Jade",
   "ミント": "Mint",
 };

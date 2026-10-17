@@ -1,4 +1,5 @@
 import {tabDragTranslations} from "./translations-tab-drag.js";
+import {syncActionTranslations} from "./translations-sync-actions.js";
 import {themeTranslations} from "./translations-themes.js";
 import {tabContextTranslations} from "./translations-tab-context.js";
 import {archiveTranslations} from "./translations-archive.js";
@@ -28,5 +29,5 @@ function merge(parts:Record<string,string>[]):Record<string,string>{
   }
   return merged;
 }
-export const catalog=merge([shared,appTranslations,explorerTranslations,archiveTranslations,retainedTranslations,themeTranslations,tabContextTranslations,tabDragTranslations]);
-export const ownedMessages=merge([sharedMessages,appErrorTranslations,explorerErrorTranslations,retainedTranslations,tabContextTranslations,tabDragTranslations]);
+export const catalog=merge([shared,appTranslations,explorerTranslations,archiveTranslations,retainedTranslations,themeTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);
+export const ownedMessages=merge([sharedMessages,appErrorTranslations,explorerErrorTranslations,retainedTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);

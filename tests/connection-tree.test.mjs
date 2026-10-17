@@ -14,6 +14,47 @@ const p = (id) => ({
   hostKey: "",
 });
 
+test("historical retained snapshots do not prevent deleting an unused saved profile", () => {
+  const profile = p("a");
+  const retainedSyncs = [undefined, "closed-owner", "foreign-owner"].map(
+    (owner, i) => ({
+      id: "retained-" + i,
+      profile: { ...profile },
+      local: "C:\\history",
+      remote: "/history",
+      exclusionRules: "",
+      recursive: true,
+      deleteRemoved: false,
+      pendingState: "unknown",
+      ...(owner ? { ownerTabId: owner, ownerTabClosed: i === 1 } : {}),
+    }),
+  );
+  const s = new Store({ profiles: [profile, p("b")], retainedSyncs });
+  const metadata = JSON.stringify(s.retainedSyncs);
+  s.deleteConnectionNode("a");
+  assert.deepEqual(
+    s.profiles.map((p) => p.id),
+    ["b"],
+  );
+  assert.equal(JSON.stringify(s.retainedSyncs), metadata);
+  assert.equal(
+    JSON.stringify(new Store(s.serialize()).retainedSyncs),
+    metadata,
+  );
+});
+
+test("stopped but busy runtime work still prevents saved connection deletion", () => {
+  const s = new Store({ profiles: [p("a")] });
+  s.tabs.push({
+    id: "busy-stop",
+    profile: p("a"),
+    status: "stopped",
+    busy: true,
+  });
+  assert.throws(() => s.deleteConnectionNode("a"));
+  assert.equal(s.profiles.length, 1);
+});
+
 test("connection deletion is metadata-only, promotes group children and protects live runtime references", () => {
   const s = new Store({ profiles: [p("a"), p("b")] });
   const group = s.createConnectionGroup("Group"),

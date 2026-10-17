@@ -1,0 +1,17 @@
+.startup-update-dialog {
+  font: inherit; box-sizing: border-box; width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px); overflow: auto; margin: auto; padding: 22px;
+  border: 1px solid var(--border-main, #b9c8d9); border-radius: 8px;
+  background: var(--surface-panel, #fff); color: var(--text-main, #24364c);
+  box-shadow: 0 16px 56px #0007;
+}
+.startup-update-dialog::backdrop { background: #0007; }
+.startup-update-dialog h2 { margin: 0 0 14px; font-size: 16px; }
+.startup-update-dialog p { margin: 10px 0; line-height: 1.65; font-size: 13px; overflow-wrap: anywhere; }
+.startup-update-dialog progress { width: 100%; height: 12px; margin: 10px 0; }
+.startup-update-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.startup-update-actions button { font: inherit; padding: 8px 14px; border: 1px solid var(--border-main, #b9c8d9); border-radius: 5px; color: var(--text-main, #24364c); background: var(--surface-raised, #f4f7fb); cursor: pointer; }
+.startup-update-actions button:disabled { opacity: .5; cursor: default; }
+.startup-update-actions button:focus-visible { outline: 2px solid var(--focus-ring, #3c82ce); outline-offset: 3px; }
+.startup-update-actions .primary { background: var(--action-bg, #2962a0); color: var(--action-text, #fff); }
+

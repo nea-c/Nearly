@@ -14,11 +14,14 @@ const MAX_RECORDS: usize = 1024;
 const MAX_DEPTH: usize = 64;
 // These are per-request writer gates. Document::settings() resets them; they
 // describe intent for this transaction rather than any persisted user value.
-const SAVE_INTENT_FIELDS: [&str; 3] = ["browseLocationsChanged", "connectionTreeChanged", "bookmarkTreeChanged"];
+const SAVE_INTENT_FIELDS: [&str; 4] = ["browseLocationsChanged", "connectionTreeChanged", "bookmarkTreeChanged", "lastSelectedProfileChanged"];
 
 fn persistent_snapshot(mut value: Value) -> Value {
     let object = value.as_object_mut().unwrap();
     object.remove("settingsRevision");
+    // Selection has explicit last-commit semantics rather than snapshot merge
+    // semantics: periodic writes from another window cannot reselect its tab.
+    object.remove("lastSelectedProfileId");
     for key in SAVE_INTENT_FIELDS { object.remove(key); }
     value
 }
@@ -84,6 +87,14 @@ impl SettingsClients {
         if rev > revision(current)? { return Err("Settings revision is ahead of storage".into()); }
         let intents: Vec<_> = SAVE_INTENT_FIELDS.iter().filter_map(|key|
             proposed.get(*key).map(|value| ((*key).to_owned(), value.clone()))).collect();
+        let selection_changed = proposed.get("lastSelectedProfileChanged").and_then(Value::as_bool) == Some(true);
+        let selection_present = current.get("lastSelectedProfileId").is_some() || selection_changed;
+        let selection = if selection_changed {
+            proposed.get("lastSelectedProfileId").cloned().unwrap_or(Value::Null)
+        } else { current.get("lastSelectedProfileId").cloned().unwrap_or(Value::Null) };
+        if !selection.is_null() && !selection.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128) {
+            return Err("Invalid last selected profile ID".into());
+        }
         let proposed = persistent_snapshot(proposed.clone());
         let current = persistent_snapshot(current.clone());
         let mut result = None;
@@ -100,6 +111,15 @@ impl SettingsClients {
             result = Some(merged);
         }
         let mut merged = result.unwrap();
+        // Profile deletion takes precedence over a selection from a stale window.
+        // Startup uses its deterministic first-profile fallback for null.
+        let selection = if selection.as_str().is_some_and(|id| merged.get("profiles")
+            .and_then(Value::as_array).is_some_and(|profiles| profiles.iter().any(|p| p.get("id").and_then(Value::as_str) == Some(id)))) {
+            selection
+        } else { Value::Null };
+        if selection_present {
+            merged.as_object_mut().unwrap().insert("lastSelectedProfileId".into(), selection);
+        }
         merged.as_object_mut().ok_or("Settings root must be an object")?
             .insert("settingsRevision".into(), current_revision.into());
         // Restore only this caller's gates after comparing persistent results.
@@ -181,6 +201,33 @@ mod tests {
     }
     fn with_revision(mut value: Value, rev: u64) -> Value {
         value["settingsRevision"] = rev.into(); value
+    }
+
+    #[test]
+    fn explicit_selection_is_last_committed_and_unrelated_stale_writes_preserve_it() {
+        let mut base = initial(); base["profiles"] = json!([{"id":"first"},{"id":"last"}]);
+        base["lastSelectedProfileId"] = json!("first");
+        let mut clients=setup_clients(&base); let mut disk=base.clone();
+        let mut a=base.clone();a["lastSelectedProfileId"]=json!("last");a["lastSelectedProfileChanged"]=json!(true);
+        save(&mut clients,"a",&a,&mut disk);assert_eq!(disk["lastSelectedProfileId"],"last");
+        let mut b=base.clone();b["theme"]=json!("mint");
+        save(&mut clients,"b",&b,&mut disk);assert_eq!(disk["lastSelectedProfileId"],"last");
+        b=with_revision(b,2);b["lastSelectedProfileChanged"]=json!(true);
+        save(&mut clients,"b",&b,&mut disk);assert_eq!(disk["lastSelectedProfileId"],"first");
+        a=with_revision(a,1);a["lastSelectedProfileChanged"]=json!(false);a["language"]=json!("en");
+        save(&mut clients,"a",&a,&mut disk);assert_eq!(disk["lastSelectedProfileId"],"first");
+        assert_eq!(disk["theme"],"mint");assert_eq!(disk["language"],"en");
+    }
+
+    #[test]
+    fn deleting_selected_profile_and_stale_selection_never_resurrect_deleted_id() {
+        let mut base=initial();base["profiles"]=json!([{"id":"first"},{"id":"last"}]);
+        base["lastSelectedProfileId"]=json!("last");
+        let mut clients=setup_clients(&base);let mut disk=base.clone();
+        let mut a=base.clone();a["profiles"]=json!([{"id":"first"}]);save(&mut clients,"a",&a,&mut disk);
+        assert!(disk["lastSelectedProfileId"].is_null());
+        let mut b=base.clone();b["lastSelectedProfileChanged"]=json!(true);save(&mut clients,"b",&b,&mut disk);
+        assert!(disk["lastSelectedProfileId"].is_null());assert_eq!(disk["profiles"],json!([{"id":"first"}]));
     }
 
     #[test]

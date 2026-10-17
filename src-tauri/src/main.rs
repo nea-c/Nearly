@@ -23,7 +23,16 @@ mod settings_clients;
 mod sftp;
 mod unified_settings;
 mod window_ownership;
+mod window_size;
 mod tab_drag;
+mod startup_update;
+mod version;
+mod update_package;
+mod update_handoff;
+mod update_cleanup;
+mod update_transaction;
+mod update_restart;
+mod update_runtime;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -42,8 +51,11 @@ struct AppState {
     sessions: Arc<sessions::Sessions>,
     settings: Mutex<()>, 
     settings_clients: Mutex<settings_clients::SettingsClients>,
+    window_size: Mutex<window_size::Session>,
     ownership: Arc<Mutex<window_ownership::Registry>>,
     tab_drag: Arc<tab_drag::Controller>,
+    startup_update: startup_update::StartupUpdate,
+    update_restart: update_runtime::Runtime,
     host_verification: Arc<host_verification::HostVerification>,
 }
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
@@ -71,6 +83,10 @@ struct Settings {
     #[serde(rename = "settingsRevision", default)]
     settings_revision: u64,
     profiles: Vec<sftp::Profile>,
+    #[serde(rename = "lastSelectedProfileId", default)]
+    last_selected_profile_id: Option<String>,
+    #[serde(rename = "lastSelectedProfileChanged", default)]
+    last_selected_profile_changed: bool,
     history: HashMap<String, String>,
     #[serde(default)]
     theme: Theme,
@@ -186,6 +202,8 @@ impl Default for Settings {
             version: 0,
             settings_revision: 0,
             profiles: vec![],
+            last_selected_profile_id: None,
+            last_selected_profile_changed: false,
             history: HashMap::new(),
             theme: Theme::System,
             language: Language::Ja,
@@ -223,6 +241,8 @@ struct Appearance {
     local_pane_ratio: f64,
     local_tree_ratio: f64,
     remote_tree_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_size: Option<window_size::SavedSize>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -399,13 +419,78 @@ fn validate_saved_rules(rules: &HashMap<String, String>) -> Result<(), String> {
 fn settings_path(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
     settings_location::resolve()
 }
+fn ensure_settings_window_open(state:&AppState,label:&str)->Result<(),String>{state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_registered(label)}
 #[tauri::command]
 fn load_settings(window: tauri::WebviewWindow, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Settings, String> {
     let _lock = state.settings.lock().map_err(|_| "Settings lock failed")?;
+    ensure_settings_window_open(&state,window.label())?;
     let data = load_saved_settings(&settings_path(&app)?)?;
     state.settings_clients.lock().map_err(|_| "Settings client lock failed")?
         .remember_loaded(window.label(), serde_json::to_value(&data).map_err(|e| e.to_string())?)?;
+    if window.label()=="main" {state.window_size.lock().map_err(|_|"Window size lock failed")?.activate();}
+    if window.label()=="main" {state.update_restart.settings_loaded();}
     Ok(data)
+}
+fn restore_main_window_size(app:&tauri::AppHandle){
+    let Some(window)=app.get_webview_window("main") else{return};
+    let saved=(||->Result<_,String>{
+        let state=app.state::<AppState>();let _lock=state.settings.lock().map_err(|_|"Settings lock failed")?;
+        Ok(unified_settings::Document::read(&settings_path(app)?)?.window_size())
+    })();
+    let saved=match saved{Ok(saved)=>saved,Err(error)=>{eprintln!("Window size restore settings unavailable: {error}");None}};
+    match window_size::restore(&window,saved){
+        Ok(restored)=>{if let Ok(mut session)=app.state::<AppState>().window_size.lock(){session.seed(restored);}},
+        Err(error)=>{eprintln!("Window size restore unavailable: {error}");},
+    }
+    // The generated main window starts hidden; even a corrupt preference never
+    // prevents the ordinary renderer from presenting its settings-load error.
+    if let Err(error)=window.show(){eprintln!("Main window display failed: {error}");}
+}
+fn persist_main_window_size(app:&tauri::AppHandle,quiet:bool)->Result<(),String>{
+    let state=app.state::<AppState>();
+    let revision=persist_window_size_transaction(&state,&settings_path(app)?,quiet,
+        ||state.settings.lock().map_err(|_|"Settings lock failed".into()))?;
+    if let Some(revision)=revision{let _=app.emit("settings-changed",serde_json::json!({"settingsRevision":revision}));}
+    Ok(())
+}
+fn persist_window_size_transaction<'a,L>(state:&'a AppState,path:&Path,quiet:bool,lock_settings:L)->Result<Option<u64>,String>
+where L:FnOnce()->Result<std::sync::MutexGuard<'a,()>,String>{
+    let _lock=lock_settings()?;
+    // Select the generation only after serialization. A delayed worker must
+    // observe a newer close flush's acknowledgement instead of writing its old
+    // pre-lock size after that flush has already cleared the dirty flag.
+    let pending=state.window_size.lock().map_err(|_|"Window size lock failed")?.pending(quiet);
+    let Some((size,generation))=pending else{return Ok(None)};
+    ensure_settings_window_open(state,"main")?;
+    let revision=unified_settings::save_window_size(path,size)?;
+    state.window_size.lock().map_err(|_|"Window size lock failed")?.acknowledge(generation);
+    Ok(revision)
+}
+fn observe_main_window_size(app:&tauri::AppHandle,label:&str){
+    if label!="main"{return}
+    let Some(window)=app.get_webview_window("main") else{return};
+    let Ok((width,height,maximized,minimized,fullscreen))=window_size::capture(&window) else{return};
+    let state=app.state::<AppState>();
+    let start=state.window_size.lock().map(|mut session|session.observe(label,width,height,maximized,minimized,fullscreen)).unwrap_or(false);
+    if !start{return}
+    let app=app.clone();
+    tauri::async_runtime::spawn(async move{
+        loop {
+            tokio::time::sleep(window_size::SAVE_DELAY).await;
+            if let Err(error)=persist_main_window_size(&app,true){
+                eprintln!("Window size save unavailable: {error}");
+                if let Ok(mut session)=app.state::<AppState>().window_size.lock(){session.stop_worker();}return
+            }
+            let state=app.state::<AppState>();
+            let Ok(mut session)=state.window_size.lock() else{return};
+            if !session.is_dirty(){session.stop_worker();return}
+        }
+    });
+}
+fn flush_main_window_size(app:&tauri::AppHandle,label:&str){
+    if label!="main"{return}
+    observe_main_window_size(app,label);
+    if let Err(error)=persist_main_window_size(app,false){eprintln!("Window size final save unavailable: {error}");}
 }
 fn load_saved_settings(path: &Path) -> Result<Settings, String> {
     Ok(unified_settings::Document::read(path)?.settings())
@@ -433,6 +518,9 @@ fn save_settings_files(path: &Path, data: &Settings) -> Result<u64, String> {
 fn validate_settings(data: &Settings) -> Result<(), String> {
     if data.version != 1 || data.profiles.len() > 200 || data.history.len() > 5000 {
         return Err("Settings limit or version invalid".into());
+    }
+    if data.last_selected_profile_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control)) {
+        return Err("Invalid last selected profile ID".into());
     }
     for p in &data.profiles {
         if p.auth != "key"
@@ -690,6 +778,8 @@ fn save_settings(
     data: Settings,
 ) -> Result<u64, String> {
     let _lock = state.settings.lock().map_err(|_| "Settings lock failed")?;
+    ensure_settings_window_open(&state,window.label())?;
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_mutable(window.label())?;
     let path = settings_path(&app)?;
     let current = load_saved_settings(&path)?;
     let proposed = serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -784,6 +874,7 @@ fn approve_host_key(
 ) -> Result<ApprovedProfile, String> {
     { let mut ownership = state.ownership.lock().map_err(|_| "Ownership lock failed")?; window_ownership::Registry::scoped(&mut ownership.probes, window.label(), &request_id, false)?; }
     let _lock = state.settings.lock().map_err(|_| "Settings lock failed")?;
+    ensure_settings_window_open(&state,window.label())?;
     let path = settings_path(&app)?;
     let mut clients = state.settings_clients.lock().map_err(|_| "Settings client lock failed")?;
     let baselines = clients.profile_approval_baselines(window.label(), expected_revision, &profile.id)?;
@@ -1325,6 +1416,7 @@ fn cancel_native_operation(state:&AppState,label:&str,id:&str)->Result<(),String
     Ok(())
 }
 fn release_closed_window_registry(state:&AppState,label:&str){
+    state.startup_update.cancel(label,true);
     state.tab_drag.forget(label);
     if let Ok(mut registry)=state.ownership.lock(){
         for (id,owner) in &registry.cancelled_preparations{if owner==label{state.engine.discard_prepared_operation(id);}}
@@ -1377,6 +1469,16 @@ impl Drop for NativeOperation {fn drop(&mut self){if let Ok(mut r)=self.registry
     #[test]fn dispatch_reservation_blocks_close_before_engine_claim_and_drops_cleanly(){let state=AppState::default();state.ownership.lock().unwrap().bootstrap("main").unwrap();let dispatch=NativeOperation::claim(&state,"main","op",None).unwrap();assert!(!state.engine.operation_claimed("op").unwrap());{let mut r=state.ownership.lock().unwrap();assert!(r.active_operations.contains("op"));assert!(r.seal_close("main").is_err());}assert!(NativeOperation::claim(&state,"main","op",None).is_err());drop(dispatch);assert!(state.ownership.lock().unwrap().seal_close("main").is_ok());}
     #[test]fn cancelled_preparations_are_released_after_each_owner_closes(){let state=AppState::default();for n in 0..8{let label=format!("window-{n}");let id=format!("op-{n}");{let mut r=state.ownership.lock().unwrap();r.bootstrap(&label).unwrap();r.operations.insert(id.clone(),label.clone());}state.engine.prepare_operation(&id).unwrap();cancel_native_operation(&state,&label,&id).unwrap();state.ownership.lock().unwrap().seal_close(&label).unwrap();release_closed_window_registry(&state,&label);}for n in 0..8{state.engine.prepare_operation(&format!("fresh-{n}")).unwrap();}assert!(state.engine.prepare_operation("ninth").is_err());}
     #[test]fn queued_dispatch_still_observes_early_cancellation(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.operations.insert("early".into(),"main".into());}state.engine.prepare_operation("early").unwrap();cancel_native_operation(&state,"main","early").unwrap();let _dispatch=NativeOperation::claim(&state,"main","early",None).unwrap();assert!(state.engine.claim_operation("early").unwrap().load(Ordering::SeqCst));state.engine.finish_operation("early");}
+    #[test]fn empty_window_close_ignores_other_windows_pending_sync_without_stopping_it(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("other","other-tab").unwrap();r.prepare_job("other","other-job",Some("other-tab")).unwrap();}state.engine.prepare("other-job".into()).unwrap();assert!(seal_native_window_close(&state,"main",true).unwrap().is_empty());assert!(state.engine.window_busy(&["other-job".into()],&[]).unwrap());assert!(seal_native_window_close(&state,"other",false).is_err());assert!(state.ownership.lock().unwrap().registered("other").is_ok());}
+    #[test]fn committed_job_moves_before_empty_source_close_guard_is_evaluated(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","moving").unwrap();r.prepare_job("main","moving-job",Some("moving")).unwrap();let t=r.begin_drag("main","moving",serde_json::json!({"version":1,"workspace":{"id":"moving"}})).unwrap();let t=r.activate_drag("main",&t.token,Some(("other",0,None))).unwrap();r.commit("other",&t.token).unwrap();}state.engine.prepare("moving-job".into()).unwrap();assert!(seal_native_window_close(&state,"main",true).unwrap().is_empty());assert!(state.ownership.lock().unwrap().job_owner("other","moving-job").is_ok());assert!(state.engine.window_busy(&["moving-job".into()],&[]).unwrap());assert!(seal_native_window_close(&state,"other",false).is_err());}
+    #[test]fn empty_window_with_own_prepared_legacy_job_is_not_closed_and_is_unsealed(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.prepare_job("main","own-job",None).unwrap();}state.engine.prepare("own-job".into()).unwrap();assert!(seal_native_window_close(&state,"main",true).is_err());assert!(state.ownership.lock().unwrap().registered("main").is_ok());assert!(state.engine.window_busy(&["own-job".into()],&[]).unwrap());}
+    struct CloseFixture(PathBuf);
+    impl CloseFixture{fn new()->Self{let path=std::env::temp_dir().join(format!("nearly-close-generated-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::create_dir(&path).unwrap();Self(path)}fn path(&self)->PathBuf{self.0.join("settings.json")}}
+    impl Drop for CloseFixture{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+    fn close_fixture()->(AppState,CloseFixture,Vec<String>){let fixture=CloseFixture::new();let mut data=Settings{version:1,..Default::default()};data.retained_syncs.push(serde_json::from_value(serde_json::json!({"id":"owned-context","ownerTabId":"own-tab","ownerTabClosed":false,"profile":{"id":"generated","name":"Generated","host":"never-contacted.invalid","port":22,"user":"fixture","auth":"key","mode":"mock","keyFile":"","hostKey":""},"local":"C:\\generated\\close","remote":"/close","exclusionRules":"*.tmp","deleteRemoved":false,"recursive":true,"pendingState":"unreflected"})).unwrap());unified_settings::save(&fixture.path(),&data).unwrap();let state=AppState::default();{let mut registry=state.ownership.lock().unwrap();registry.bootstrap("main").unwrap();registry.claim("main","own-tab").unwrap();}let ids=seal_native_window_close(&state,"main",false).unwrap();(state,fixture,ids)}
+    #[test]fn closing_settings_client_is_blocked_until_failed_destroy_rollback_restores_and_unseals(){let(state,fixture,ids)=close_fixture();let path=fixture.path();let before=unified_settings::Document::read(&path).unwrap().settings();let mut notices=Vec::new();assert!(ensure_settings_window_open(&state,"main").is_err());let error=destroy_with_retained_cleanup(&state,"main",Some(&path),&ids,||{assert!(ensure_settings_window_open(&state,"main").is_err());let _lock=state.settings.lock().unwrap();let mut foreign=unified_settings::Document::read(&path).unwrap().settings();assert!(foreign.retained_syncs.is_empty());foreign.theme=Theme::Mint;unified_settings::save(&path,&foreign).unwrap();Err("Injected native destroy failure".into())},|revision|notices.push(revision)).unwrap_err();assert!(error.contains("Injected native destroy failure"));assert!(!error.contains("could not be restored"));assert!(ensure_settings_window_open(&state,"main").is_ok());assert!(state.ownership.lock().unwrap().owner("main","own-tab").is_ok());let after=unified_settings::Document::read(&path).unwrap().settings();assert!(matches!(after.theme,Theme::Mint));assert_eq!(serde_json::to_value(after.retained_syncs).unwrap(),serde_json::to_value(before.retained_syncs).unwrap());assert_eq!(notices.len(),2);}
+    #[test]fn retained_cleanup_failure_never_destroys_and_unseals_original_window(){let(state,fixture,ids)=close_fixture();let path=fixture.path();let bytes=std::fs::read(&path).unwrap();std::fs::create_dir(path.with_extension("backup.json")).unwrap();let mut destroyed=false;let error=destroy_with_retained_cleanup(&state,"main",Some(&path),&ids,||{destroyed=true;Ok(())},|_|panic!("Failed cleanup cannot publish a revision")).unwrap_err();assert!(error.contains("this window remains open"));assert!(!destroyed);assert!(ensure_settings_window_open(&state,"main").is_ok());assert_eq!(std::fs::read(&path).unwrap(),bytes);}
+    #[test]fn failed_native_destroy_and_failed_restore_report_both_and_leave_window_usable(){let(state,fixture,ids)=close_fixture();let path=fixture.path();let error=destroy_with_retained_cleanup(&state,"main",Some(&path),&ids,||{let backup=path.with_extension("backup.json");std::fs::remove_file(&backup).unwrap();std::fs::create_dir(&backup).unwrap();Err("Injected destroy failure".into())},|_|{}).unwrap_err();assert!(error.contains("Injected destroy failure"));assert!(error.contains("context could not be restored"));assert!(error.contains("This window remains open"));assert!(ensure_settings_window_open(&state,"main").is_ok());assert!(state.ownership.lock().unwrap().owner("main","own-tab").is_ok());assert!(unified_settings::Document::read(&path).unwrap().settings().retained_syncs.is_empty());}
 }
 #[tauri::command]
 fn register_window(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<window_ownership::Bootstrap,String>{
@@ -1400,6 +1502,7 @@ fn transfer_event(app:&tauri::AppHandle,t:&window_ownership::Transfer){for label
 fn abort_native_transfer(app:&tauri::AppHandle,label:&str,token:&str)->Result<window_ownership::Transfer,String>{
     let state=app.state::<AppState>();
     let t=state.ownership.lock().map_err(|_|"Ownership lock failed")?.abort(label,token)?;
+    state.tab_drag.cancel_named(token);
     transfer_event(app,&t);
     if t.target_kind=="new"{if let Some(w)=app.get_webview_window(&t.target_label){let _=w.destroy();}state.ownership.lock().map_err(|_|"Ownership lock failed")?.closed(&t.target_label);}
     Ok(t)
@@ -1421,6 +1524,34 @@ fn create_workspace_window(app:&tauri::AppHandle,label:&str)->Result<tauri::Webv
     let result=app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed".to_owned())?.bootstrap(label);
     if let Err(e)=result{let _=w.destroy();return Err(e);}Ok(w)
 }
+// A provisional detached app renders real workspace DOM while the source remains
+// its sole native owner. Only the native mouse-up activates ordinary transfer.
+fn create_drag_preview(app:&tauri::AppHandle,source:&str,token:&str,x:i32,y:i32,grab_x:f64,grab_y:f64)->Result<tauri::WebviewWindow,String>{
+    let transfer=app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.preview_drag(source,token)?;
+    let result=(||{let w=create_workspace_window(app,&transfer.target_label)?;w.set_ignore_cursor_events(true).map_err(|e|e.to_string())?;
+        #[cfg(windows)]tab_drag::place(&w,x,y,grab_x,grab_y)?;
+        #[cfg(not(windows))]let _=(x,y,grab_x,grab_y);
+        Ok(w)})();
+    if result.is_err(){discard_drag_preview(app,&transfer.target_label);}
+    result
+}
+fn discard_drag_preview(app:&tauri::AppHandle,label:&str){
+    let state=app.state::<AppState>();
+    if !state.ownership.lock().map(|r|r.owned(label).is_empty()).unwrap_or(false){return;}
+    if let Some(w)=app.get_webview_window(label){let _=w.destroy();}
+    state.tab_drag.forget(label);if let Ok(mut r)=state.ownership.lock(){r.closed(label);};
+}
+fn cancel_drag_preview_close(app:&tauri::AppHandle,label:&str)->Result<bool,String>{
+    let transfer=app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.preview_for_window(label);
+    if let Some(t)=transfer{abort_native_transfer(app,label,&t.token)?;return Ok(true);}Ok(false)
+}
+#[tauri::command]
+fn workspace_drag_preview_ready(window:tauri::WebviewWindow,app:tauri::AppHandle,token:String)->Result<window_ownership::Transfer,String>{
+    let t={let state=app.state::<AppState>();let r=state.ownership.lock().map_err(|_|"Ownership lock failed")?;r.registered(window.label())?;let t=r.status(window.label(),&token)?;
+        if t.target_label!=window.label()||t.target_kind!="new"||!["dragging","pending","committed"].contains(&t.phase.as_str()){return Err("Window is not a detached preview".into());}t};
+    if t.phase=="dragging"{app.state::<AppState>().tab_drag.preview_ready(&t.token);window.show().map_err(|e|e.to_string())?;if let Some(source)=app.get_webview_window(&t.source_label){let _=source.emit("tab-drag-preview-ready",serde_json::json!({"workspaceId":t.workspace_id,"dragId":t.token}));}}
+    Ok(t)
+}
 fn transfer_timeout(app:&tauri::AppHandle,t:&window_ownership::Transfer){let app=app.clone();let token=t.token.clone();let source=t.source_label.clone();tauri::async_runtime::spawn(async move{tokio::time::sleep(std::time::Duration::from_secs(30)).await;let _=abort_native_transfer(&app,&source,&token);});}
 fn stage_drag_transfer(app:&tauri::AppHandle,source:&str,token:&str,target:Option<(String,usize,Option<String>)>,x:i32,y:i32,grab_x:f64,grab_y:f64)->Result<window_ownership::Transfer,String>{
     let state=app.state::<AppState>();
@@ -1428,7 +1559,8 @@ fn stage_drag_transfer(app:&tauri::AppHandle,source:&str,token:&str,target:Optio
         if let Some((label,_,_))=target.as_ref(){let ids=r.owned(label);if state.sessions.window_busy(&ids)?||state.engine.starts_pending(&r.job_ids(label))?||r.probes.iter().any(|(id,owner)|owner==label&&state.host_verification.request_pending(id).unwrap_or(true)){return Err("Target window is busy".into());}}
         r.activate_drag(source,token,target.as_ref().map(|(label,index,before)|(label.as_str(),*index,before.clone())))?};
     if transfer.target_kind=="new"{
-        let result=(||->Result<(),String>{let w=create_workspace_window(app,&transfer.target_label)?;
+        let result=(||->Result<(),String>{let w=if let Some(w)=app.get_webview_window(&transfer.target_label){w}else{create_workspace_window(app,&transfer.target_label)?};
+            w.set_ignore_cursor_events(false).map_err(|e|e.to_string())?;
             #[cfg(windows)]tab_drag::place(&w,x,y,grab_x,grab_y)?;
             #[cfg(not(windows))]let _=(x,y,grab_x,grab_y,w);
             Ok(())})();if let Err(e)=result{let _=abort_native_transfer(app,source,token);return Err(e);}
@@ -1449,6 +1581,133 @@ fn open_blank_window(app:tauri::AppHandle){
     if spawn.is_err(){if let Ok(mut r)=state.ownership.lock(){r.finish_spawn(&label);}shutdown_if_idle(&app);}
 }
 fn shutdown_if_idle(app:&tauri::AppHandle)->bool{let state=app.state::<AppState>();let idle=state.ownership.lock().map(|mut r|r.seal_shutdown_if_idle()).unwrap_or(false);if idle{state.sessions.begin_shutdown();state.sessions.shutdown();state.host_verification.shutdown();app.exit(0);}idle}
+fn seal_native_window_close(state:&AppState,label:&str,require_empty:bool)->Result<Vec<String>,String>{
+    let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    if registry.probes.iter().any(|(id,owner)|owner==label&&state.host_verification.request_pending(id).unwrap_or(true)){return Err("Finish host verification before closing".into());}
+    let ids=if require_empty{registry.seal_empty_close(label)?}else{registry.seal_close(label)?};
+    let jobs=registry.job_ids(label);
+    match(state.sessions.window_busy(&ids),state.engine.window_busy(&jobs,&[])){
+        (Ok(false),Ok(false))=>Ok(ids),
+        _=>{registry.unseal(label);Err("Stop this window's syncs and finish connecting before closing".into())}
+    }
+}
+fn complete_native_window_close(app:&tauri::AppHandle,label:&str,ids:Vec<String>)->Result<(),String>{
+    let state=app.state::<AppState>();
+    let path=if ids.is_empty(){None}else{match settings_path(app){Ok(path)=>Some(path),Err(error)=>{unseal_failed_close(&state,label);return Err(error);}}};
+    destroy_with_retained_cleanup(&state,label,path.as_deref(),&ids,||{
+        if let Some(window)=app.get_webview_window(label){window.destroy().map_err(|error|format!("Unable to close this window: {error}"))?;}Ok(())
+    },|revision|{let payload=serde_json::json!({"settingsRevision":revision});for(other_label,window)in app.webview_windows(){if other_label!=label&&other_label!="tab-drag-preview"{let _=window.emit("settings-changed",&payload);}}})?;
+    // Only IDs captured under this label's close seal may be disconnected. A
+    // committed transfer has already moved its IDs/jobs to the destination.
+    for id in ids{if let Ok(watch)=state.local_watch.status(&id){let _=state.local_watch.unwatch(&id,watch.token);}let _=state.sessions.disconnect(&id);}
+    if let Ok(mut clients)=state.settings_clients.lock(){clients.forget(label);}
+    release_closed_window_registry(&state,label);shutdown_if_idle(app);Ok(())
+}
+fn unseal_failed_close(state:&AppState,label:&str){if let Ok(mut registry)=state.ownership.lock(){registry.unseal(label);}}
+/// Serialize just the settings transactions, never native window destruction.
+/// This allows a foreign save between removal and rollback without losing it.
+fn destroy_with_retained_cleanup<D,N>(state:&AppState,label:&str,path:Option<&Path>,ids:&[String],destroy:D,mut notify:N)->Result<(),String>
+where D:FnOnce()->Result<(),String>,N:FnMut(u64){
+    let cleanup=(||->Result<unified_settings::RetainedCloseCleanup,String>{
+        if ids.is_empty(){return Ok(Default::default());}
+        let path=path.ok_or("Settings path unavailable while closing")?;
+        let _lock=state.settings.lock().map_err(|_|"Settings lock failed")?;
+        unified_settings::prune_owned_retained_syncs(path,ids)
+    })();
+    let cleanup=match cleanup{Ok(cleanup)=>cleanup,Err(error)=>{unseal_failed_close(state,label);return Err(format!("Unable to save closing tab context; this window remains open: {error}"));}};
+    if let Some(revision)=cleanup.revision{notify(revision);}
+    if let Err(error)=destroy(){
+        let restored=(||->Result<Option<u64>,String>{
+            if cleanup.revision.is_none(){return Ok(None);}
+            let _lock=state.settings.lock().map_err(|_|"Settings lock failed")?;
+            unified_settings::restore_owned_retained_syncs(path.ok_or("Settings path unavailable during close rollback")?,&cleanup)
+        })();
+        unseal_failed_close(state,label);
+        match restored{Ok(revision)=>{if let Some(revision)=revision{notify(revision);}return Err(error);},Err(restore_error)=>return Err(format!("{error}. Closing tab context could not be restored: {restore_error}. This window remains open; its tab context is still visible but could not be saved."))}
+    }
+    Ok(())
+}
+fn close_empty_native_window(app:&tauri::AppHandle,label:&str)->Result<(),String>{flush_main_window_size(app,label);let ids=seal_native_window_close(&app.state::<AppState>(),label,true)?;complete_native_window_close(app,label,ids)}
+#[tauri::command]
+async fn close_empty_window(window:tauri::WebviewWindow,app:tauri::AppHandle)->Result<(),String>{close_empty_native_window(&app,window.label())}
+#[tauri::command]
+async fn check_startup_update(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>)->Result<startup_update::Report,String>{
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    Ok(state.startup_update.check(window.label()).await)
+}
+#[tauri::command]
+fn startup_update_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->startup_update::Report {state.startup_update.status(window.label())}
+#[tauri::command]
+fn prepare_startup_update(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<AppState>)->Result<startup_update::Report,String>{
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    let label=window.label().to_string();
+    let outcome=state.startup_update.begin_prepare(&label).map_err(str::to_string)?;
+    if outcome.state=="downloading"{tauri::async_runtime::spawn(async move{app.state::<AppState>().startup_update.download().await;});}
+    Ok(outcome)
+}
+#[tauri::command]
+fn cancel_startup_update(window:tauri::WebviewWindow,state:tauri::State<AppState>)->startup_update::Report{state.startup_update.cancel(window.label(),false)}
+#[tauri::command]
+fn dismiss_startup_update(window:tauri::WebviewWindow,state:tauri::State<AppState>)->startup_update::Report{state.startup_update.cancel(window.label(),true)}
+#[tauri::command]
+fn ack_startup_update(window:tauri::WebviewWindow,state:tauri::State<AppState>,token:String,ready:bool)->Result<(),String>{state.startup_update.acknowledge(window.label(),&token,ready).map_err(str::to_string)}
+fn begin_native_update(state:&AppState)->Result<Vec<String>,String>{
+    let mut r=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    if r.probes.keys().any(|id|state.host_verification.request_pending(id).unwrap_or(true)){return Err("updateBusy".into())}
+    for label in r.window_labels(){if state.sessions.window_busy(&r.owned(&label))?||state.engine.window_busy(&r.job_ids(&label),&[])?{return Err("updateBusy".into())}}
+    r.begin_update()
+}
+fn cancel_native_update(app:&tauri::AppHandle){let state=app.state::<AppState>();if let Ok(mut r)=state.ownership.lock(){r.cancel_update();}let _=app.emit("startup-update-unseal",());}
+/// Caller owns settings lock and global seal. Rollback changes only the captured
+/// transient records against the latest document, preserving profiles and maps.
+fn update_settings_transaction<T,F>(path:&Path,ids:&[String],launch:F)->Result<T,String> where F:FnOnce()->Result<T,String>{
+    let cleanup=unified_settings::prune_owned_retained_syncs(path,ids).map_err(|_|"settingsNotSettled")?;
+    match launch(){Ok(value)=>Ok(value),Err(error)=>{if unified_settings::restore_owned_retained_syncs(path,&cleanup).is_err(){return Err("settingsRollbackFailed".into())}Err(error)}}
+}
+fn perform_update_handoff(app:&tauri::AppHandle,label:&str)->Result<(),String>{
+    let state=app.state::<AppState>();
+    let (mut stage,candidate,key)=state.startup_update.take_verified(label).map_err(str::to_string)?;
+    flush_main_window_size(app,"main");
+    let path=settings_path(app)?;
+    let _settings=state.settings.lock().map_err(|_|"settingsNotSettled")?;
+    let ids={let mut r=state.ownership.lock().map_err(|_|"updateUnavailable")?;r.seal_update()?;r.update_owned_ids()};
+    stage.reverify(&candidate,&key).map_err(|_|"invalidSignature")?;
+    let _child=update_settings_transaction(&path,&ids,||{
+        #[cfg(windows)] {
+            let context=update_transaction::NativeContext::capture_current_install().map_err(|_|"installerLaunchFailed")?;
+            let snapshot=stage.transaction_snapshot(&candidate,&key).map_err(|_|"invalidSignature")?;
+            let mut prepared=update_transaction::prepare_transaction(&context,&snapshot).map_err(|_|"installerLaunchFailed")?;
+            let nonce=prepared.lifecycle.receipt().binding.nonce.clone();
+            let launched=update_handoff::launch_verified_sibling(stage.verified_path(),&nonce).map_err(|_|"installerLaunchFailed")?;
+            // Publish the exact native child identity durably before signaling
+            // commit. Any failure drops the uncommitted launch and cancels setup.
+            prepared.bind_installer(&launched).map_err(|_|"installerLaunchFailed")?;
+            launched.commit().map_err(|_|"installerLaunchFailed".into())
+        }
+        #[cfg(not(windows))] {Err::<std::process::Child,String>("installerLaunchFailed".into())}
+    })?;
+    // The verified NSIS child has acknowledged the exact-parent waiting phase.
+    // Keep its source image locked until OS process teardown; Drop would mark
+    // it delete-pending while NSIS can still need to read its own package.
+    std::mem::forget(stage);
+    let _=state.local_watch.clear();state.sessions.begin_shutdown();state.sessions.shutdown();state.host_verification.shutdown();
+    app.exit(0);Ok(())
+}
+#[tauri::command]
+async fn install_startup_update(window:tauri::WebviewWindow,app:tauri::AppHandle)->startup_update::Report{
+    let label=window.label().to_string();let state=app.state::<AppState>();
+    // Missing trust must fail before any seal, settings cleanup or child launch.
+    if update_package::production_key().is_none(){return state.startup_update.fail(&label,"signingNotConfigured")}
+    if !startup_update::HANDOFF_RELEASE_VALIDATED{return state.startup_update.fail(&label,"installationNotValidated")}
+    let labels=match begin_native_update(&state){Ok(labels)=>labels,Err(_)=>return state.startup_update.fail(&label,"workInProgress")};
+    let token=match state.startup_update.begin_settle(&label,labels){Ok(token)=>token,Err(code)=>{cancel_native_update(&app);return state.startup_update.fail(&label,code)}};
+    if app.emit("startup-update-settle",serde_json::json!({"token":token})).is_err(){cancel_native_update(&app);return state.startup_update.fail(&label,"settingsNotSettled")}
+    if let Err(code)=state.startup_update.wait_settled(&token).await{cancel_native_update(&app);return state.startup_update.fail(&label,code)}
+    let worker_app=app.clone();let worker_label=label.clone();
+    let result=tauri::async_runtime::spawn_blocking(move||perform_update_handoff(&worker_app,&worker_label)).await;
+    match result{Ok(Ok(()))=>state.startup_update.status(&label),other=>{cancel_native_update(&app);let code=match other{Ok(Err(ref code)) if code=="invalidSignature"=>"invalidSignature",Ok(Err(ref code))if code=="settingsRollbackFailed"=>"settingsRollbackFailed",Ok(Err(ref code))if code=="settingsNotSettled"=>"settingsNotSettled",_=>"installerLaunchFailed"};state.startup_update.fail(&label,code)}}
+}
+
 #[tauri::command]
 async fn workspace_transfer_ready(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,token:String)->Result<window_ownership::Transfer,String>{
     {let registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;let pending=registry.status(window.label(),&token)?;if pending.target_label!=window.label()||pending.phase!="pending"{return Err("Transfer is no longer pending".into());}registry.registered(window.label())?;}
@@ -1462,7 +1721,16 @@ async fn workspace_transfer_ready(window:tauri::WebviewWindow,app:tauri::AppHand
     // A transferred watch belongs to the target. Source late unwatch IPC is denied.
     if let Some(previous)=registry.watches.remove(&t.target_label){if previous!=t.workspace_id{if let Ok(watch)=state.local_watch.status(&previous){let _=state.local_watch.unwatch(&previous,watch.token);}}}
     if registry.watches.get(&t.source_label).is_some_and(|id|id==&t.workspace_id){registry.watches.remove(&t.source_label);registry.watches.insert(t.target_label.clone(),t.workspace_id.clone());}
-    drop(registry);transfer_event(&app,&t);Ok(t)
+    drop(registry);transfer_event(&app,&t);
+    // Ownership commit is the irreversible boundary. Empty-source teardown is
+    // best-effort afterward and must never roll back the target's live job.
+    if let Err(message)=close_empty_native_window(&app,&t.source_label){
+        if let Some(source)=app.get_webview_window(&t.source_label){
+            // A source which kept another tab is expected to remain open.
+            if state.ownership.lock().map(|r|r.owned(&t.source_label).is_empty()).unwrap_or(false){let _=source.emit("sync-close-blocked",message);}
+        }
+    }
+    Ok(t)
 }
 #[tauri::command]
 fn workspace_transfer_status(window:tauri::WebviewWindow,state:tauri::State<AppState>,token:String)->Result<window_ownership::Transfer,String>{state.ownership.lock().map_err(|_|"Ownership lock failed")?.status(window.label(),&token)}
@@ -1470,25 +1738,51 @@ fn workspace_transfer_status(window:tauri::WebviewWindow,state:tauri::State<AppS
 fn abort_workspace_transfer(window:tauri::WebviewWindow,app:tauri::AppHandle,token:String)->Result<window_ownership::Transfer,String>{abort_native_transfer(&app,window.label(),&token)}
 #[tauri::command]
 fn window_taskbar_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<String,String>{let ids=state.ownership.lock().map_err(|_|"Ownership lock failed")?.job_ids(window.label());Ok(format!("{:?}",state.engine.taskbar_state_for(&ids)?).to_lowercase())}
+#[tauri::command]
+fn update_restart_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
+    if window.label()!="main"{return Err("Update restart status is main-window only".into());}
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    Ok(state.update_restart.status())
+}
+#[tauri::command]
+fn ack_update_restart_ready(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
+    if window.label()!="main"{return Err("Update restart health is main-window only".into());}
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    state.update_restart.ack_ready();Ok(state.update_restart.status())
+}
 fn main() {
+    // Parse native argv before the single-instance plugin can route a launch.
+    let restart=update_runtime::Runtime::new(update_runtime::parse_args(std::env::args_os()));
+    let native_state=AppState{update_restart:restart,..Default::default()};
+    let mut context=tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows{if window.label=="main"{window.visible=false;}}
     let closing = Arc::new(AtomicBool::new(false));
+    let lifecycle_closing=closing.clone();
     #[cfg(windows)]
     let taskbar_closing=closing.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if app.state::<AppState>().update_restart.route_second(update_runtime::parse_args(args)){return;}
             open_blank_window(app.clone());
         }))
-        .manage(AppState::default())
+        .manage(native_state)
         .setup(move |app| {
+            // Native lifetime starts before renderer bootstrap. An early second
+            // launch closing again must not make the still-loading main vanish
+            // from the shutdown decision or consume its fresh-process startup.
+            app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.register_native_window("main")?;
+            let status_app=app.handle().clone();
+            app.state::<AppState>().update_restart.start(Arc::new(move|report|{let _=status_app.emit("update-restart-status",report);}));
+            restore_main_window_size(app.handle());
             #[cfg(windows)]
             taskbar_adapter::start(app.handle().clone(), app.state::<AppState>().engine.clone(), app.state::<AppState>().ownership.clone(), taskbar_closing.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            register_window, register_workspace, unregister_workspace, workspace_transfer_ready,
+            register_window, register_workspace, unregister_workspace, workspace_transfer_ready, workspace_drag_preview_ready, close_empty_window, check_startup_update, startup_update_status, prepare_startup_update, cancel_startup_update, dismiss_startup_update, ack_startup_update, install_startup_update,
             tab_drag::register_tab_strip, tab_drag::begin_tab_drag, tab_drag::cancel_tab_drag, tab_drag::tab_drag_status,
             workspace_transfer_status, abort_workspace_transfer, window_taskbar_status,
-            load_settings,
+            load_settings, update_restart_status, ack_update_restart_ready,
             save_settings,
             probe_host_key,
             cancel_host_key,
@@ -1516,6 +1810,9 @@ fn main() {
             cancel_file_operation
         ])
         .on_window_event(move |window, event| {
+            if matches!(event,tauri::WindowEvent::Resized(_)|tauri::WindowEvent::ScaleFactorChanged{..}) {
+                observe_main_window_size(window.app_handle(),window.label());
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if closing.load(Ordering::SeqCst) {
@@ -1524,39 +1821,33 @@ fn main() {
                 let app = window.app_handle().clone();
                 let state=app.state::<AppState>();
                 let label=window.label().to_owned();
-                let result=(||->Result<Vec<String>,String>{
-                    let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
-                    if registry.probes.iter().any(|(id,owner)|owner==&label&&state.host_verification.request_pending(id).unwrap_or(true)){
-                        return Err("Finish host verification before closing".into());
-                    }
-                    let ids=registry.seal_close(&label)?;
-                    let jobs=registry.job_ids(&label);
-                    match (state.sessions.window_busy(&ids),state.engine.window_busy(&jobs,&[])) {
-                        (Ok(false),Ok(false))=>Ok(ids),
-                        _=>{registry.unseal(&label);Err("Stop this window's syncs and finish connecting before closing".into())}
-                    }
-                })();
-                match result {
-                    Err(message)=>{let _=window.emit("sync-close-blocked",message);}
-                    Ok(ids)=>{
-                        for id in ids {
-                            if let Ok(watch)=state.local_watch.status(&id){let _=state.local_watch.unwatch(&id,watch.token);}
-                            let _=state.sessions.disconnect(&id);
-                        }
-                        if let Some(w)=app.get_webview_window(&label){
-                            if let Err(error)=w.destroy(){
-                                if let Ok(mut registry)=state.ownership.lock(){registry.unseal(&label);}
-                                let _=window.emit("sync-close-blocked",format!("Unable to close this window: {error}"));
-                                return;
-                            }
-                        }
-                        if let Ok(mut clients)=state.settings_clients.lock(){clients.forget(&label);}
-                        release_closed_window_registry(&state,&label);
-                        if shutdown_if_idle(&app){closing.store(true,Ordering::SeqCst);}
-                    }
-                }
+                if cancel_drag_preview_close(&app,&label).unwrap_or(false){return;}
+                flush_main_window_size(&app,&label);
+                let result=seal_native_window_close(&state,&label,false)
+                    .and_then(|ids|complete_native_window_close(&app,&label,ids));
+                if let Err(message)=result{let _=window.emit("sync-close-blocked",message);}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Unable to launch SyncFiles");
+        .build(context)
+        .expect("Unable to launch SyncFiles")
+        .run(move|_,event|{
+            if let tauri::RunEvent::ExitRequested{code,api,..}=event{
+                // Last-native-window exit can race a reserved second-launch
+                // spawn. Our registry cleanup requests explicit exit only once
+                // every user window and pending spawn has gone.
+                if code.is_none(){api.prevent_exit();}else{lifecycle_closing.store(true,Ordering::SeqCst);}
+            }
+        });
+}
+#[cfg(test)]
+mod update_lifecycle_tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {fn new()->Self{let p=std::env::temp_dir().join(format!("nearly-update-state-test-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::create_dir(&p).unwrap();Self(p)}fn path(&self)->PathBuf{self.0.join("settings.json")}}
+    impl Drop for Fixture{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+    fn fixture()->Fixture{let f=Fixture::new();let mut data=Settings{version:1,..Default::default()};for(id,owner)in[("owned","own-tab"),("foreign","foreign-tab")]{data.retained_syncs.push(serde_json::from_value(serde_json::json!({"id":id,"ownerTabId":owner,"ownerTabClosed":false,"profile":{"id":"generated","name":"Generated","host":"never-contacted.invalid","port":22,"user":"fixture","auth":"key","mode":"mock","keyFile":"","hostKey":""},"local":"C:\\generated\\update","remote":"/update","exclusionRules":"*.tmp","deleteRemoved":false,"recursive":true,"pendingState":"unreflected"})).unwrap());}unified_settings::save(&f.path(),&data).unwrap();f}
+    #[test]fn failed_handoff_restores_only_session_context_and_preserves_latest_preferences(){let f=fixture();let result=update_settings_transaction(&f.path(),&["own-tab".into()],||->Result<(),String>{let mut data=unified_settings::Document::read(&f.path()).unwrap().settings();assert_eq!(data.retained_syncs.len(),1);assert_eq!(data.retained_syncs[0].id,"foreign");data.theme=Theme::Mint;unified_settings::save(&f.path(),&data).unwrap();Err("fake installer rejected readiness".into())});assert_eq!(result,Err("fake installer rejected readiness".into()));let data=unified_settings::Document::read(&f.path()).unwrap().settings();assert_eq!(data.retained_syncs.len(),2);assert!(matches!(data.theme,Theme::Mint));}
+    #[test]fn successful_fake_handoff_prunes_only_owned_stopped_context(){let f=fixture();let outcome=update_settings_transaction(&f.path(),&["own-tab".into()],||Ok::<_,String>("fake child ready")).unwrap();assert_eq!(outcome,"fake child ready");let data=unified_settings::Document::read(&f.path()).unwrap().settings();assert_eq!(data.retained_syncs.len(),1);assert_eq!(data.retained_syncs[0].id,"foreign");}
+    #[test]fn settings_failure_never_launches_even_fake_child(){let f=fixture();let backup=f.path().with_extension("backup.json");if backup.exists(){std::fs::remove_file(&backup).unwrap();}std::fs::create_dir(&backup).unwrap();let mut launched=false;assert!(update_settings_transaction(&f.path(),&["own-tab".into()],||{launched=true;Ok(())}).is_err());assert!(!launched);}
+    #[test]fn active_background_start_blocks_update_without_stopping_job(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("background").unwrap();r.claim("background","other-tab").unwrap();r.prepare_job("background","other-job",Some("other-tab")).unwrap();}state.engine.prepare("other-job".into()).unwrap();assert!(begin_native_update(&state).is_err());assert!(state.engine.window_busy(&["other-job".into()],&[]).unwrap());assert!(state.ownership.lock().unwrap().registered("main").is_ok());}
 }

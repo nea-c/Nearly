@@ -67,7 +67,7 @@ test(`saved explicit ${theme} starts without a normalization write and ignores O
   await page.emulateMedia({colorScheme:'light'});
   await expect(page.locator('html')).toHaveAttribute('data-theme',theme);
   await page.locator('#settings-toggle').click();
-  await expect(page.locator('#theme-select option')).toHaveText(['ライト','ダーク','ミッドナイト','フォレスト','ミント']);
+  await expect(page.locator('#theme-select option')).toHaveText(['ライト','ダーク','ミッドナイト','ジェイド','ミント']);
   await expect(page.locator('#theme-select')).toHaveValue(theme);
   expect(await page.locator('html').evaluate(el=>el.style.colorScheme)).toBe(['light','mint'].includes(theme)?'light':'dark');
 });
@@ -97,3 +97,4 @@ test(`${failure} never triggers a default theme save`,async({page})=>{
   expect(await saves(page)).toEqual([]);await expect(page.locator('#connect-form')).toHaveCount(0);
   await page.locator('#settings-toggle').click();await expect(page.locator('#theme-select')).toBeDisabled();
 });
+

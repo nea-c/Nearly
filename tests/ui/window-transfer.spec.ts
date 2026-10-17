@@ -418,63 +418,37 @@ for (const outcome of ["creation failure", "timeout"] as const)
     await expect(source.locator('[data-close="owner-0"]')).toBeEnabled();
     await tab(source, "owner-0").click();
     await expect(source.locator("#connect-form")).toBeVisible();
-    await expect(source.locator("#tab-sync-context")).toContainText(
-      "C:\\fixture\\root-0",
-    );
+    // Settings metadata alone is not a previous job in this session.
+    await expect(source.locator("#retained-resume,.stopped-context")).toHaveCount(0);
     expect(await ids(source)).toEqual(["owner-0", "owner-1", "owner-2"]);
     expect(native.settings().retainedSyncs).toEqual(records);
     expect(effects(native.calls)).toEqual([]);
   });
 
-test("moving the last owner creates a usable blank source tab", async ({
+test("moving the last owner closes the source only after readiness and preserves target owner", async ({
   context,
 }) => {
-  const native = await coordinator(context, 1);
-  const browseKey = JSON.stringify([
-    "profile-0",
-    "sftp",
-    "server-0.invalid",
-    2200,
-    "user-0",
-    "SHA256:fixture0",
-  ]);
-  await native.changeSettings({
-    browseLocations: {
-      [browseKey]: { local: "C:\\fixture\\root-0", remote: "/srv/root-0" },
-    },
-  });
-  const source = await native.open();
+  const native = await coordinator(context, 1),
+    source = await native.open();
+  native.holdReady();
   await move(source, "owner-0");
   await pending(source, "owner-0");
   const child = await native.open("child-1");
   await expect(tab(child, "owner-0")).toBeVisible();
-  await expect(tab(source, "owner-0")).toHaveCount(0);
-  await expect(source.locator("[data-tab]")).toHaveCount(1);
-  await expect(source.locator("#connect-form")).toBeVisible();
+  expect(native.calls.filter((c) => c.cmd === "close_empty_window")).toEqual(
+    [],
+  );
+  native.releaseReady();
+  await expect
+    .poll(
+      () => native.calls.filter((c) => c.cmd === "close_empty_window").length,
+    )
+    .toBe(1);
+  await expect(source.locator("[data-tab]")).toHaveCount(0);
   expect(native.settings().retainedSyncs[0].ownerTabClosed).toBe(false);
   expect(effects(native.calls)).toEqual([]);
-  await source.locator('[data-connection-select="profile-0"]').click();
-  await source.locator("#connect-form .primary").click();
-  await expect(source.locator("#local-path")).toHaveValue("C:\\fixture");
-  await expect(source.locator('[data-pane="local"]')).toHaveAttribute(
-    "aria-busy",
-    "false",
-  );
-  await expect(source.locator("#local-path")).toHaveValue("C:\\fixture");
-  await expect(source.locator("#remote-path")).toHaveValue("/");
-  expect(native.calls.filter((c) => c.cmd === "connect_session")).toHaveLength(
-    1,
-  );
-  expect(
-    native.calls.filter((c) =>
-      /start_sync|stop_sync|disconnect_session/.test(c.cmd),
-    ),
-  ).toEqual([]);
-  await expect(child.locator("#tab-sync-context")).toContainText(
-    "C:\\fixture\\root-0",
-  );
+  await expect(child.locator("#retained-resume,.stopped-context")).toHaveCount(0);
 });
-
 test("shared settings notifications refresh both windows without recreating global owners", async ({
   context,
 }) => {
@@ -593,7 +567,8 @@ test("running SFTP transfer keeps native job identity and status without reconne
   await tab(source, "owner-0").click();
   await source.locator("#connect-form .primary").click();
   await expect(source.locator("#local-path")).toBeVisible();
-  await source.locator("#retained-resume").click();
+  await expect(source.locator("#retained-resume")).toHaveCount(0);
+  await source.locator("#prepare").click();
   await source.locator("#start-form .primary").click();
   await expect(source.locator("#start-form")).toHaveCount(0);
   await expect.poll(() => native.jobs.size).toBe(1);
@@ -636,13 +611,11 @@ test("native reload associates reordered profile fields with its retained runnin
   await tab(source, "owner-0").click();
   await source.locator("#connect-form .primary").click();
   await expect(source.locator("#local-path")).toBeVisible();
-  await source.locator("#retained-resume").click();
+  await expect(source.locator("#retained-resume")).toHaveCount(0);
+  await source.locator("#prepare").click();
   await source.locator("#start-form .primary").click();
   await expect(source.locator("#start-form")).toHaveCount(0);
-  await expect(source.locator("#tab-sync-context")).toHaveAttribute(
-    "data-retained-phase",
-    "running",
-  );
+  await expect(source.locator("#sync-state")).toHaveText("Watching");
   await expect.poll(() => native.jobs.size).toBe(1);
   const [jobId, job] = [...native.jobs][0],
     before = effects(native.calls);
@@ -657,14 +630,11 @@ test("native reload associates reordered profile fields with its retained runnin
     .toEqual(["owner-0", "owner-1", "owner-2"]);
   await expect(tab(source, "owner-0")).toHaveAttribute("aria-selected", "true");
   await tab(source, "owner-0").click();
-  await expect(source.locator("#tab-sync-context")).toHaveAttribute(
-    "data-retained-id",
+  await expect(source.locator("#retained-open")).toHaveAttribute(
+    "data-retained-open",
     "record-0",
   );
-  await expect(source.locator("#tab-sync-context")).toHaveAttribute(
-    "data-retained-phase",
-    "running",
-  );
+  await expect(source.locator("#sync-state")).toHaveText("Watching");
   await expect(source.locator("#sent-count")).toContainText("1234");
   await expect(source.locator("#retained-resume")).toHaveCount(0);
   expect(effects(native.calls)).toEqual(before);
@@ -673,18 +643,14 @@ test("native reload associates reordered profile fields with its retained runnin
   await expect
     .poll(() => native.calls.filter((c) => c.cmd === "stop_sync"))
     .toEqual([{ label: "main", cmd: "stop_sync", args: { id: jobId } }]);
-  await expect(source.locator("#tab-sync-context")).toHaveAttribute(
-    "data-retained-phase",
-    "stopping",
-  );
+  await expect(source.locator("#sync-state")).toHaveText("Stopping");
   expect(native.jobs.has(jobId)).toBe(true);
   await expect(source.locator("#retained-resume")).toHaveCount(0);
   native.releaseStop();
   await expect.poll(() => native.jobs.has(jobId)).toBe(false);
-  await expect(source.locator("#tab-sync-context")).toHaveAttribute(
-    "data-retained-phase",
-    "stopped",
-  );
+  await expect(source.locator(".stopped-context")).toHaveCount(0);
+  await expect(source.locator("#retained-resume")).toBeEnabled();
+  await expect(source.locator("#retained-resume")).toHaveAttribute("title", /C:\\fixture\\root-0/);
   await expect(source.locator("#retained-resume")).toBeVisible();
   expect(native.calls.filter((c) => c.cmd === "start_sync")).toHaveLength(1);
   expect(

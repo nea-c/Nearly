@@ -59,6 +59,9 @@ test('visible connection settings button edits the selected saved profile and Ca
   await fixture(page);
   for (const [id, name, host] of [['a', 'Alpha', 'fixture.invalid'], ['b', 'Beta', 'other.invalid']]) {
     await page.locator(`[data-connection-select=${id}]`).click();
+    await expect.poll(async () => (await saved(page)).lastSelectedProfileId).toBe(id);
+    const selectedSnapshot = await saved(page);
+    const selectionWrites = await page.evaluate(() => window.pointerCalls.filter(c => c.cmd === 'save_settings').length);
     await expect(page.locator('#edit-profile')).toBeVisible();
     await page.locator('#edit-profile').click();
     await expect(page.locator('#profile-form [name=name]')).toHaveValue(name);
@@ -67,9 +70,11 @@ test('visible connection settings button edits the selected saved profile and Ca
     await expect(page.locator('#profile-form')).toHaveCount(0);
     await expect(page.locator(`[data-connection-node=${id}]`)).toHaveAttribute('aria-selected', 'true');
     await expect(page.locator('#edit-profile')).toBeVisible();
+    expect(await saved(page)).toEqual(selectedSnapshot);
+    expect(await page.evaluate(() => window.pointerCalls.filter(c => c.cmd === 'save_settings').length)).toBe(selectionWrites);
   }
   await expect(page.locator('#add-profile,#add-connection-group,#connection-actions,[data-connection-action]')).toHaveCount(0);
-  expect(await page.evaluate(() => window.pointerCalls.filter(c => c.cmd === 'save_settings' || c.cmd === 'connect_session').length)).toBe(0);
+  expect(await page.evaluate(() => window.pointerCalls.filter(c => c.cmd === 'connect_session').length)).toBe(0);
   await page.screenshot({ path: 'test-results/pointer-connection-settings-800.png' });
 });
 

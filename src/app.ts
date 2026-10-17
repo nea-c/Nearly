@@ -1,7 +1,13 @@
 import {retainedSyncsInWorkspaceOrder} from "./workspace-order.js";
+import {sessionResumeContext,syncActionLabel,resumeActionLabel,currentSyncHelp,resumeSyncHelp} from './sync-actions.js';
+import { initializeStartupUpdate } from "./startup-update.js";
+import { initializeUpdateRestart } from "./update-recovery.js";
+import { syncPathSummary } from "./sync-path-summary.js";
+import { getDisplayVersion } from "./version.js";
+import { freezeUpdateRoots, settleUpdateWrites } from "./startup-update-settle.js";
 import { createWindowStore, snapshotWorkspaceTransfer, hydrateWorkspaceTransfer, detachTransferredWorkspace } from "./workspace-transfer.js";
 import { transferText } from "./window-transfer-ui.js";
-import { initializeNativeTabDrag, publishTabStrip, reorderTabNodes } from "./native-tab-drag.js";
+import { initializeNativeTabDrag, publishTabStrip, reorderTabNodes, detachedPreviewReady } from "./native-tab-drag.js";
 import { applyPersistentSettings } from "./shared-settings.js";
 import { registerWorkspace, type WindowRegistration, type WindowTransferRecord, type TabDragStatus } from "./api.js";
 const rawError = (error: unknown) =>
@@ -247,7 +253,7 @@ type Dialog =
       returnTo?: ConnectionDialog;
       parentId?: string | null;
     }
-  | { type: "start"; p: Profile; local: string; remote: string; retained?: RetainedSync };
+  | { type: "start"; workspaceId:string; p: Profile; local: string; remote: string; retained?: RetainedSync };
 let store = new Store(),
   selected = "",
   active = "",
@@ -261,6 +267,46 @@ let store = new Store(),
   initialized = false;
 let themeSaving = false;
 let windowRegistration: WindowRegistration | undefined;
+let windowClosing = false;
+let startupFailed = false;
+function newWorkspaceLocal(profileId: string) {
+  const p=store.profiles.find(p=>p.id===profileId);
+  return (p ? store.lastBrowse(p).local : undefined) ?? defaultLocalBrowse;
+}
+async function closeEmptyWindow() {
+  if(windowClosing) return;
+  windowClosing=true; active="";
+  document.documentElement.dataset.windowClosing="true";
+  cancelPointerReorder(); reconcileLocalWatch();
+  const app=document.querySelector<HTMLElement>("#app");
+  if(app) { app.inert=true; app.querySelector(".tabs")?.replaceChildren(); app.querySelector("main")?.replaceChildren(); }
+  try {
+    if(windowRegistration) await invoke("close_empty_window");
+    else if(native) await windowControl("close");
+    else window.close();
+  } catch(error) {
+    windowClosing=false;
+    document.documentElement.dataset.windowClosing="false";
+    renderEmptyWindow();
+    showBlockedCloseNotice(rawError(error));
+  }
+}
+function renderEmptyWindow() {
+  const app=document.querySelector<HTMLElement>("#app");
+  if(!app) return;
+  app.inert=false;
+  app.innerHTML=titlebar(store,"",settingsOpen)+html`<main>${startupFailed && notice ? html`<div class="notice" role="alert">${esc(localizedNotice(notice))}</div>` : ""}</main>`;
+  document.documentElement.dataset.emptyWindowReason=startupFailed?"startup-error":"closed";
+  const on=(selector:string, action:()=>void)=>{const button=app.querySelector<HTMLButtonElement>(selector);if(button)button.onclick=action;};
+  on("#window-close",()=>{void closeEmptyWindow();});
+  on("#window-minimize",()=>{void windowControl("minimize").catch(message);});
+  on("#window-maximize",()=>{void windowControl("toggleMaximize").catch(message);});
+  on("#add-tab",addWorkspace);
+  const add=app.querySelector<HTMLButtonElement>("#add-tab");if(add)add.disabled=!settingsAvailable||!initialized;
+  on("#settings-toggle",()=>{settingsOpen=!settingsOpen;renderSettings();});
+  renderSettings();
+  void publishTabStrip();
+}
 const movingWorkspaces = new Set<string>();
 const outboundTransfers = new Map<string, WindowTransferRecord>();
 let transferEventsReady = false;
@@ -268,6 +314,8 @@ const bufferedTransferEvents = new Map<string, WindowTransferRecord>();
 let incomingTransfer: WindowTransferRecord | undefined;
 let incomingPreviousActive: string | undefined;
 let incomingOrderChanged = false;
+let previewBootstrap = false;
+const incomingReady = new Map<string, Promise<void>>();
 let nativeDrag: {workspaceId:string; dragId?:string; cancelRequested?:boolean; cancelSent?:boolean} | undefined;
 function workspaceMoving(id: string) { return movingWorkspaces.has(id); }
 function transferBusy(id: string) {
@@ -278,6 +326,11 @@ function transferBusy(id: string) {
 }
 function applyTransferLock() {
   const locked = workspaceMoving(active);
+  const previewLocked = previewBootstrap || (incomingTransfer?.targetKind === "new" && ["dragging","pending"].includes(incomingTransfer.phase));
+  document.querySelectorAll<HTMLElement>("#app,#modal-root,#settings-root").forEach(root => {
+    if(previewLocked){root.inert=true;root.dataset.previewTransferInert="true";}
+    else if(root.dataset.previewTransferInert==="true"){root.inert=!!updateSettleToken;delete root.dataset.previewTransferInert;}
+  });
   document.querySelectorAll<HTMLElement>("main").forEach(main => {
     main.inert = locked;
     main.dataset.transferPending = String(locked);
@@ -288,7 +341,8 @@ function applyTransferLock() {
     const shell = tab.closest<HTMLElement>(".tab");
     if (shell) {
       shell.dataset.transferPending = String(pending);
-      shell.dataset.transferIncoming = String(incomingTransfer?.phase === "pending" && incomingTransfer.workspaceId === tab.dataset.tab);
+      shell.dataset.transferIncoming = String(!!incomingTransfer && ["dragging","pending"].includes(incomingTransfer.phase) && incomingTransfer.workspaceId === tab.dataset.tab);
+      shell.classList.toggle("tab-detached-source",detachedPreviewReady(tab.dataset.tab!));
       shell.querySelector<HTMLButtonElement>("[data-close]")!.disabled = pending;
     }
   });
@@ -322,11 +376,9 @@ function acceptTransferRecord(record: WindowTransferRecord) {
         dirtyRemoteTrees.delete(old);
         const wasLast = store.workspaces.length === 1;
         detachTransferredWorkspace(store, old.id);
-        if (wasLast) {
-          store.workspaces[0].localBrowse = defaultLocalBrowse;
-          freshWorkspaces.add(store.workspaces[0]);
-        }
+
         connectionViews.delete(old.id); connectionStates.delete(old.id);
+        if (wasLast) { void closeEmptyWindow(); return; }
         if (active === old.id) { active = store.workspaces[0].id; restoreWorkspace(); revealSelectedTab(); }
         for (const w of store.workspaces) void registerWorkspace(w.id).catch(message);
       }
@@ -335,8 +387,12 @@ function acceptTransferRecord(record: WindowTransferRecord) {
     render();
   }
   if (record.targetLabel === windowRegistration.label && incomingTransfer?.token === record.token) {
+    if(incomingTransfer.phase === "committed" && record.phase !== "committed") return;
+    const wasPreview = incomingTransfer.phase === "dragging";
     incomingTransfer = record;
+    if(wasPreview && record.phase === "pending") void finishIncomingTransfer(record).catch(message);
     if (record.phase === "committed") {
+      previewBootstrap = false;
       movingWorkspaces.delete(record.workspaceId);
       document.documentElement.dataset.transferPhase = "committed";
       initialized = true; applyTransferLock(); render();
@@ -345,6 +401,7 @@ function acceptTransferRecord(record: WindowTransferRecord) {
         void persist(undefined,undefined,true).catch(message);
       }
     } else if (record.phase === "aborted") {
+      previewBootstrap = false;
       // Remove only the unclaimed incoming UI. Existing target owners keep their sessions.
       movingWorkspaces.delete(record.workspaceId);
       const staged = store.workspaces.find(w => w.id === record.workspaceId);
@@ -354,11 +411,29 @@ function acceptTransferRecord(record: WindowTransferRecord) {
       }
       if (active === record.workspaceId) active = store.workspaces.find(w=>w.id===incomingPreviousActive)?.id ?? store.workspaces[0]?.id ?? "";
       incomingTransfer = undefined; incomingPreviousActive = undefined; incomingOrderChanged=false;
+      applyTransferLock();
       if (active) restoreWorkspace();
       document.documentElement.dataset.transferPhase = "aborted";
       render();
     }
   }
+}
+function finishIncomingTransfer(record:WindowTransferRecord):Promise<void> {
+  if(incomingTransfer?.token !== record.token || incomingTransfer.phase === "committed") return Promise.resolve();
+  const previous=incomingReady.get(record.token);if(previous)return previous;
+  if(record.phase !== "pending")return Promise.reject(Error("Native mouse-up has not authorized this transfer"));
+  const pending=(async()=>{
+    try {
+      acceptTransferRecord(await invoke("workspace_transfer_ready",{token:record.token}));
+      if(incomingTransfer?.token===record.token && incomingTransfer.phase==="pending")acceptTransferRecord(await invoke("workspace_transfer_status",{token:record.token}));
+      if(incomingTransfer?.token!==record.token || incomingTransfer.phase!=="committed")throw Error("Workspace transfer did not commit");
+      const current=store.workspaces.find(w=>w.id===record.workspaceId);if(current && !current.connection)openConnection(current);
+    } catch(error) {
+      try{acceptTransferRecord(await invoke("abort_workspace_transfer",{token:record.token}));}catch{/* Preserve the native ownership outcome. */}
+      throw error;
+    }
+  })().finally(()=>incomingReady.delete(record.token));
+  incomingReady.set(record.token,pending);return pending;
 }
 function positionIncoming(record: WindowTransferRecord) {
   const previous=JSON.stringify(store.serialize().retainedSyncs?.map(r=>r.id));
@@ -521,7 +596,6 @@ const demoFiles = (p: string): Entry[] =>
     { name: "style.css", dir: false, size: 2710 },
   ].filter((x) => !/[\\/]assets$/.test(p) || !x.dir);
 let defaultLocalBrowse = localBrowse;
-const freshWorkspaces = new WeakSet<Workspace>();
 const workspace = () => store.workspaces.find((w) => w.id === active)!;
 const tab = () => store.tabs.find((t) => t.id === workspace()?.jobId)!;
 const profile = () => {
@@ -1149,17 +1223,19 @@ function switchWorkspace(id: string) {
   render();
 }
 function addWorkspace() {
+  if(windowClosing) return;
   cancelPointerReorder();
   cancelBookmarkTreeDrag();
   cancelConnectionTreeDrag();
   cancelHostKeyApproval();
-  if (dialog || workspace().connecting || selectionDrag || pointerBusy) return;
-  if(restoringClosedTab&&store.workspaces.length>=15){message(tr("タブは最大16個です"));return;}
+  if (dialog || workspace()?.connecting || selectionDrag || pointerBusy) return;
   closeConnectionTreePopup();
   try {
     captureWorkspace();
-    const w = store.createWorkspace(selected, defaultLocalBrowse);
-    freshWorkspaces.add(w);
+    const w = store.createWorkspace(selected, newWorkspaceLocal(selected));
+    // An unconnected tab is still a native-owned workspace. Register as soon
+    // as it exists; close awaits this same deduplicated claim before cleanup.
+    void registerWorkspace(w.id).catch(message);
     leavePathEditor();
     revealSelectedTab();
     active = w.id;
@@ -1184,7 +1260,7 @@ function closeWorkspace(id: string) {
   }
   const job = store.tabs.find((t) => t.id === w.jobId);
   if (w.starting || (job && job.status !== "stopped")) {
-    message(
+    showBlockedCloseNotice(
       tr(
         "同期中のタブは閉じられません。同期停止を押し、停止完了後に改めて閉じてください。",
       ),
@@ -1201,6 +1277,7 @@ async function removeWorkspace(id: string) {
   closingWorkspaces.add(id);
   updatePrimaryState();
   try {
+    if (windowRegistration) await registerWorkspace(id);
     if (native) await invoke("disconnect_session", { id });
   } catch (error) {
     closingWorkspaces.delete(id);
@@ -1225,10 +1302,10 @@ async function removeWorkspace(id: string) {
   connectionViews.delete(id);
   connectionStates.delete(id);
   closingWorkspaces.delete(id);
+  if (!store.workspaces.length) { await closeEmptyWindow(); return; }
   if (active === id) {
     leavePathEditor();
     revealSelectedTab();
-    if (!store.workspaces.length) { const fresh=store.createWorkspace(selected, defaultLocalBrowse);freshWorkspaces.add(fresh); }
     active =
       store.workspaces[
         Math.max(0, Math.min(index, store.workspaces.length - 1))
@@ -1314,6 +1391,7 @@ async function persist(
       const currentTree = store.connectionTree;
       const currentBookmarkTree = store.bookmarkTree;
       const browseRevision = store.browsePreferencesRevision;
+      const selectedProfileRevision = store.lastSelectedProfileRevision;
       const data = structuredClone({ ...store.serialize(), ...requested });
       if(requested?.retainedSyncs)data.retainedSyncs=retainedSyncsInWorkspaceOrder(data.retainedSyncs!,store.workspaces);
       if (native) {
@@ -1322,6 +1400,8 @@ async function persist(
       } else localStorage.setItem("syncfiles-v1", JSON.stringify(data));
       if (data.browseLocationsChanged)
         store.markBrowseLocationsSaved(browseRevision);
+      if (data.lastSelectedProfileChanged)
+        store.markLastSelectedProfileSaved(selectedProfileRevision);
       if (requested?.folderBookmarks)
         store.folderBookmarks = requested.folderBookmarks;
       if (requested?.bookmarkTree) {
@@ -1578,7 +1658,7 @@ function primaryState() {
     return { text: tr("停止中…"), disabled: true, stop: true };
   if (t && t.status !== "stopped")
     return { text: tr("同期停止"), disabled: false, stop: true };
-  return { text: tr("同期"), disabled: !profile() || loading, stop: false };
+  return { text: syncActionLabel(), disabled: !profile() || loading || w.loading.local || w.loading.remote, stop: false };
 }
 function updatePrimaryState() {
   const button = document.querySelector<HTMLButtonElement>("#prepare");
@@ -1587,6 +1667,9 @@ function updatePrimaryState() {
     button.textContent = state.text;
     button.disabled = state.disabled;
     button.classList.toggle("destructive", state.stop);
+    button.title=primarySyncHelp();
+    const help=document.querySelector<HTMLElement>("#sync-primary-help");if(help)help.textContent=primarySyncHelp();
+    const locations=document.querySelector<HTMLButtonElement>("#retained-open");if(locations)locations.disabled=resumeBusy(false);
   }
 }
 async function readDirectory(
@@ -1913,7 +1996,7 @@ async function openFolderPair(
 }
 async function refresh(
   side: Side,
-  options: { path?: string; historyIndex?: number; restoring?: boolean } = {},
+  options: { path?: string; historyIndex?: number; restoring?: boolean; remember?: boolean } = {},
   w = workspace(),
 ) {
   if (workspaceMoving(w.id)) return false;
@@ -1967,7 +2050,7 @@ async function refresh(
           .filter((entry) => supportedName(entry.name))
           .map((entry) => entry.name),
       );
-      store.rememberSuccessfulBrowse(
+      if(options.remember !== false) store.rememberSuccessfulBrowse(
         requestedProfile,
         side,
         requestedPath,
@@ -1999,7 +2082,7 @@ async function restoreBrowses(
 ) {
   if (!w.connection) return;
   const connection = w.connection,
-    localDefault = w.localBrowse,
+    localDefault = defaultLocalBrowse,
     homePath = remotePath(home.path);
   const warnings: string[] = [];
   const restoreSide = async (side: Side) => {
@@ -2027,11 +2110,10 @@ async function restoreBrowses(
     if (side === "remote") {
       // connect_session already verified this home listing. A failed saved path
       // never replaces it or becomes a history/persistence entry.
-      const token = store.beginBrowse(connection, side);
+      store.beginBrowse(connection, side);
       w.navigation.remote.commit(homePath);
       listingSucceeded(w, "remote", homePath);
-      store.rememberSuccessfulBrowse(connection, side, homePath, token);
-    } else await refresh(side, { path: fallback, restoring: true }, w);
+    } else await refresh(side, { path: fallback, restoring: true, remember: false }, w);
   };
   await Promise.all([
     loadTree(w, "local", PC_ROOT),
@@ -2039,8 +2121,12 @@ async function restoreBrowses(
     restoreSide("remote"),
   ]);
   if (!store.workspaces.includes(w)) return;
-  if (warnings.length) w.notice = warnings.join("\n");
-  rememberViewedPair(w);
+  if (warnings.length) {
+    w.notice = warnings.join("\n");
+    // Automatic safe fallbacks are temporary views. Keep the last successful
+    // user paths and pair history available for the next authenticated attempt.
+    void persist().catch(error=>{if(active===w.id)message(error);});
+  } else rememberViewedPair(w);
   if (active === w.id) {
     restoreWorkspace();
     render();
@@ -2072,7 +2158,7 @@ function filePane(side: Side) {
     <header>
       <h2>${isLocal ? tr("ローカル") : tr("リモート")}</h2>
       <span>${isLocal ? tr("この PC") : ""}</span
-      >${isLocal ? "" : html`${retainedControlsMarkup()}<button class="primary" id="prepare" ${primaryState().disabled ? "disabled" : ""} title="${esc(tab() ? trText`同期元: ${tab().local} → 同期先: ${tab().remote}` : tr("表示中のリモートフォルダへ同期"))}">${primaryState().text}</button>`}
+      >${isLocal ? "" : html`<span class="sync-controls"><span class="sync-location-slot">${retainedLocationsMarkup()}</span>${primarySyncMarkup()}<span class="sync-resume-slot">${retainedControlsMarkup()}</span></span>`}
     </header>
     <form data-path="${side}" class="path">
       ${(["back", "forward", "up", "refresh"] as const)
@@ -2318,6 +2404,8 @@ function bindSplitter() {
   };
 }
 function render() {
+  if(windowClosing) return;
+  if(initialized && !store.workspaces.length) { renderEmptyWindow(); return; }
   reconcileLocalWatch();
   if (
     selectionDrag ||
@@ -2353,7 +2441,6 @@ function render() {
   deferredPathRender = false;
   if (!store.workspaces.length) {
     const w = store.createWorkspace(selected, defaultLocalBrowse);
-    freshWorkspaces.add(w);
     active = w.id;
   }
   captureWorkspace();
@@ -2394,9 +2481,9 @@ function render() {
   captureTabStrip();
   captureBookmarks();
   $("#app")!.innerHTML =
-    titlebar(store, active, settingsOpen, restoringClosedTab) +
+    titlebar(store, active, settingsOpen) +
     html`<main>
-        ${retainedSyncMarkup()}${p ? bookmarkBar(store, w) : ""}${
+        ${!p ? retainedControlsMarkup() : ""}${p ? bookmarkBar(store, w) : ""}${
           p
             ? html`<section class="workspace">
                   <div class="panes">
@@ -2428,14 +2515,14 @@ function render() {
       const state: ConnectionDialog = connectionStates.get(w.id) ?? {
         type: "connect",
         workspaceId: w.id,
-        profileId: w.profileId || store.profiles[0]?.id || "",
+        profileId: w.profileId || store.initialProfileId(),
       };
       connectionStates.set(w.id, state);
       renderConnection(view, state);
     }
     $("#connection-slot")!.replaceWith(view);
   }
-  bindTabStrip({reorder:commitTabOrder,externalStart:windowRegistration?(id,grab,title)=>{void beginNativeTabDrag(id,grab,title);}:undefined,busy:()=>!initialized||!settingsAvailable||movingWorkspaces.size>0||!!dialog||selectionDrag||splitterDragging||closingWorkspaces.size>0||restoringClosedTab});
+  bindTabStrip({reorder:commitTabOrder,externalStart:windowRegistration?(id,grab,title)=>{void beginNativeTabDrag(id,grab,title);}:undefined,busy:()=>!initialized||!settingsAvailable||movingWorkspaces.size>0||!!dialog||selectionDrag||splitterDragging||closingWorkspaces.size>0});
   publishTabStrip();
   bindRetainedSyncs();
   bindBookmarks(
@@ -2506,7 +2593,6 @@ const startingRetained = new Set<string>();
 const retainedFailures = new Map<string,string>();
 let retainedWrites:Promise<void>=Promise.resolve();
 let retainedWriteCount=0;
-let restoringClosedTab=false;
 function retainedJob(id:string){return store.tabs.find(t=>t.retainedId===id&&t.status!=="stopped");}
 function ownedRetained(){return workspace()?store.ownRetainedForWorkspace(workspace().id):undefined;}
 async function mutateRetained(change:(candidate:Store)=>void,guard:()=>void=()=>{}) {
@@ -2518,40 +2604,65 @@ async function mutateRetained(change:(candidate:Store)=>void,guard:()=>void=()=>
   retainedWrites=work;
   try {await work;}finally{retainedWriteCount--;paintRetainedSyncs();}
 }
+function resumeContext(){return workspace()?sessionResumeContext(workspace().id,tab(),ownedRetained()):undefined;}
+function resumeBusy(resume=true){
+  const w=workspace(),t=tab();
+  return !w?.connection || workspaceMoving(w.id) || retainedWriteCount>0 || w.connecting || w.starting || closingWorkspaces.has(w.id) || w.loading.local || w.loading.remote ||
+    (resume ? !!t&&t.status!=="stopped" : t?.status==="stopping");
+}
+function primarySyncHelp(){
+  const t=tab(),w=workspace();
+  return t&&t.status!=="stopped"?trText`同期を停止します。同期元 ${t.local}、同期先 ${t.remote}。`:currentSyncHelp(w.localBrowse,w.remoteBrowse);
+}
+function retainedLocationsMarkup(){
+  const entry=resumeContext();if(!entry)return "";
+  const help=trText`同期したローカル ${entry.local} とリモート ${entry.remote} を開きます。同期は開始しません。`;
+  return html`<span class="sync-action sync-location-action"><button type="button" id="retained-open" data-retained-open="${esc(entry.id)}" ${resumeBusy(false)?"disabled":""} title="${esc(help)}" aria-describedby="sync-locations-help">同期した場所へ戻る</button><span role="tooltip" class="sync-action-help" id="sync-locations-help">${esc(help)}</span></span>`;
+}
+function primarySyncMarkup(){
+  const state=primaryState(),help=primarySyncHelp();
+  return html`<span class="sync-action"><button class="primary ${state.stop?"destructive":""}" id="prepare" ${state.disabled?"disabled":""} title="${esc(help)}" aria-describedby="sync-primary-help">${state.text}</button><span role="tooltip" class="sync-action-help" id="sync-primary-help">${esc(help)}</span></span>`;
+}
 function retainedControlsMarkup(){
-  const entry=ownedRetained();if(!entry)return "";
-  const w=workspace(),state=retainedEntryState(entry,store.tabs,startingRetained);
-  const busy=retainedWriteCount>0||w.connecting||w.starting||closingWorkspaces.has(w.id)||state.phase==="stopping";
-  return html`<span class="tab-sync-actions"><button id="retained-open" data-retained-open="${esc(entry.id)}" ${busy?"disabled":""}>場所を開く</button>${state.phase==="stopped"?html`<button id="retained-resume" data-retained-resume="${esc(entry.id)}" ${busy?"disabled":""}>再開</button>`:""}</span>`;
+  const entry=resumeContext(),job=tab();
+  if(!entry||!job||job.status!=="stopped"||workspace().starting||startingRetained.has(entry.id))return "";
+  const help=resumeSyncHelp(entry.local,entry.remote);
+  return html`<span class="tab-sync-actions sync-action"><button class="primary" id="retained-resume" data-retained-resume="${esc(entry.id)}" ${resumeBusy()?"disabled":""} title="${esc(help)}" aria-describedby="sync-resume-help">${resumeActionLabel()}</button><span role="tooltip" class="sync-action-help" id="sync-resume-help">${esc(help)}</span></span>`;
 }
-function retainedSyncMarkup() {
-  const entry=ownedRetained();if(!entry)return "";
-  const state=retainedEntryState(entry,store.tabs,startingRetained);
-  const label=state.phase==="starting"?tr("開始中…"):state.phase==="stopping"?tr("停止処理中…"):state.phase==="running"?tr("同期中"):state.phase==="failed"?tr("失敗・停止が必要"):retainedFailures.has(entry.id)?tr("開始失敗・停止中"):state.pending==="unreflected"?tr("停止中・未反映あり"):(getLanguage()==="en"?"Stopped":"停止中");
-  return html`<section id="tab-sync-context" class="tab-sync-context" data-owner-tab="${esc(workspace().id)}" data-retained-id="${esc(entry.id)}" data-retained-phase="${state.phase}" aria-label="このタブの同期設定">
-    ${!profile()?html`<header><span>${label}</span>${retainedControlsMarkup()}<button id="prepare" class="primary" disabled>同期</button></header>`:html`<span class="tab-sync-label">${label}</span>`}
-    <div class="tab-sync-paths"><code title="${esc(entry.local)}">${esc(entry.local)}</code><span aria-hidden="true">→</span><code title="${esc(entry.remote)}">${esc(entry.remote)}</code></div>
-    ${state.phase==="stopped"&&state.pending==="unknown"?html`<small>反映状態は再開時に確認</small>`:""}
-  </section>`;
-}
+
 function bindRetainedSyncs() {
   for(const kind of ["open","resume"] as const){const button=document.querySelector<HTMLButtonElement>('#retained-'+kind);if(!button)continue;
     button.onclick=()=>{
-      const entry=ownedRetained();if(!entry||button.getAttribute('data-retained-'+kind)!==entry.id)return;
+      const entry=resumeContext();if(!entry||button.getAttribute('data-retained-'+kind)!==entry.id)return;
       if(retainedWriteCount||startingRetained.has(entry.id)||dialog)return;
       if(kind==="open")void openRetainedLocations(entry).catch(message);else resumeRetained(entry);
     };
   }
 }
 function paintRetainedSyncs() {
-  if(pointerBusy||selectionDrag||splitterDragging)return;
-  const old=document.querySelector<HTMLElement>("#tab-sync-context"),markup=retainedSyncMarkup();
-  if(!old){if(markup)render();return;}if(!markup){old.remove();return;}
-  const template=document.createElement("template");template.innerHTML=markup;const next=template.content.firstElementChild as HTMLElement;
-  if(old.outerHTML!==next.outerHTML)old.replaceWith(next);
-  // Header controls belong only to the currently selected workspace.
-  const current=document.querySelector<HTMLElement>('.file-pane.remote .tab-sync-actions')??document.querySelector<HTMLElement>('[data-pane="remote"] .tab-sync-actions');
-  if(profile()&&current){const t=document.createElement('template');t.innerHTML=retainedControlsMarkup();if(current.outerHTML!==t.innerHTML)current.replaceWith(t.content);}
+  if(pointerBusy||selectionDrag||splitterDragging||windowClosing)return;
+  const resumeSlot=document.querySelector<HTMLElement>('.sync-resume-slot');
+  const locationSlot=document.querySelector<HTMLElement>('.sync-location-slot');
+  if(resumeSlot&&locationSlot){
+    for(const [slot,markup] of [[resumeSlot,retainedControlsMarkup()],[locationSlot,retainedLocationsMarkup()]] as const){
+      const template=document.createElement('template');template.innerHTML=markup;
+      if(slot.innerHTML!==template.innerHTML)slot.replaceChildren(template.content);
+    }
+    bindRetainedSyncs();return;
+  }
+  const current=document.querySelector<HTMLElement>('.tab-sync-actions');
+  const markup=retainedControlsMarkup();
+  if(!current){
+    if(markup){
+      const primary=document.querySelector('#prepare')?.closest('.sync-action');
+      if(primary){const template=document.createElement('template');template.innerHTML=markup;primary.after(template.content);bindRetainedSyncs();}
+      else render();
+    }
+    return;
+  }
+  if(!markup){current.remove();return;}
+  const template=document.createElement('template');template.innerHTML=markup;
+  if(current.outerHTML!==template.innerHTML) current.replaceWith(template.content);
   bindRetainedSyncs();
 }
 function retainedWorkspace(entry:RetainedSync,forResume:boolean) {
@@ -2577,23 +2688,8 @@ function resumeRetained(entry:RetainedSync){
   if(retainedJob(entry.id)||startingRetained.has(entry.id))return;
   try{const w=retainedWorkspace(entry,true);if(!w)return;
     if(w.loading.local||w.loading.remote)throw Error(tr("フォルダーの読込完了後に再試行してください。"));
-    dialog={type:"start",p:{...w.connection!},local:entry.local,remote:entry.remote,retained:structuredClone(entry)};renderDialog();
+    dialog={type:"start",workspaceId:w.id,p:{...w.connection!},local:entry.local,remote:entry.remote,retained:structuredClone(entry)};renderDialog();
   }catch(error){message(error);}
-}
-async function restoreClosedWorkspace(){
-  cancelPointerReorder();
-  if(restoringClosedTab)return;
-  const owner=workspace(),ownerId=owner.id,jobAtRequest=owner.jobId;
-  const guard=()=>{if(dialog||active!==ownerId||owner.connecting||owner.starting||closingWorkspaces.has(ownerId)||store.workspaces.length>=16)throw Error(tr("接続・開始・タブ終了の処理が終わってから再試行してください。"));};
-  guard();restoringClosedTab=true;render();
-  let restoredId:string|undefined;
-  try{
-    await mutateRetained(candidate=>{restoredId=candidate.restoreLastRetainedWorkspace()?.id;},guard);
-    if(!restoredId)return;
-    const restored=store.ensureRetainedWorkspace(restoredId);if(!restored)return;
-    const pathDraft=document.activeElement?.closest<HTMLFormElement>('form[data-path]');
-    if(active===ownerId&&!dialog&&!owner.connecting&&!owner.starting&&!closingWorkspaces.has(ownerId)&&owner.jobId===jobAtRequest&&!pathDraft?.dataset.dirty){captureWorkspace();leavePathEditor();active=restored.id;restoreWorkspace();}
-  }finally{restoringClosedTab=false;render();}
 }
 
 function syncRoots(t: SyncTab) {
@@ -2607,6 +2703,9 @@ function syncRoots(t: SyncTab) {
       ><code title="${esc(t.remote)}">${esc(t.remote)}</code>
     </div>
   </div>`;
+}
+function resumeSettingsMarkup(entry:RetainedSync){
+  return html`<section class="resume-settings"><p>${tr("前回の設定を使います。")}</p><div class="sync-option-flags"><label><input type="checkbox" id="delete-removed" name="deleteRemoved" disabled ${entry.deleteRemoved?"checked":""}>ファイルを削除する</label><label><input type="checkbox" id="recursive-sync" name="recursive" disabled ${entry.recursive?"checked":""}>サブディレクトリを更新する</label></div>${entry.deleteRemoved?html`<p class="warning">${tr("前回と同じ削除設定を使います。開始時の比較と変更監視で、同期対象内のローカルにないリモート項目を削除します。元に戻せない可能性があります。")}</p>`:""}<details class="resume-exclusions"><summary>除外ルール</summary><pre>${esc(entry.exclusionRules||tr("なし"))}</pre></details></section>`;
 }
 function statusbar(t?: SyncTab) {
   const state = t
@@ -2936,7 +3035,7 @@ function renderSettings() {
   >
     <header>
       <strong>設定</strong
-      ><button id="settings-close" aria-label="設定を閉じる">×</button>
+      ><span class="settings-header-actions"><span id="settings-version" class="settings-version">${getDisplayVersion()}</span><button id="settings-close" aria-label="設定を閉じる">×</button></span>
     </header>
     <label class="language-picker" for="language-select"
       ><span>${languageLabel}</span
@@ -2964,7 +3063,7 @@ function renderSettings() {
             ["light", tr("ライト")],
             ["dark", tr("ダーク")],
             ["midnight", tr("ミッドナイト")],
-            ["forest", tr("フォレスト")],
+            ["forest", tr("ジェイド")],
             ["mint", tr("ミント")],
           ] as const
         )
@@ -3083,7 +3182,6 @@ function bind() {
     render();
   });
   on("#add-tab", addWorkspace);
-  on("#restore-tab", ()=>{void restoreClosedWorkspace().catch(message);});
   on("#window-minimize", () => windowControl("minimize").catch(message));
   on("#window-maximize", () => windowControl("toggleMaximize").catch(message));
   on("#window-close", () => {
@@ -3201,11 +3299,13 @@ function bind() {
       openConnection();
       return;
     }
-    const own=ownedRetained();
+    const owner=workspace();
+    if(owner.loading.local||owner.loading.remote){message(tr("フォルダーの読み込みが完了してから同期してください。"));return;}
     dialog = {
       type: "start",
-      remote: remoteBrowse,
-      local: own&&sameRetainedConnection(own.profile,connected)&&own.remote===remoteBrowse ? own.local : freshWorkspaces.has(workspace())||own ? localBrowse : store.localFor(connected, remoteBrowse) || localBrowse,
+      workspaceId:owner.id,
+      remote: owner.remoteBrowse,
+      local: owner.localBrowse,
       p: { ...connected },
     };
     renderDialog();
@@ -3334,24 +3434,18 @@ function renderDialog() {
             </form>`
           : d.type === "start"
             ? html`<form id="start-form">
-                <div class="target">
-                  <small>リモート同期先 / ${esc(d.p.name)}</small
-                  ><code>${esc(d.remote)}</code>
-                </div>
-                <label
-                  >ローカル同期元<input
-                    name="local"
-                    required
-                    value="${esc(d.local)}" /></label
-                ><button type="button" id="pick-local">フォルダを選択</button
-                >${syncSettingsMarkup()}
+                ${syncPathSummary('destination',tr("リモート同期先 /")+" "+d.p.name,d.remote)}
+                ${syncPathSummary('source',d.retained?tr("同期元（前回のローカルフォルダー）"):tr("同期元（現在のローカルフォルダー）"),d.local)}
+                <input type="hidden" name="local" value="${esc(d.local)}">
+                ${d.retained?resumeSettingsMarkup(d.retained):syncSettingsMarkup()}
+
                 <p class="subtle">
-                  既存の同名ファイルを上書きします。初回は設定の対象となるファイルを送信し、その後は変更を監視します。削除とサブディレクトリの扱いは上の設定に従います。
+                  サイズと更新日時（1秒単位）が同じファイルは送信を省略します。内容の一致を保証する比較ではありません。同名で異なるファイルは、リモート側が新しくてもローカルで上書きします。その後は変更を監視します。
                 </p>
                 ${d.p.mode === "sftp" ? html`<p class="warning">実 SFTP：開始すると接続・アップロードを実行します。</p>` : html`<p class="mock-note">モック：ファイル監視と転送をシミュレーションします。</p>`}
                 <div class="actions">
                   <button type="button" id="cancel">キャンセル</button
-                  ><button class="primary">確認して同期開始</button>
+                  ><button class="primary">${d.retained?tr("確認して再開"):tr("確認して同期開始")}</button>
                 </div>
               </form>`
             : html`<p>同期停止を押し、停止完了後に改めて閉じてください。</p>
@@ -3400,6 +3494,7 @@ function renderDialog() {
         );
         if (owner && !owner.connection) owner.profileId = p.id;
         if (active === owner?.id) selected = p.id;
+        if (store.selectSavedProfile(p.id)) await persist();
       }
       if (dialog === d) {
         dialog = null;
@@ -3430,46 +3525,16 @@ function renderDialog() {
       if (dialog === d) $(".form-error")!.textContent = tError(e);
     }
   });
-  $("#pick-local")?.addEventListener("click", async () => {
-    if (!native) {
-      $(".form-error")!.textContent = tr(
-        "ブラウザ版はパスを入力してください。デスクトップ版では選択ダイアログが開きます。",
-      );
-      return;
-    }
-    const form = root.querySelector<HTMLFormElement>("#start-form")!;
-    if (
-      form.dataset.submitting ||
-      form.dataset.settingsSaving ||
-      form.dataset.pickingFolder
-    )
-      return;
-    form.dataset.pickingFolder = "true";
-    const start = form.querySelector<HTMLButtonElement>(".primary")!;
-    start.disabled = true;
-    try {
-      const path = await invoke("pick_folder", { language: getLanguage() });
-      if (path && form.isConnected) {
-        const input = form.querySelector<HTMLInputElement>("[name=local]")!;
-        input.value = path;
-        input.dispatchEvent(new Event("input"));
-      }
-    } catch (e) {
-      if (form.isConnected) $(".form-error")!.textContent = tError(e);
-    } finally {
-      delete form.dataset.pickingFolder;
-      if (!form.dataset.submitting && !form.dataset.settingsSaving)
-        start.disabled = false;
-    }
-  });
-  if (d.type === "start") {
-    const own=d.retained??ownedRetained();
-    const initial=own&&sameRetainedConnection(own.profile,d.p)&&own.remote===d.remote&&sameBrowsePath("local",own.local,d.local) ? {exclusionRules:own.exclusionRules,deleteRemoved:own.deleteRemoved,recursive:own.recursive,...(own.presetId?{presetId:own.presetId}:{})} : freshWorkspaces.has(workspace()) ? store.defaultSyncPreset() : undefined;
-    bindSyncSettings(root, store, d.p.id, d.remote, persist, initial, !!ownedRetained()||freshWorkspaces.has(workspace()));
+
+  if (d.type === "start"&&!d.retained) {
+    const own=ownedRetained();
+    const initial=own&&sameRetainedConnection(own.profile,d.p)&&own.remote===d.remote&&sameBrowsePath("local",own.local,d.local) ? {exclusionRules:own.exclusionRules,deleteRemoved:own.deleteRemoved,recursive:own.recursive,...(own.presetId?{presetId:own.presetId}:{})} : undefined;
+    bindSyncSettings(root, store, d.p.id, d.remote, persist, initial);
   }
   $("#start-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (d.type !== "start") return;
+    if(workspace()?.id!==d.workspaceId){root.querySelector<HTMLElement>(".form-error")!.textContent=tr("同期を開始したタブに戻って確認してください。");return;}
     if (!canUseConnection(d.p.mode)) {
       root.querySelector<HTMLElement>(".form-error")!.textContent =
         tr(disabledMockMessage);
@@ -3499,23 +3564,23 @@ function renderDialog() {
     startingWorkspace.starting = true;
     updatePrimaryState();
     try {
-      const local = String(formData.get("local") ?? "").trim();
+      const local = d.local;
       if (!local) throw Error(tr("ローカルフォルダを指定してください"));
       if (conflict(store.tabs, d.p, d.remote))
         throw Error(
           tr("同じ接続先で重なる同期が実行中です。先に停止してください"),
         );
       const id = crypto.randomUUID();
-      const exclusionRules = String(formData.get("exclusionRules") ?? "");
+      const exclusionRules = d.retained?.exclusionRules ?? String(formData.get("exclusionRules") ?? "");
       validateRules(exclusionRules);
       const rulesKey = exclusionKey(d.p.id, d.remote, local);
       const form = e.target as HTMLFormElement;
-      const deleteRemoved = form.querySelector<HTMLInputElement>(
+      const deleteRemoved = d.retained?.deleteRemoved ?? form.querySelector<HTMLInputElement>(
         "[name=deleteRemoved]",
       )!.checked;
-      const recursive =
+      const recursive = d.retained?.recursive ??
         form.querySelector<HTMLInputElement>("[name=recursive]")!.checked;
-      const presetId =
+      const presetId = d.retained ? d.retained.presetId :
         form.querySelector<HTMLSelectElement>("#sync-preset")!.value;
       store.syncOptions[rulesKey] = {
         deleteRemoved,
@@ -3592,8 +3657,8 @@ function renderDialog() {
       render();
     } catch (e) {
       if(retainedId){startingRetained.delete(retainedId);if(!cancelled)retainedFailures.set(retainedId,rawError(e));}
-      paintRetainedSyncs();
       startingWorkspace.starting = false;
+      paintRetainedSyncs();
       delete startForm.dataset.submitting;
       startForm
         .querySelectorAll<HTMLInputElement>("input,select,textarea,button")
@@ -3741,10 +3806,15 @@ window.addEventListener("beforeunload", (e) => {
   }
 });
 window.addEventListener("keydown", (e) => {
-  if (!initialized || !settingsAvailable) return;
+  if (!initialized || !settingsAvailable || windowClosing) return;
   if (!e.ctrlKey || !["t", "w", "Tab"].includes(e.key)) return;
   e.preventDefault();
   if (dialog || selectionDrag || pointerBusy) return;
+  if(!store.workspaces.length) {
+    if(e.key==="t") addWorkspace();
+    else if(e.key==="w") void closeEmptyWindow();
+    return;
+  }
   if (e.key === "t") addWorkspace();
   else if (e.key === "w") closeWorkspace(active);
   else {
@@ -3753,6 +3823,63 @@ window.addEventListener("keydown", (e) => {
     switchWorkspace(store.workspaces[(i + (e.shiftKey ? -1 : 1) + n) % n].id);
   }
 });
+let updateSettleToken: string | undefined;
+let restoreUpdateRoots: (() => void) | undefined;
+let updateRootsObserver: MutationObserver | undefined;
+let updateSettleDisposed = false;
+const updateSettleListeners: (() => void)[] = [];
+function updateSettleReady() {
+  return initialized && settingsAvailable && !windowClosing && !startupFailed &&
+    !settingsOpen && !dialog && !themeSaving && !connectionMutationPending &&
+    !bookmarkMutationPending && !retainedWriteCount && !sharedSettingsReading &&
+    !movingWorkspaces.size && !outboundTransfers.size && !nativeDrag &&
+    !closingWorkspaces.size && !startingRetained.size && !retrying.size &&
+    !automaticBusy() && !store.workspaces.some(w => w.connecting || w.starting || w.loading.local || w.loading.remote) &&
+    !store.tabs.some(t => t.status !== "stopped");
+}
+function unsealStartupUpdate() {
+  updateSettleToken = undefined;
+  updateRootsObserver?.disconnect(); updateRootsObserver = undefined;
+  restoreUpdateRoots?.(); restoreUpdateRoots = undefined;
+}
+function blockUpdateInteraction(event: Event) {
+  if (!updateSettleToken) return;
+  const target = event.target;
+  // The updater dialog is a sibling of the app portals and stays usable.
+  if (target instanceof Element && target.closest("#startup-update-dialog")) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+}
+const updateInteractionEvents = ["keydown", "keyup", "click", "dblclick", "contextmenu", "pointerdown", "pointerup", "submit", "input", "change", "wheel"];
+async function initializeUpdateSettlement() {
+  const events = window.__TAURI__?.event;
+  if (!events) return;
+  for (const name of updateInteractionEvents) window.addEventListener(name, blockUpdateInteraction, { capture: true, passive: false });
+  const retainListener = (stop: () => void) => { if (updateSettleDisposed) stop(); else updateSettleListeners.push(stop); };
+  retainListener(await events.listen("startup-update-unseal", unsealStartupUpdate));
+  retainListener(await events.listen<{token: string}>("startup-update-settle", event => {
+    const token = event.payload?.token;
+    if (updateSettleDisposed || typeof token !== "string" || !token || token === updateSettleToken) return;
+    unsealStartupUpdate(); updateSettleToken = token;
+    const roots = Array.from(document.querySelectorAll<HTMLElement>("#app,#modal-root,#settings-root"));
+    restoreUpdateRoots = freezeUpdateRoots(roots);
+    updateRootsObserver = new MutationObserver(() => { if (updateSettleToken) for (const root of roots) if (!root.inert) root.inert = true; });
+    for (const root of roots) updateRootsObserver.observe(root, { attributes: true, attributeFilter: ["inert"] });
+    void (async () => {
+      let ready = false;
+      try { ready = await settleUpdateWrites(() => [settingsWrites, retainedWrites], updateSettleReady); }
+      catch (error) { message(error); }
+      if (updateSettleDisposed || updateSettleToken !== token) return;
+      await invoke("ack_startup_update", { token, ready });
+    })().catch(message);
+  }));
+}
+window.addEventListener("pagehide", () => {
+  updateSettleDisposed = true; unsealStartupUpdate();
+  for (const stop of updateSettleListeners.splice(0)) stop();
+  for (const name of updateInteractionEvents) window.removeEventListener(name, blockUpdateInteraction, true);
+});
+await initializeUpdateSettlement();
+
 try {
   if (native) {
     windowRegistration = await invoke("register_window");
@@ -3768,6 +3895,7 @@ try {
     : JSON.parse(localStorage.getItem("syncfiles-v1") || "{}");
   const freshMain = windowRegistration?.label === "main" && windowRegistration.freshProcess === true;
   store = windowRegistration && !freshMain ? createWindowStore(data, windowRegistration.ownedWorkspaceIds) : new Store(data);
+  previewBootstrap = !!windowRegistration?.pendingTransfer && windowRegistration.pendingTransfer.targetKind !== "existing" && ["dragging","pending"].includes(windowRegistration.pendingTransfer.phase);
   setLanguage(store.language);
   document.documentElement.lang = store.language;
   applyExplorerDensity(store.compactExplorer);
@@ -3778,7 +3906,7 @@ try {
   // Resolve legacy/absent preference only after the complete validated load.
   // Await the ordinary CAS write before exposing a workspace or editable UI.
   // A rejected/uncertain write falls through to the locked startup error state.
-  if (themeNeedsSave) await persist();
+  if (themeNeedsSave && !previewBootstrap) await persist();
   if (
     mockEnabled &&
     !store.profiles.length &&
@@ -3794,7 +3922,7 @@ try {
     });
     await persist();
   }
-  selected = store.profiles[0]?.id ?? "";
+  selected = store.initialProfileId();
   if (native) localBrowse = await invoke("default_folder");
   defaultLocalBrowse=localBrowse;
   if (windowRegistration) {
@@ -3803,7 +3931,7 @@ try {
       const runtime = windowRegistration.jobs?.find(j => j.workspaceId === descriptor.id && j.job)?.job as Record<string, unknown> | undefined;
       const connection = descriptor.connection ?? (runtime?.profile as Profile | undefined);
       if (!connection && !runtime) {
-        if (!saved) { const blank = store.createWorkspace(selected, defaultLocalBrowse); blank.id = descriptor.id; freshWorkspaces.add(blank); }
+        if (!saved) { const blank = store.createWorkspace(selected, defaultLocalBrowse); blank.id = descriptor.id; }
         continue;
       }
       const retained = store.retainedSyncs.find(r => r.ownerTabId === descriptor.id && !r.ownerTabClosed &&
@@ -3844,8 +3972,7 @@ try {
     document.documentElement.dataset.transferPhase = "pending";
   }
   const restored=store.workspaces[0];
-  const first = restored ?? store.createWorkspace(selected, defaultLocalBrowse);
-  if(!restored&&store.retainedSyncs.length)freshWorkspaces.add(first);
+  const first = restored ?? store.createWorkspace(selected, newWorkspaceLocal(selected));
   first.notice = notice;
   active = incomingTransfer?.workspaceId ?? first.id;
   restoreWorkspace();
@@ -3855,11 +3982,14 @@ try {
   bufferedTransferEvents.clear();
   for (const record of outboundTransfers.values()) void monitorOutboundTransfer(record, true);
   if (incomingTransfer) {
-    const outcome = await invoke("workspace_transfer_ready", { token: incomingTransfer.token });
-    acceptTransferRecord(outcome);
-    if (incomingTransfer.phase === "pending") acceptTransferRecord(await invoke("workspace_transfer_status", { token: incomingTransfer.token }));
-    if (incomingTransfer.phase !== "committed") throw Error("Workspace transfer did not commit");
-    if (!first.connection) openConnection(first);
+    if(incomingTransfer.phase === "dragging") {
+      // Real workspace DOM is hydrated but inert; this only makes the native
+      // provisional window visible. Ownership still belongs to its source.
+      const outcome=await invoke("workspace_drag_preview_ready",{token:incomingTransfer.token});
+      if(outcome.phase !== "dragging")acceptTransferRecord(outcome);
+    }
+    if(incomingTransfer?.phase === "pending")await finishIncomingTransfer(incomingTransfer);
+    else if(incomingTransfer?.phase !== "dragging" && incomingTransfer?.phase !== "committed")throw Error("Workspace transfer did not commit");
   } else {
     await Promise.all(store.workspaces.map(w => registerWorkspace(w.id)));
     initialized = true;
@@ -3869,14 +3999,22 @@ try {
     }
   }
 } catch (e) {
+  const failedTransfer=incomingTransfer ?? windowRegistration?.pendingTransfer;
+  if(failedTransfer && ["dragging","pending"].includes(failedTransfer.phase)){
+    void invoke("abort_workspace_transfer",{token:failedTransfer.token}).catch(()=>{});
+  }
   initialized = true;
   settingsAvailable = false;
+  startupFailed = true;
   message(
     tr(
       "設定を読み込めませんでした。上書きを避けるためアプリを再起動してください。 ",
     ) + e,
   );
 }
+
+void initializeUpdateRestart(windowRegistration?.label,()=>initialized&&settingsAvailable&&!startupFailed&&!previewBootstrap&&!incomingTransfer);
+void initializeStartupUpdate();
 
 function takeSecret(form: HTMLFormElement): string {
   const field = form.querySelector<HTMLInputElement>("[name=passphrase]");
@@ -3984,6 +4122,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       d.profileId = node?.kind === "profile" ? node.profileId : "";
       w.profileId = d.profileId;
       if (active === w.id) selected = d.profileId;
+      if (store.selectSavedProfile(d.profileId)) void persist().catch(message);
       renderConnection(root, d);
       root
         .querySelector<HTMLButtonElement>(
@@ -4125,7 +4264,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
         throw Error(tr("接続を中止しました"));
       }
       const owned=store.ownRetainedForWorkspace(w.id);
-      const savedBrowse = owned&&sameRetainedConnection(owned.profile,snapshot) ? {local:owned.local,remote:owned.remote} : freshWorkspaces.has(w) ? {} : store.lastBrowse(snapshot);
+      const savedBrowse = owned&&sameRetainedConnection(owned.profile,snapshot) ? {local:owned.local,remote:owned.remote} : store.lastBrowse(snapshot);
       store.connectWorkspace(w.id, snapshot);
       // Establish the initial tree view once. Subsequent navigation and listing
       // updates preserve every chevron's state.

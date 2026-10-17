@@ -4,3 +4,11 @@
 [data-compact-explorer=true] .tab-sync-context{padding:5px 10px;gap:6px}
 .pane > header .tab-sync-actions + #prepare{margin-left:0;}
 .window-transfer-menu{position:fixed;z-index:11000;min-width:210px;padding:4px;border:1px solid var(--border-main,#777);border-radius:5px;background:var(--surface-panel,Canvas);color:var(--text-main,CanvasText);box-shadow:0 4px 16px #0005}.window-transfer-menu button{display:block;width:100%;text-align:left;padding:8px 12px;background:transparent;color:inherit;border:0}.window-transfer-menu button:focus-visible{outline:2px solid var(--focus-ring,#226cc7);outline-offset:-2px}.window-transfer-menu button:disabled{opacity:.5}.tab[data-transfer-pending=true]{opacity:.65}main[data-transfer-pending=true]{opacity:.65}
+.stopped-context{position:relative;display:inline-flex;align-items:center;flex-shrink:0;gap:4px;padding:3px 6px;border:1px solid var(--border-main,#b3bdc9);border-radius:4px;color:var(--text-muted,#52657d);font-size:11px;cursor:help;white-space:nowrap}
+.stopped-context:focus-visible{outline:2px solid var(--focus-ring,#226cc7);outline-offset:2px}
+.stopped-context-paths{display:none;position:absolute;z-index:500;top:calc(100% + 5px);right:0;width:max-content;max-width:min(420px,calc(100vw - 32px));padding:9px 12px;border:1px solid var(--border-main,#b3bdc9);border-radius:5px;background:var(--surface-panel,#fff);color:var(--text-main,#243348);box-shadow:0 4px 16px var(--shadow-dialog,#0003);font-size:12px;white-space:normal;cursor:default}
+.stopped-context-paths>span{display:block;color:var(--text-muted,#52657d)}
+.stopped-context-paths code{display:block;overflow-wrap:anywhere;white-space:normal;color:var(--text-main,#243348)}
+.stopped-context:is(:hover,:focus,:focus-within) .stopped-context-paths{display:block}
+.pane>header .tab-sync-actions,.pane>header .stopped-context,.pane>header .stopped-context-paths,.pane>header .stopped-context-paths>span{overflow:visible;text-overflow:clip}
+.pane>header .stopped-context-paths,.pane>header .stopped-context-paths>span{white-space:normal}

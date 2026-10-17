@@ -12,7 +12,7 @@ function stable(value: unknown): string {
 export function sameSettingsAfterHostPin(before: Settings, after: Settings, profileId: string): boolean {
   const snapshot = (data: Settings) => {
     const value = new Store(data).serialize() as unknown as Record<string, unknown>;
-    for (const key of ["settingsRevision", "connectionTreeChanged", "bookmarkTreeChanged", "browseLocationsChanged"])
+    for (const key of ["settingsRevision", "connectionTreeChanged", "bookmarkTreeChanged", "browseLocationsChanged", "lastSelectedProfileChanged"])
       delete value[key];
     value.profiles = (value.profiles as Settings["profiles"]).map(profile =>
       profile.id === profileId ? { ...profile, hostKey: "" } : profile,

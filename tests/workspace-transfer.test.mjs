@@ -105,8 +105,7 @@ test("moves exact IDs with class instances and preserves source until explicit d
   detachTransferredWorkspace(store, w.id);
   assert.equal(w.generation.local, generation + 1);
   assert.equal(store.tabs.length, 0);
-  assert.equal(store.workspaces.length, 1);
-  assert.notEqual(store.workspaces[0].id, w.id);
+  assert.equal(store.workspaces.length, 0);
 });
 test("hydrated remote listing retains its connection signature on the first render", () => {
   const { store, w } = fixture();

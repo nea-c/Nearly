@@ -1,3 +1,4 @@
+import {checkVersions} from './version.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,6 +124,7 @@ export async function publishBuild(root, artifact, config, target) {
 }
 
 export async function runBuild(args = process.argv.slice(2)) {
+  await checkVersions();
   if (process.platform !== "win32")
     throw Error("Windows builds require a Windows host with MSVC tools");
   const options = buildOptions(args);

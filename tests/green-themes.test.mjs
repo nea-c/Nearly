@@ -43,3 +43,20 @@ for(const theme of ['forest','mint']) test(`${theme} text, warnings, errors, sel
   for(const bg of ['surface-base','surface-panel','surface-input']) assert.ok(contrast(p['focus-ring'],p[bg])>=3,`${theme} visible focus on ${bg}`);
   console.log(`${theme} contrast ${JSON.stringify(metrics)}`);
 });
+
+test('Forest checkbox fill and tick remain distinguishable in active and disabled states',()=>{
+  const p=palette('forest');
+  for(const fill of ['checkbox-on','checkbox-on-hover','checkbox-disabled-on']) {
+    assert.ok(contrast(p[fill],p['checkbox-mark'])>=4.5,`${fill} tick contrast`);
+    assert.ok(contrast(p[fill],p['surface-input'])>=3,`${fill} filled state contrast`);
+  }
+  assert.ok(contrast(p['border-main'],p['surface-input'])>=3,'unchecked outline contrast');
+});
+
+test('Jade lifts workspace and panel luminance without flattening their hierarchy',()=>{
+  const p=palette('forest');
+  const prior={'surface-base':'#0d1110','surface-panel':'#151c19','surface-raised':'#202a25','surface-input':'#101713'};
+  for(const[token,old]of Object.entries(prior))assert.ok(luminance(p[token])>=luminance(old)*1.8,`${token} visibly brighter`);
+  assert.ok(luminance(p['surface-panel'])>luminance(p['surface-base']));
+  assert.ok(luminance(p['surface-raised'])>luminance(p['surface-panel']));
+});

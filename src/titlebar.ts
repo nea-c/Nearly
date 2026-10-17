@@ -9,7 +9,7 @@ const esc = (value: unknown) =>
         c
       ]!,
   );
-export function titlebar(store: Store, active: string, settingsOpen: boolean, restorePending=false) {
+export function titlebar(store: Store, active: string, settingsOpen: boolean) {
   const gear =
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9.5 3-.6 2.4-2 .9-2.2-.7-2.5 4.3L4 11.5v2l-1.8 1.6 2.5 4.3 2.2-.7 2 .9.6 2.4h5l.6-2.4 2-.9 2.2.7 2.5-4.3-1.8-1.6v-2l1.8-1.6-2.5-4.3-2.2.7-2-.9L14.5 3z"/><circle cx="12" cy="12.5" r="3.5"/></svg>';
   return html`<header class="titlebar"><div class="tabs" role="tablist" aria-label="作業タブ">${store.workspaces
@@ -24,5 +24,5 @@ export function titlebar(store: Store, active: string, settingsOpen: boolean, re
     })
     .join(
       "",
-    )}</div><button id="add-tab" class="add-tab" aria-label="新しいタブ" title="新しいタブ (Ctrl+T)" ${store.workspaces.length >= 16 || (restorePending&&store.workspaces.length>=15) ? "disabled" : ""}>＋</button>${store.retainedSyncs?.some(r=>r.ownerTabId!==undefined&&r.ownerTabClosed===true)?html`<button id="restore-tab" class="add-tab" aria-label="閉じたタブを復元" title="閉じたタブを復元" ${store.workspaces.length>=16||restorePending?"disabled":""}>&#8630;</button>`:""}<div class="title-drag" data-tauri-drag-region aria-label="ウィンドウを移動"></div><button id="settings-toggle" class="settings-toggle" aria-label="設定" aria-expanded="${settingsOpen}" aria-controls="settings-popup">${gear}</button><span class="caption-divider" aria-hidden="true"></span><div class="window-controls"><button id="window-minimize" aria-label="最小化" ${native ? "" : "disabled"}>${windowIcon("minimize")}</button><button id="window-maximize" aria-label="${windowMaximized ? t("元のサイズに戻す") : t("最大化")}" ${native ? "" : "disabled"}>${windowIcon(windowMaximized ? "restore" : "maximize")}</button><button id="window-close" aria-label="ウィンドウを閉じる" ${native ? "" : "disabled"}>${windowIcon("close")}</button></div></header>`;
+    )}</div><button id="add-tab" class="add-tab" aria-label="新しいタブ" title="新しいタブ (Ctrl+T)" ${store.workspaces.length >= 16 ? "disabled" : ""}>＋</button><div class="title-drag" data-tauri-drag-region aria-label="ウィンドウを移動"></div><button id="settings-toggle" class="settings-toggle" aria-label="設定" aria-expanded="${settingsOpen}" aria-controls="settings-popup">${gear}</button><span class="caption-divider" aria-hidden="true"></span><div class="window-controls"><button id="window-minimize" aria-label="最小化" ${native ? "" : "disabled"}>${windowIcon("minimize")}</button><button id="window-maximize" aria-label="${windowMaximized ? t("元のサイズに戻す") : t("最大化")}" ${native ? "" : "disabled"}>${windowIcon(windowMaximized ? "restore" : "maximize")}</button><button id="window-close" aria-label="ウィンドウを閉じる" ${native ? "" : "disabled"}>${windowIcon("close")}</button></div></header>`;
 }

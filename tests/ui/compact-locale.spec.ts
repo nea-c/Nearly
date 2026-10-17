@@ -437,13 +437,19 @@ test("English startup translates owned profile editor labels while preserving Ja
   ).toEqual([]);
 });
 
-test("start dialog keeps its per-path draft controller and delete warning while locale is deferred", async ({
+test("fixed sync confirmation preserves its draft and delete warning while locale is deferred", async ({
   page,
 }) => {
   await boot(page);
   await connect(page);
+  await page.locator("#local-path").fill("C:\\draft-one");
+  await page.locator("#local-path").press("Enter");
+  await expect(page.locator("#local-path")).toHaveValue("C:\\draft-one");
   await page.locator("#prepare").click();
-  await page.locator("#start-form [name=local]").fill("C:\\draft-one");
+  // Sync captures the current explorer source; confirmation cannot select a
+  // different folder. Per-pair settings are exercised through explorer browsing.
+  await expect(page.locator("#start-form [name=local]")).toHaveAttribute("type", "hidden");
+  await expect(page.locator("[data-sync-source]")).toHaveText("C:\\draft-one");
   await page.locator("#delete-removed").check();
   await page
     .locator("#exclusion-details")
@@ -474,12 +480,14 @@ test("start dialog keeps its per-path draft controller and delete warning while 
   ).toBe(true);
   await expect(page.locator("#delete-warning")).toBeVisible();
   await page.locator("#settings-close").click();
-  await page.locator("#start-form [name=local]").fill("C:\\draft-two");
-  await expect(page.locator("#delete-removed")).not.toBeChecked();
-  await page.locator("#start-form [name=local]").fill("C:\\draft-one");
+  await expect(page.locator("[data-sync-source]")).toHaveText("C:\\draft-one");
+  await expect(page.locator("#start-form [name=local]")).toHaveValue("C:\\draft-one");
+  await expect(page.locator("#local-path")).toHaveValue("C:\\draft-one");
   await expect(page.locator("#delete-removed")).toBeChecked();
   await expect(page.locator("#exclusion-rules")).toHaveValue("設定/**");
   await expect(page.locator("#delete-warning")).toBeVisible();
+  expect(await page.evaluate(()=>window.startDraftForm===document.querySelector('#start-form'))).toBe(true);
+  expect((await saves(page)).length).toBe(count);
 });
 
 test("a queued profile save cannot retry after a held appearance write fails", async ({

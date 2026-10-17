@@ -27,7 +27,7 @@ const record = (id, ownerTabId, ownerTabClosed = false) => ({
 const ids = (s) => s.workspaces.map((w) => w.id);
 const records = (s) => s.serialize().retainedSyncs.map((r) => r.id);
 const owned = () =>
-  new Store({
+  recoverStore({
     profiles: [profile],
     retainedSyncs: [record("a", "a"), record("b", "b"), record("c", "c")],
   });
@@ -63,12 +63,16 @@ test("reorder accepts only an exact complete current-ID permutation, atomically"
   assert.equal(s.workspaces, original);
   assert.equal(s.reorderWorkspaces(["c", "a", "b"]), true);
   assert.deepEqual(ids(s), ["c", "a", "b"]);
-  const empty = new Store();
+  const empty = recoverStore();
   assert.equal(empty.reorderWorkspaces([]), false);
 });
 
 test("reorder preserves every workspace and job identity across all live states", () => {
-  const s = new Store({ profiles: [profile], theme: "forest", language: "en" });
+  const s = recoverStore({
+    profiles: [profile],
+    theme: "forest",
+    language: "en",
+  });
   const states = [undefined, "running", "stopped", "failed", "stopping"];
   for (const status of states) {
     const w = s.createWorkspace(profile.id, "C:\\fixture\\" + status);
@@ -117,7 +121,7 @@ test("reorder preserves every workspace and job identity across all live states"
 });
 
 test("serialization fills only owned-open slots and reloads disconnected in live order", () => {
-  const s = new Store({
+  const s = recoverStore({
     profiles: [profile],
     retainedSyncs: [
       record("legacy-1"),
@@ -143,7 +147,7 @@ test("serialization fills only owned-open slots and reloads disconnected in live
     "legacy-3",
   ]);
   assert.equal(JSON.stringify(s.retainedSyncs), retained);
-  const loaded = new Store(s.serialize());
+  const loaded = recoverStore(s.serialize());
   assert.deepEqual(ids(loaded), ["c", "a", "b"]);
   assert.equal(loaded.tabs.length, 0);
   assert.ok(loaded.workspaces.every((w) => !w.connection && !w.jobId));
@@ -151,19 +155,17 @@ test("serialization fills only owned-open slots and reloads disconnected in live
     loaded.retainedSyncs.filter((r) => r.ownerTabClosed),
     s.retainedSyncs.filter((r) => r.ownerTabClosed),
   );
-  assert.equal(loaded.restoreLastRetainedWorkspace().id, "y");
-  assert.equal(loaded.restoreLastRetainedWorkspace().id, "x");
+  assert.equal(loaded.restoreLastRetainedWorkspace(), undefined);
+  assert.deepEqual(ids(loaded), ["c", "a", "b"]);
 });
 
-test("close then restore appends the restored owner after a reorder and survives reload", () => {
+test("closed owners stay closed after reorder and native-owner recovery", () => {
   const s = owned();
   s.reorderWorkspaces(["c", "a", "b"]);
   s.closeWorkspace("a");
   s.closeWorkspace("c");
-  assert.equal(s.restoreLastRetainedWorkspace().id, "c");
-  assert.deepEqual(ids(new Store(s.serialize())), ["b", "c"]);
-  assert.equal(s.restoreLastRetainedWorkspace().id, "a");
-  assert.deepEqual(ids(new Store(s.serialize())), ["b", "c", "a"]);
+  assert.equal(s.restoreLastRetainedWorkspace(), undefined);
+  assert.deepEqual(ids(recoverStore(s.serialize())), ["b"]);
 });
 
 test("unowned gaps and a context created after dragging serialize by current live order", () => {
@@ -174,7 +176,7 @@ test("unowned gaps and a context created after dragging serialize by current liv
   assert.deepEqual(records(s), ["b", "c", "a"]);
   s.upsertRetainedSync(record("new", fresh.id));
   assert.deepEqual(records(s), ["new", "b", "c", "a"]);
-  assert.deepEqual(ids(new Store(s.serialize())), [fresh.id, "b", "c", "a"]);
+  assert.deepEqual(ids(recoverStore(s.serialize())), [fresh.id, "b", "c", "a"]);
 });
 
 test("open owner awaiting materialization stays in place while live owners reorder", () => {
@@ -184,7 +186,7 @@ test("open owner awaiting materialization stays in place while live owners reord
   s.reorderWorkspaces(["b", "a"]);
   assert.deepEqual(records(s), ["b", "a", "c"]);
   assert.equal(JSON.stringify(s.retainedSyncs), before);
-  assert.deepEqual(ids(new Store(s.serialize())), ["b", "a", "c"]);
+  assert.deepEqual(ids(recoverStore(s.serialize())), ["b", "a", "c"]);
 });
 
 test("maximum 16-tab order roundtrips with 100 interleaved retained records", () => {
@@ -195,7 +197,7 @@ test("maximum 16-tab order roundtrips with 100 interleaved retained records", ()
         ? record("r" + i)
         : record("r" + i, "closed" + i, true),
   );
-  const s = new Store({ retainedSyncs });
+  const s = recoverStore({ retainedSyncs });
   const order = ids(s).reverse();
   assert.equal(order.length, 16);
   assert.equal(s.reorderWorkspaces(order), true);
@@ -204,7 +206,7 @@ test("maximum 16-tab order roundtrips with 100 interleaved retained records", ()
     if (r.ownerTabId === undefined || r.ownerTabClosed)
       assert.deepEqual(saved[i], r);
   assert.equal(saved.length, 100);
-  assert.deepEqual(ids(new Store(s.serialize())), order);
+  assert.deepEqual(ids(recoverStore(s.serialize())), order);
 });
 
 test("invalid duplicate runtime workspace IDs cannot duplicate or drop persisted contexts", () => {
@@ -218,3 +220,12 @@ test("invalid duplicate runtime workspace IDs cannot duplicate or drop persisted
   );
   assert.equal(JSON.stringify(s.retainedSyncs), before);
 });
+
+function recoverStore(data = {}) {
+  const validated = new Store(data, { ownedWorkspaceIds: [] });
+  return new Store(data, {
+    ownedWorkspaceIds: validated.retainedSyncs
+      .filter((r) => r.ownerTabId && !r.ownerTabClosed)
+      .map((r) => r.ownerTabId),
+  });
+}

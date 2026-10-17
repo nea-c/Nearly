@@ -1,0 +1,6 @@
+{
+  "identifier": "local.syncfiles.native.lifecycleqa",
+  "build": {
+    "beforeBuildCommand": null
+  }
+}

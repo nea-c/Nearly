@@ -84,6 +84,8 @@ export interface SyncPreset extends SyncOptions {
   exclusionRules: string;
 }
 export interface Settings {
+  lastSelectedProfileId?: string;
+  lastSelectedProfileChanged?: boolean;
   retainedSyncs?: RetainedSync[];
   settingsRevision?: number;
   version: 1;
@@ -238,6 +240,25 @@ export class Queue {
   }
 }
 export class Store {
+  lastSelectedProfileId: string | undefined;
+  lastSelectedProfileChanged = false;
+  lastSelectedProfileRevision = 0;
+  initialProfileId(): string {
+    return this.profiles.some(p => p.id === this.lastSelectedProfileId)
+      ? this.lastSelectedProfileId! : this.profiles[0]?.id ?? "";
+  }
+  selectSavedProfile(id: string): boolean {
+    if (!this.profiles.some(p => p.id === id)) return false;
+    this.lastSelectedProfileId = id;
+    this.lastSelectedProfileChanged = true;
+    this.lastSelectedProfileRevision++;
+    return true;
+  }
+  markLastSelectedProfileSaved(revision = this.lastSelectedProfileRevision): boolean {
+    if (revision !== this.lastSelectedProfileRevision) return false;
+    this.lastSelectedProfileChanged = false;
+    return true;
+  }
   browseLocations: BrowseLocations = {};
   browseLocationsChanged = false;
   browsePreferencesRevision = 0;
@@ -281,8 +302,8 @@ export class Store {
     return true;
   }
   createWorkspace(
-    profileId = this.profiles[0]?.id ?? "",
-    localBrowse = "C:\\Projects",
+    profileId = this.initialProfileId(),
+    localBrowse?: string,
   ): Workspace {
     if (this.workspaces.length >= 16) throw Error("タブは最大16個です");
     let id: string;
@@ -292,11 +313,13 @@ export class Store {
       this.workspaces.some((w) => w.id === id) ||
       this.retainedSyncs.some((r) => r.ownerTabId === id)
     );
+    const profile = this.profiles.find((p) => p.id === profileId);
+    const remembered = profile ? this.lastBrowse(profile) : {};
     const workspace: Workspace = {
       id,
       profileId,
-      localBrowse,
-      remoteBrowse: "/",
+      localBrowse: localBrowse ?? remembered.local ?? "C:\\Projects",
+      remoteBrowse: remembered.remote ?? "/",
       entries: { local: [], remote: [] },
       loading: { local: false, remote: false },
       generation: { local: 0, remote: 0 },
@@ -345,23 +368,13 @@ export class Store {
       (r) => r.ownerTabId === workspaceId,
     );
     if (index < 0 || this.retainedSyncs[index].ownerTabClosed) return;
-    const [record] = this.retainedSyncs.splice(index, 1);
-    this.retainedSyncs.push({ ...record, ownerTabClosed: true });
+    // An explicit close ends this owner's session-only stopped context.
+    // Unrelated closed, foreign, and legacy records remain unchanged.
+    this.retainedSyncs.splice(index, 1);
   }
   restoreLastRetainedWorkspace(): Workspace | undefined {
-    const record = [...this.retainedSyncs]
-      .reverse()
-      .find((r) => r.ownerTabId !== undefined && r.ownerTabClosed === true);
-    if (!record) return undefined;
-    if (this.workspaces.length >= 16)
-      throw Error("At most 16 open retained tabs");
-    record.ownerTabClosed = false;
-    try {
-      return this.ensureRetainedWorkspace(record.ownerTabId!);
-    } catch (error) {
-      record.ownerTabClosed = true;
-      throw error;
-    }
+    // Historical closed records remain opaque shared metadata, never reopenable tabs.
+    return undefined;
   }
   listRetainedSyncs(): RetainedSync[] {
     return validateRetainedSyncs(this.retainedSyncs);
@@ -466,7 +479,17 @@ export class Store {
     this.tabs = this.tabs.filter((t) => t.id !== workspace.jobId);
     workspace.jobId = undefined;
     workspace.profileId = profileId;
-    workspace.remoteBrowse = "/";
+    const remembered = this.lastBrowse(
+      this.profiles.find((p) => p.id === profileId)!,
+    );
+    workspace.localBrowse = remembered.local ?? workspace.localBrowse;
+    workspace.remoteBrowse = remembered.remote ?? "/";
+    workspace.navigation.local = new BrowseHistory();
+    workspace.entries.local = [];
+    workspace.generation.local++;
+    workspace.loading.local = false;
+    workspace.trees.local = new FolderTree("local", PC_ROOT);
+    workspace.selections.local = new FileSelection();
     workspace.navigation.remote = new BrowseHistory();
     workspace.entries.remote = [];
     workspace.generation.remote++;
@@ -496,6 +519,10 @@ export class Store {
     data: Partial<Settings> = {},
     options: { ownedWorkspaceIds?: readonly string[] } = {},
   ) {
+    if (data.lastSelectedProfileId != null &&
+      (typeof data.lastSelectedProfileId !== "string" || !data.lastSelectedProfileId || data.lastSelectedProfileId.length > 128))
+      throw Error("Invalid last selected profile ID");
+    this.lastSelectedProfileId = data.lastSelectedProfileId ?? undefined;
     if (data.retainedSyncs !== undefined)
       this.retainedSyncs = validateRetainedSyncs(data.retainedSyncs);
     if (data.settingsRevision !== undefined) {
@@ -700,8 +727,7 @@ export class Store {
       if (
         record.ownerTabId !== undefined &&
         record.ownerTabClosed === false &&
-        (options.ownedWorkspaceIds === undefined ||
-          options.ownedWorkspaceIds.includes(record.ownerTabId))
+        options.ownedWorkspaceIds?.includes(record.ownerTabId)
       )
         this.ensureRetainedWorkspace(record.ownerTabId);
     this.lastGoodLayout = {
@@ -969,17 +995,15 @@ export class Store {
   ) {
     if (!this.profiles.some((p) => p.id === id))
       throw Error("接続先が見つかりません");
-    if (this.retainedSyncs.some((record) => record.profile.id === id))
-      throw Error(
-        "Remove retained sync entries before deleting this connection profile",
-      );
     if (
       references.workspaces.some(
         (w) =>
           w.connection?.id === id ||
           (w.profileId === id && (w.connecting || w.starting)),
       ) ||
-      references.tabs.some((t) => t.profile.id === id && t.status !== "stopped")
+      references.tabs.some(
+        (t) => t.profile.id === id && (t.status !== "stopped" || t.busy),
+      )
     )
       throw Error(
         "この接続先は接続中・接続処理中・同期中に使用されています。停止してタブを閉じてから削除してください。",
@@ -1110,6 +1134,8 @@ export class Store {
         this.workspaces,
       ),
       settingsRevision: this.settingsRevision,
+      lastSelectedProfileId: this.lastSelectedProfileId,
+      lastSelectedProfileChanged: this.lastSelectedProfileChanged,
       profiles: this.profiles,
       history: this.history,
       theme: this.theme,

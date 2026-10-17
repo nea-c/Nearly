@@ -462,7 +462,6 @@ export function detachTransferredWorkspace(
   w.trees.remote.reset(w.trees.remote.root);
   store.workspaces = store.workspaces.filter((x) => x !== w);
   store.tabs = store.tabs.filter((j) => j.id !== w.jobId);
-  if (!store.workspaces.length) store.createWorkspace();
 }
 /** Native owner IDs filter local tabs; all global retained records remain in settings. */
 export function createWindowStore(

@@ -29,7 +29,7 @@ const rec = (id, ownerTabId, ownerTabClosed = false) => ({
   ...(ownerTabId === undefined ? {} : { ownerTabId, ownerTabClosed }),
 });
 test("owned open contexts restore only their stable disconnected tab, legacy stays hidden", () => {
-  const s = new Store({
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [rec("legacy"), rec("a", "tab-a"), rec("b", "tab-b", true)],
   });
@@ -49,21 +49,26 @@ test("owned open contexts restore only their stable disconnected tab, legacy sta
   copy.local = "changed";
   assert.equal(s.ownRetainedForWorkspace(w.id).local, w.localBrowse);
 });
-test("closing persists dormant owner and explicit undo restores same isolated tab without connection", () => {
-  const s = new Store({
+test("closing removes only the explicit owner context without a reopen operation", () => {
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [rec("a", "tab-a"), rec("b", "tab-b")],
   });
   s.closeWorkspace("tab-a");
-  assert.equal(s.retainedSyncs.find((x) => x.id === "a").ownerTabClosed, true);
+  assert.equal(
+    s.retainedSyncs.find((x) => x.id === "a"),
+    undefined,
+  );
   assert.equal(s.workspaces.length, 1);
   assert.equal(s.ownRetainedForWorkspace("tab-b").id, "b");
-  const loaded = new Store(s.serialize());
+  const loaded = recoverStore(s.serialize());
   assert.equal(loaded.workspaces[0].id, "tab-b");
   const reopened = loaded.restoreLastRetainedWorkspace();
-  assert.equal(reopened.id, "tab-a");
-  assert.equal(reopened.remoteBrowse, "/a");
-  assert.equal(reopened.connection, undefined);
+  assert.equal(reopened, undefined);
+  assert.deepEqual(
+    loaded.workspaces.map((w) => w.id),
+    ["tab-b"],
+  );
   assert.equal(loaded.tabs.length, 0);
   assert.equal(loaded.restoreLastRetainedWorkspace(), undefined);
 });
@@ -75,20 +80,18 @@ test("owner schema and assignment are strict and atomically reject conflicts", (
     rec("a", "x".repeat(129)),
     { ...rec("a", "tab"), ownerTabClosed: null },
   ])
-    assert.throws(() => new Store({ retainedSyncs: [bad] }));
-  assert.throws(
-    () =>
-      new Store({ retainedSyncs: [rec("a", "same"), rec("b", "same", true)] }),
+    assert.throws(() => recoverStore({ retainedSyncs: [bad] }));
+  assert.throws(() =>
+    recoverStore({ retainedSyncs: [rec("a", "same"), rec("b", "same", true)] }),
   );
-  assert.throws(
-    () =>
-      new Store({
-        retainedSyncs: Array.from({ length: 17 }, (_, i) =>
-          rec("r" + i, "tab" + i),
-        ),
-      }),
+  assert.throws(() =>
+    recoverStore({
+      retainedSyncs: Array.from({ length: 17 }, (_, i) =>
+        rec("r" + i, "tab" + i),
+      ),
+    }),
   );
-  const s = new Store({ profiles: [p], retainedSyncs: [rec("a", "tab-a")] });
+  const s = recoverStore({ profiles: [p], retainedSyncs: [rec("a", "tab-a")] });
   const before = JSON.stringify(s.serialize());
   assert.throws(() => s.upsertRetainedSync(rec("b", "tab-a")));
   assert.throws(() => s.upsertRetainedSync(rec("a", "tab-b")));
@@ -96,7 +99,7 @@ test("owner schema and assignment are strict and atomically reject conflicts", (
   assert.equal(JSON.stringify(s.serialize()), before);
 });
 test("attach rejects another owner and closed owner, closure refuses busy work", () => {
-  const s = new Store({
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [rec("a", "tab-a"), rec("b", "tab-b")],
   });
@@ -121,7 +124,7 @@ test("attach rejects another owner and closed owner, closure refuses busy work",
   assert.equal(s.ownRetainedForWorkspace("tab-a").ownerTabClosed, false);
 });
 test("new tabs cannot reuse stable IDs of dormant owners and green themes remain explicit", () => {
-  const s = new Store({
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [rec("a", "tab-a", true)],
   });
@@ -130,19 +133,19 @@ test("new tabs cannot reuse stable IDs of dormant owners and green themes remain
   assert.notEqual(a.id, b.id);
   assert.notEqual(a.id, "tab-a");
   for (const theme of ["forest", "mint"]) {
-    const t = new Store({ theme });
+    const t = recoverStore({ theme });
     assert.equal(t.resolveInitialTheme(!false), false);
-    assert.equal(new Store(t.serialize()).theme, theme);
+    assert.equal(recoverStore(t.serialize()).theme, theme);
   }
 });
 test("restore capacity failure preserves dormant ownership and legacy cannot be adopted", () => {
-  const s = new Store({
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [rec("legacy"), rec("dormant", "closed", true)],
   });
   for (let i = 0; i < 16; i++) s.createWorkspace();
   const before = JSON.stringify(s.serialize());
-  assert.throws(() => s.restoreLastRetainedWorkspace());
+  assert.equal(s.restoreLastRetainedWorkspace(), undefined);
   assert.equal(JSON.stringify(s.serialize()), before);
   assert.throws(() => s.upsertRetainedSync(rec("legacy", s.workspaces[0].id)));
   assert.equal(s.ensureRetainedWorkspace("closed"), undefined);
@@ -157,7 +160,7 @@ test("ordinary data validation refuses ownership accessors without evaluating th
     enumerable: true,
   });
   assert.throws(
-    () => new Store({ retainedSyncs: [value] }),
+    () => recoverStore({ retainedSyncs: [value] }),
     (error) => !error.message.includes("getter executed"),
   );
 });
@@ -169,16 +172,16 @@ test("owned restored tab IDs must be usable native session IDs, not markup or Un
     "tab space",
     "x".repeat(65),
   ])
-    assert.throws(() => new Store({ retainedSyncs: [rec("a", id)] }));
+    assert.throws(() => recoverStore({ retainedSyncs: [rec("a", id)] }));
   for (const id of ["a", "A_z-09", "x".repeat(64)])
     assert.equal(
-      new Store({ retainedSyncs: [rec("a", id)] }).workspaces[0].id,
+      recoverStore({ retainedSyncs: [rec("a", id)] }).workspaces[0].id,
       id,
     );
 });
 test("owned preset identity roundtrips without applying changed global preset contents", () => {
   const value = { ...rec("a", "tab-a"), presetId: "custom-preset" };
-  const s = new Store({
+  const s = recoverStore({
     profiles: [p],
     retainedSyncs: [value],
     syncPresets: [
@@ -192,12 +195,22 @@ test("owned preset identity roundtrips without applying changed global preset co
     ],
   });
   assert.equal(s.ownRetainedForWorkspace("tab-a").presetId, "custom-preset");
+  const recovered = recoverStore(s.serialize());
+  assert.equal(
+    recovered.ownRetainedForWorkspace("tab-a").presetId,
+    "custom-preset",
+  );
+  assert.equal(recovered.ownRetainedForWorkspace("tab-a").recursive, true);
+  assert.equal(
+    recovered.ownRetainedForWorkspace("tab-a").exclusionRules,
+    "*.tmp",
+  );
   s.closeWorkspace("tab-a");
-  const loaded = new Store(s.serialize());
+  const loaded = recoverStore(s.serialize());
   const w = loaded.restoreLastRetainedWorkspace();
-  assert.equal(loaded.ownRetainedForWorkspace(w.id).presetId, "custom-preset");
-  assert.equal(loaded.ownRetainedForWorkspace(w.id).recursive, true);
-  assert.equal(loaded.ownRetainedForWorkspace(w.id).exclusionRules, "*.tmp");
+  assert.equal(w, undefined);
+  assert.equal(loaded.retainedSyncs.length, 0);
+  assert.equal(loaded.syncPresets[0].id, "custom-preset");
 });
 test("optional retained preset identity rejects invalid schema and remains absent for old records", () => {
   for (const presetId of [
@@ -209,26 +222,34 @@ test("optional retained preset identity rejects invalid schema and remains absen
     "界".repeat(43),
     "bad\nvalue",
   ])
-    assert.throws(
-      () => new Store({ retainedSyncs: [{ ...rec("a", "tab-a"), presetId }] }),
+    assert.throws(() =>
+      recoverStore({ retainedSyncs: [{ ...rec("a", "tab-a"), presetId }] }),
     );
   for (const presetId of ["x".repeat(128), "界".repeat(42)])
     assert.equal(
-      new Store({ retainedSyncs: [{ ...rec("a", "tab-a"), presetId }] })
+      recoverStore({ retainedSyncs: [{ ...rec("a", "tab-a"), presetId }] })
         .retainedSyncs[0].presetId,
       presetId,
     );
-  const s = new Store({ retainedSyncs: [rec("a", "tab-a")] });
+  const s = recoverStore({ retainedSyncs: [rec("a", "tab-a")] });
   assert.equal(
     Object.hasOwn(s.serialize().retainedSyncs[0], "presetId"),
     false,
   );
-  assert.throws(
-    () =>
-      new Store({
-        retainedSyncs: [
-          { ...rec("a", "tab-a"), presetId: "custom", secret: "bad" },
-        ],
-      }),
+  assert.throws(() =>
+    recoverStore({
+      retainedSyncs: [
+        { ...rec("a", "tab-a"), presetId: "custom", secret: "bad" },
+      ],
+    }),
   );
 });
+
+function recoverStore(data = {}) {
+  const validated = new Store(data, { ownedWorkspaceIds: [] });
+  return new Store(data, {
+    ownedWorkspaceIds: validated.retainedSyncs
+      .filter((r) => r.ownerTabId && !r.ownerTabClosed)
+      .map((r) => r.ownerTabId),
+  });
+}

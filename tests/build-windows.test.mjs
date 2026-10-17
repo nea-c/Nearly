@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {versionFiles, projectRoot} from '../scripts/version.mjs';
 import {
   buildOptions,
   buildPaths,
@@ -113,14 +114,10 @@ test(
       fileURLToPath(new URL("../scripts/build-windows.mjs", import.meta.url)),
       path.join(root, "scripts", "build-windows.mjs"),
     );
-    await fs.writeFile(
-      path.join(root, "src-tauri", "tauri.conf.json"),
-      JSON.stringify({
-        identifier: "local.syncfiles.native",
-        mainBinaryName: "Nearly",
-        version: "fixture",
-      }),
-    );
+    await fs.mkdir(path.join(root, 'src'));
+    await fs.copyFile(path.join(projectRoot, 'version.json'), path.join(root, 'version.json'));
+    await fs.copyFile(path.join(projectRoot, 'scripts/version.mjs'), path.join(root, 'scripts/version.mjs'));
+    for (const [name, content] of await versionFiles()) await fs.writeFile(path.join(root, name), content);
     await fs.writeFile(
       path.join(root, "src-tauri", "target", "release", "Nearly.exe"),
       "stale release",

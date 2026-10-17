@@ -52,15 +52,20 @@ test('right-click profile targets that row; edit and move leave context while se
 
 test('profile deletion cancellation and failed save preserve data, successful deletion persists',async({page})=>{
  await setup(page);await deletion(page,'a');
+ await expect.poll(async()=>(await saved(page))?.lastSelectedProfileId).toBe('a');
+ const selectedSnapshot=await saved(page);
+ const selectionWrites=await page.evaluate(()=>window.calls.filter(c=>c.cmd==='save_settings').length);
  await expect(page.locator('#connection-tree-dialog')).toContainText('Alpha');
  await page.locator('#connection-node-cancel').click();
  await expect(page.locator('[data-connection-node=a]')).toBeVisible();
- expect(await saved(page)).toBeNull();
+ expect(await saved(page)).toEqual(selectedSnapshot);
+ expect(await page.evaluate(()=>window.calls.filter(c=>c.cmd==='save_settings').length)).toBe(selectionWrites);
  await page.evaluate(()=>window.failSave=true);await deletion(page,'a');
  await page.locator('#connection-node-submit').click();
  await expect(page.locator('#connection-node-form .form-error')).toContainText('fixture save denied');
  await expect(page.locator('[data-connection-node=a]')).toBeVisible();
- expect(await saved(page)).toBeNull();
+ expect(await saved(page)).toEqual(selectedSnapshot);
+ expect(await page.evaluate(()=>window.calls.filter(c=>c.cmd==='connect_session').length)).toBe(0);
  await page.evaluate(()=>window.failSave=false);
  await page.locator('#connection-node-submit').click();
  await expect(page.locator('#connection-node-form')).toHaveCount(0);
@@ -105,12 +110,17 @@ test('connected and synchronizing profiles cannot be deleted from another tab',a
 
 test('connecting profile blocks management until its connection settles',async({page})=>{
  await setup(page);await page.evaluate(()=>window.holdConnect=true);
- await page.locator('[data-connection-select=a]').click();await page.locator('#connect-form .primary').click();
+ await page.locator('[data-connection-select=a]').click();
+ await expect.poll(async()=>(await saved(page))?.lastSelectedProfileId).toBe('a');
+ const selectedSnapshot=await saved(page);
+ const selectionWrites=await page.evaluate(()=>window.calls.filter(c=>c.cmd==='save_settings').length);
+ await page.locator('#connect-form .primary').click();
  await expect.poll(()=>page.evaluate(()=>!!window.releaseConnect)).toBe(true);
  await page.locator('[data-connection-node=a]').dispatchEvent('contextmenu',{clientX:150,clientY:150});
  await expect(page.locator('#connection-context-menu')).toHaveCount(0);
  await expect(page.locator('#edit-profile')).toBeDisabled();
- expect(await saved(page)).toBeNull();
+ expect(await saved(page)).toEqual(selectedSnapshot);
+ expect(await page.evaluate(()=>window.calls.filter(c=>c.cmd==='save_settings').length)).toBe(selectionWrites);
  await page.evaluate(()=>{window.holdConnect=false;window.releaseConnect();});
  await expect(page.locator('#prepare')).toBeEnabled();
 });

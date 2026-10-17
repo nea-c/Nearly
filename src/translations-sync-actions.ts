@@ -1,0 +1,18 @@
+export const syncActionTranslations:Record<string,string>={
+  'サイズと更新日時（1秒単位）が同じファイルは送信を省略します。内容の一致を保証する比較ではありません。同名で異なるファイルは、リモート側が新しくてもローカルで上書きします。その後は変更を監視します。':'Files with matching size and one-second modification time are skipped. This does not guarantee content equality. Different files with the same name are overwritten from local, even when the remote file is newer. Changes are then monitored.',
+  '前回と同じ削除設定を使います。開始時の比較と変更監視で、同期対象内のローカルにないリモート項目を削除します。元に戻せない可能性があります。':'Uses the previous deletion setting. The initial comparison and change monitoring delete in-scope remote items absent from local. This may be irreversible.',
+  '同期対象内でローカルにないリモートのファイルと空フォルダーを、開始時の比較と変更監視で削除します。除外とサブディレクトリの設定に従います。元に戻せない可能性があります。':'The initial comparison and change monitoring delete remote files and empty folders absent from local within the sync scope. Exclusions and the subdirectory setting apply. This may be irreversible.',
+  '同期した場所へ戻る':'Return to synced locations',
+  '同期したローカル {0} とリモート {1} を開きます。同期は開始しません。':'Open the synced local folder {0} and remote folder {1}. Does not start synchronization.',
+  '同期を停止します。同期元 {0}、同期先 {1}。':'Stop sync. Source: {0}; destination: {1}.',
+  '前回と同じ削除設定を使います。ローカルで削除した対象はリモートからも削除され、元に戻せない可能性があります。':'Uses the previous deletion setting. Items removed locally will also be removed remotely and may not be recoverable.',
+  '現在表示しているローカルフォルダー {0} から、現在表示しているリモートフォルダー {1} へ同期します。':'Sync the local folder currently shown, {0}, to the remote folder currently shown, {1}.',
+  '前回の同期元 {0} から同期先 {1} へ、前回の設定を使って再開します。表示中のフォルダーは使いません。':'Resume the previous source {0} to destination {1} with the previous settings, regardless of the folders currently shown.',
+  '前回の設定を使います。':'Uses the previous settings.',
+  '同期元（現在のローカルフォルダー）':'Source (current local folder)',
+  '同期元（前回のローカルフォルダー）':'Source (previous local folder)',
+  '同期先':'Destination',
+  '確認して再開':'Confirm and resume',
+  'フォルダーの読み込みが完了してから同期してください。':'Wait for the folders to finish loading before starting sync.',
+  '同期を開始したタブに戻って確認してください。':'Return to the tab where you opened this confirmation.',
+};

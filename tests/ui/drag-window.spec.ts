@@ -10,7 +10,7 @@ async function registry(
   language = "en",
 ) {
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
-  const profiles = Array.from({ length: count + 2 }, (_, i) => ({
+  const profiles = Array.from({ length: Math.max(count, 3) + 2 }, (_, i) => ({
     id: `profile-${i}`,
     name: `Fixture ${i}`,
     host: `host-${i}.invalid`,
@@ -47,6 +47,7 @@ async function registry(
   let drag: any,
     transfer: any,
     holdReady = false,
+    allowClose = false,
     readyResolve: (() => void) | undefined;
   async function emit(name: string, payload: any) {
     await Promise.all(
@@ -81,10 +82,10 @@ async function registry(
                 : [],
           jobs: [],
           workspaces: [],
-          ...(transfer?.sourceLabel === label && transfer.phase === "pending"
+          ...(transfer?.sourceLabel === label && ["dragging","pending"].includes(transfer.phase)
             ? { outgoingTransfers: [clone(transfer)] }
             : {}),
-          ...(transfer?.targetLabel === label && transfer.phase === "pending"
+          ...(transfer?.targetLabel === label && ["dragging","pending"].includes(transfer.phase)
             ? { pendingTransfer: clone(transfer) }
             : {}),
         };
@@ -116,8 +117,13 @@ async function registry(
         await emit("tab-drag", drag);
         return clone(drag);
       }
+      if(cmd === "workspace_drag_preview_ready") {
+        if(transfer.phase === "dragging") await emit("tab-drag-preview-ready",{workspaceId:drag.workspaceId,dragId:drag.dragId});
+        return clone(transfer);
+      }
       if (cmd === "workspace_transfer_status") return clone(transfer);
       if (cmd === "workspace_transfer_ready") {
+        if(transfer.phase === "dragging") throw Error("Native mouse-up has not authorized this transfer");
         if (holdReady)
           await new Promise<void>((resolve) => {
             readyResolve = resolve;
@@ -129,10 +135,11 @@ async function registry(
         return clone(transfer);
       }
       if (cmd === "abort_workspace_transfer") {
-        if (transfer.phase === "pending") transfer.phase = "aborted";
+        if (["dragging","pending"].includes(transfer.phase)) transfer.phase = "aborted";
         await emit("workspace-transfer", transfer);
         return clone(transfer);
       }
+      if(cmd === "disconnect_session" && allowClose) return;
       if (cmd === "default_folder") return "C:\\fixture";
       if (cmd === "list_drives") return [{ path: "C:\\", name: "C:" }];
       if (cmd === "list_local" || cmd === "list_remote")
@@ -190,6 +197,7 @@ async function registry(
   return {
     calls,
     jobs,
+    allowClose: () => {allowClose=true;},
     settings: () => clone(settings),
     transfer: () => clone(transfer),
     holdReady: () => {
@@ -210,11 +218,25 @@ async function registry(
       drag = { ...drag, ...updates };
       await emit("tab-drag", drag);
     },
+    async preview() {
+      if(count<=1)throw Error("A lone tab moves its existing window");
+      const start=calls.findLast(c=>c.cmd==="begin_tab_drag")!;
+      transfer={token:"transfer-1",workspaceId:drag.workspaceId,sourceLabel:"main",targetLabel:"child-1",phase:"dragging",payload:clone(start.args.payload),targetKind:"new",beforeId:null,targetIndex:0};
+      await emit("tab-drag",drag);
+      const p=await context.newPage();pages.set(p,"child-1");await p.goto("/");
+      await expect(p.locator("html")).toHaveAttribute("data-window-label","child-1");
+      return p;
+    },
+    async abortPreview() {
+      if(transfer&&["dragging","pending"].includes(transfer.phase)){transfer.phase="aborted";await emit("workspace-transfer",transfer);}
+      drag={...drag,phase:"cancelled",targetLabel:null};await emit("tab-drag",drag);
+    },
     async drop(
       targetKind: "new" | "existing",
       beforeId: string | null = null,
       targetIndex = 0,
     ) {
+      if (targetKind === "new" && count === 1) throw Error("A lone tab moves its existing window");
       const start = calls.findLast((c) => c.cmd === "begin_tab_drag")!;
       transfer = {
         token: "transfer-1",
@@ -244,6 +266,18 @@ async function registry(
     },
   };
 }
+async function nonverbalMergeFeedback(p: Page, message: string) {
+  const cue=p.locator('.tab-merge-hint'),status=cue.locator('.tab-merge-status');
+  await expect(cue).toBeVisible();
+  await expect(cue).toHaveAttribute('role','status');
+  await expect(status).toHaveText(message);
+  await expect(cue).not.toHaveAttribute('title',/.+/);
+  expect((await cue.boundingBox())!.width).toBe(1);
+  await expect(p.locator(".tab-drop-indicator")).toHaveCount(0);
+  expect(await cue.evaluate(node=>getComputedStyle(node).clipPath)).toBe("inset(50%)");
+  expect(await status.evaluate(node=>{const style=getComputedStyle(node);return {clipPath:style.clipPath,overflow:style.overflow,width:style.width,height:style.height};})).toEqual({clipPath:'inset(50%)',overflow:'hidden',width:'1px',height:'1px'});
+}
+
 const tab = (p: Page, id: string) => p.locator(`[data-tab="${id}"]`);
 const ids = (p: Page) =>
   p
@@ -324,7 +358,7 @@ test("close button cannot arm dragging and the removed menu action is absent for
   await expect(p.locator("[data-tab-move-window]")).toHaveCount(0);
 });
 
-test("42px hysteresis permits reentry; native handoff releases capture and Escape restores source", async ({
+test("vertical hysteresis permits reentry; native handoff releases capture and Escape restores source", async ({
   context,
 }) => {
   const n = await registry(context),
@@ -332,12 +366,14 @@ test("42px hysteresis permits reentry; native handoff releases capture and Escap
   let o = await hold(p);
   const strip = (await p.locator(".tabs").boundingBox())!;
   await p.mouse.move(o.x + 8, o.y);
-  await p.mouse.move(o.x, strip.y + strip.height + 25);
+  await p.mouse.move(o.x, strip.y + strip.height + 4);
   expect(n.calls.filter((c) => c.cmd === "begin_tab_drag")).toEqual([]);
   await p.mouse.move(o.x, o.y);
   await p.mouse.up();
   expect(await ids(p)).toEqual(["owner-0", "owner-1", "owner-2"]);
-  await external(p);
+  o = await hold(p);
+  await p.mouse.move(o.x + 8, o.y);
+  await p.mouse.move(o.x, strip.y + strip.height + 8);
   await expect
     .poll(() => n.calls.filter((c) => c.cmd === "begin_tab_drag").length)
     .toBe(1);
@@ -416,24 +452,28 @@ test("aborted existing-target staging preserves target tabs and active selection
   expect(effects(n.calls)).toEqual([]);
 });
 
-test("single-tab drag to new window waits for readiness and leaves a clean source workspace", async ({
+test("single-tab merge waits for readiness and closes the empty source", async ({
   context,
 }) => {
   const n = await registry(context, 1),
-    source = await n.open();
+    source = await n.open(),
+    child = await n.open("existing");
   n.holdReady();
   await external(source);
   await source.mouse.up();
-  await n.drop("new");
+  await n.drop("existing",null,2);
   await pending(source);
-  const child = await n.open("child-1");
-  await expect.poll(() => ids(child)).toEqual(["owner-0"]);
+  await expect.poll(() => ids(child)).toEqual(["owner-3", "owner-4", "owner-0"]);
   await pending(source);
   n.releaseReady();
   await expect(tab(source, "owner-0")).toHaveCount(0);
-  await expect(source.locator("[data-tab]")).toHaveCount(1);
-  await expect(source.locator("#connect-form")).toBeVisible();
-  await expect(child.locator("#tab-sync-context")).toContainText("root-0");
+  await expect(source.locator("[data-tab]")).toHaveCount(0);
+  await expect
+    .poll(() => n.calls.filter((c) => c.cmd === "close_empty_window").length)
+    .toBe(1);
+  await expect(child.locator("#connect-form")).toBeVisible();
+  await expect(child.getByRole("heading",{name:"Fixture 0",exact:true})).toBeVisible();
+  expect(n.settings().retainedSyncs[0].local).toContain("root-0");
   expect(n.settings().retainedSyncs[0].ownerTabClosed).toBe(false);
   expect(effects(n.calls)).toEqual([]);
 });
@@ -476,6 +516,11 @@ for (const theme of ["light", "dark", "mint", "forest"])
     await p.keyboard.press("Escape");
     await external(p);
     await p.mouse.up();
+    await n.feedback({targetLabel:"existing",targetIndex:0,beforeId:"owner-3"});
+    await nonverbalMergeFeedback(p,"別のウィンドウに結合");
+    await n.feedback({targetLabel:"existing",targetIndex:2,beforeId:null});
+    await nonverbalMergeFeedback(p,"別のウィンドウの末尾に結合");
+    if(theme==="light") await p.screenshot({path:"test-results/r1-drag-merge-feedback-ja.png"});
     await n.feedback({
       phase: "reordered",
       targetLabel: "main",
@@ -499,7 +544,7 @@ test("live job identity, local selection, settings and existing target job survi
     await tab(page, id).click();
     await page.locator("#connect-form .primary").click();
     await expect(page.locator("#local-path")).toBeVisible();
-    await page.locator("#retained-resume").click();
+    await page.locator("#prepare").click();
     await page.locator("#start-form .primary").click();
     await expect(page.locator("#start-form")).toHaveCount(0);
     await expect(page.locator("#sent-count")).toContainText("1234");
@@ -575,5 +620,89 @@ test("target close abort and a stale drag result leave the original owner usable
   n.releaseReady();
   await expect(source.locator('[data-close="owner-0"]')).toBeEnabled();
   expect(await ids(source)).toEqual(["owner-0", "owner-1", "owner-2"]);
+  expect(effects(n.calls)).toEqual([]);
+});
+
+
+test("lone tab starts window movement inside its tab, while jitter and close remain normal", async ({context}) => {
+  const n=await registry(context,1), p=await n.open();
+  let origin=await hold(p);
+  await p.mouse.move(origin.x+2,origin.y+1);await p.mouse.up();
+  expect(n.calls.filter(c=>c.cmd==="begin_tab_drag")).toHaveLength(0);
+  origin=await hold(p);await p.mouse.move(origin.x+8,origin.y);
+  await expect.poll(()=>n.calls.filter(c=>c.cmd==="begin_tab_drag").length).toBe(1);
+  await p.mouse.up();await n.feedback({phase:"moved",targetLabel:null,beforeId:null,targetIndex:null});
+  await expect(p.locator('[data-close="owner-0"]')).toBeEnabled();
+  expect(await ids(p)).toEqual(["owner-0"]);
+  expect(n.calls.filter(c=>/workspace_transfer_ready|close_empty_window/.test(c.cmd))).toHaveLength(0);
+  expect(context.pages()).toHaveLength(1);
+  n.allowClose();
+  await p.locator('[data-close="owner-0"]').click();
+  await expect.poll(()=>n.calls.filter(c=>c.cmd==="unregister_workspace").length).toBe(1);
+});
+
+test("published blank strip ends before settings and shows end insertion feedback", async ({context}) => {
+  const n=await registry(context),source=await n.open(),target=await n.open("existing");
+  await expect.poll(()=>n.calls.filter(c=>c.label==="existing"&&c.cmd==="register_tab_strip").length).toBeGreaterThan(0);
+  const geometry=n.calls.findLast(c=>c.label==="existing"&&c.cmd==="register_tab_strip")!.args.geometry;
+  const settings=(await target.locator('#settings-toggle').boundingBox())!,add=(await target.locator('#add-tab').boundingBox())!,spacer=(await target.locator('.title-drag').boundingBox())!;
+  expect(geometry.rect.x+geometry.rect.width).toBeLessThanOrEqual(add.x);
+  expect(geometry.appendRect.x).toBeGreaterThanOrEqual(add.x+add.width);
+  expect(geometry.appendRect.x+geometry.appendRect.width).toBeLessThanOrEqual(settings.x);
+  expect(geometry.appendRect.x+geometry.appendRect.width).toBeCloseTo(spacer.x+spacer.width,0);
+  expect(geometry.appendRect.y+geometry.appendRect.height).toBeLessThanOrEqual(settings.y+settings.height);
+  await external(source);await source.mouse.up();
+  await n.feedback({targetLabel:"existing",targetIndex:2,beforeId:null});
+  await expect(target.locator('.tab-drop-indicator')).toBeVisible();
+  await nonverbalMergeFeedback(source,'Merge at the end of another window');
+  await n.feedback({targetLabel:'existing',targetIndex:0,beforeId:'owner-3'});
+  await nonverbalMergeFeedback(source,'Merge into another window');
+  await n.feedback({targetLabel:null,targetIndex:null,beforeId:null});
+  await expect(source.locator('.tab-merge-hint')).toHaveCount(0);
+  await expect(target.locator('.tab-drop-indicator')).toHaveCount(0);
+  await n.feedback({targetLabel:'existing',targetIndex:2,beforeId:null});
+  await expect(source.locator('.tab-merge-hint')).toBeVisible();
+  await source.screenshot({path:'test-results/r1-drag-merge-feedback.png'});
+  const marker=(await target.locator('.tab-drop-indicator').boundingBox())!,last=(await target.locator('.tab').last().boundingBox())!;
+  expect(Math.abs(marker.x-(last.x+last.width))).toBeLessThan(4);
+  await n.drop("existing",null,2);
+  await expect.poll(()=>ids(target)).toEqual(["owner-3","owner-4","owner-0"]);
+  await expect(source.locator(".tab-merge-hint")).toHaveCount(0);
+});
+
+
+
+test("a real workspace DOM detaches while the pointer remains held and commits only after native release",async({context})=>{
+  const n=await registry(context),source=await n.open();
+  const origin=await hold(source),strip=(await source.locator('.tabs').boundingBox())!;
+  await source.mouse.move(origin.x,strip.y+strip.height+8);
+  await expect.poll(()=>n.calls.filter(c=>c.cmd==='begin_tab_drag').length).toBe(1);
+  const child=await n.preview();
+  await expect(child.locator('[data-tab="owner-0"]')).toHaveCount(1);
+  await expect(child.locator('#app')).toHaveAttribute('inert','');
+  await expect(child.locator('#connect-form')).toBeVisible();await expect(child.getByRole('heading',{name:'Fixture 0',exact:true,includeHidden:true})).toBeVisible();
+  expect(n.transfer().phase).toBe('dragging');
+  expect(n.calls.filter(c=>c.cmd==='workspace_transfer_ready')).toHaveLength(0);
+  await expect(source.locator('.tab-detached-source')).toHaveCount(1);
+  expect(await ids(source)).toEqual(['owner-0','owner-1','owner-2']);
+  await expect(source.locator('.tab-drop-indicator')).toHaveCount(0);
+  await child.screenshot({path:'test-results/r2-detached-full-workspace.png'});
+  await source.mouse.up();await n.drop('new');
+  await expect.poll(()=>ids(source)).toEqual(['owner-1','owner-2']);
+  await expect(child.locator('#app')).not.toHaveAttribute('inert','');
+  expect(n.transfer().phase).toBe('committed');
+  expect(n.calls.filter(c=>c.cmd==='workspace_transfer_ready')).toHaveLength(1);
+  expect(effects(n.calls)).toEqual([]);
+});
+
+test("canceling the provisional app preserves the original owner and removes source feedback",async({context})=>{
+  const n=await registry(context),source=await n.open();await external(source);
+  const child=await n.preview();await expect(child.locator('#connect-form')).toBeVisible();await expect(child.getByRole('heading',{name:'Fixture 0',exact:true,includeHidden:true})).toBeVisible();
+  await expect(source.locator('.tab-detached-source')).toHaveCount(1);
+  await source.mouse.up();await n.abortPreview();
+  await expect(source.locator('.tab-detached-source')).toHaveCount(0);
+  await expect(source.locator('[data-close="owner-0"]')).toBeEnabled();
+  expect(await ids(source)).toEqual(['owner-0','owner-1','owner-2']);
+  expect(n.calls.filter(c=>c.cmd==='workspace_transfer_ready')).toHaveLength(0);
   expect(effects(n.calls)).toEqual([]);
 });

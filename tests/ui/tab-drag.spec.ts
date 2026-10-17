@@ -73,6 +73,17 @@ async function boot(page: Page, options: Options = {}) {
         core: {
           invoke: async (cmd, args = {}) => {
             fixture.calls.push({ cmd, args });
+            if (cmd === "register_window") {
+              const s = JSON.parse(localStorage.getItem(KEY));
+              return {
+                label: "main",
+                ownedWorkspaceIds: s.retainedSyncs
+                  .filter((r) => r.ownerTabId && !r.ownerTabClosed)
+                  .map((r) => r.ownerTabId),
+                jobs: [],
+                workspaces: [],
+              };
+            }
             if (cmd === "load_settings")
               return JSON.parse(localStorage.getItem(KEY));
             if (cmd === "save_settings") {
@@ -173,7 +184,7 @@ async function start(page: Page, id: string) {
   await tab(page, id).click();
   await page.locator("#connect-form .primary").click();
   await expect(page.locator("#local-path")).toBeVisible();
-  await page.locator("#retained-resume").click();
+  await page.locator("#prepare").click();
   await page.locator("#start-form .primary").click();
   await expect(page.locator("#start-form")).toHaveCount(0);
 }
@@ -207,12 +218,10 @@ test("drag moves inactive and active IDs across several positions without changi
   expect(sideEffects(await calls(page))).toEqual(before);
   for (const i of [0, 1, 2, 3]) {
     await tab(page, `owner-${i}`).click();
-    await expect(page.locator("#tab-sync-context")).toContainText(
-      `C:\\fixture\\root-${i}`,
-    );
-    await expect(page.locator("#tab-sync-context")).toContainText(
-      `/srv/root-${i}`,
-    );
+    await expect(page.locator("#connect-form")).toBeVisible();
+    await expect(page.getByRole("heading",{name:(await stored(page)).profiles[i].name,exact:true})).toBeVisible();
+    await expect(page.locator("#retained-resume")).toHaveCount(0);
+
   }
   await clean(page);
 });
@@ -308,11 +317,11 @@ test("threshold jitter remains a normal click and the close button keeps its nor
   await expect(tab(page, "owner-0")).toHaveCount(0);
   await expect
     .poll(() =>
-      stored(page).then(
-        (s) => s.retainedSyncs.find((r) => r.id === "record-0").ownerTabClosed,
+      stored(page).then((s) =>
+        s.retainedSyncs.some((r) => r.id === "record-0"),
       ),
     )
-    .toBe(true);
+    .toBe(false);
   await clean(page);
 });
 
@@ -395,10 +404,11 @@ test("fresh tab dragged first keeps that order when its explicit first synchroni
     "aria-busy",
     "false",
   );
+  await page.locator("#local-path").fill("C:\\fixture\\fresh-registration");
+  await page.locator("#local-path").press("Enter");
+  await expect(page.locator("[data-pane=local]")).toHaveAttribute("aria-busy","false");
   await page.locator("#prepare").click();
-  await page
-    .locator("#start-form [name=local]")
-    .fill("C:\\fixture\\fresh-registration");
+  await expect(page.locator("[data-sync-source]")).toHaveText("C:\\fixture\\fresh-registration");
   await page.locator("#start-form .primary").click();
   await expect(page.locator("#start-form")).toHaveCount(0);
   await expect.poll(() => storedOwned(page)).toEqual(expected);
@@ -419,7 +429,7 @@ test("fresh tab dragged first keeps that order when its explicit first synchroni
   await clean(page);
 });
 
-test("closing a reordered owner and restoring it appends its same ID in visible and saved order", async ({
+test("closing a reordered owner preserves remaining visible order without restoring the closed tab", async ({
   page,
 }) => {
   await boot(page);
@@ -429,21 +439,21 @@ test("closing a reordered owner and restoring it appends its same ID in visible 
   await expect(tab(page, "owner-0")).toHaveCount(0);
   await expect
     .poll(() =>
-      stored(page).then(
-        (s) => s.retainedSyncs.find((r) => r.id === "record-0").ownerTabClosed,
+      stored(page).then((s) =>
+        s.retainedSyncs.some((r) => r.id === "record-0"),
       ),
     )
-    .toBe(true);
-  await page.locator("#restore-tab").click();
-  await expect(tab(page, "owner-0")).toBeVisible();
+    .toBe(false);
+  await expect(page.locator("#restore-tab")).toHaveCount(0);
   const expected = await order(page);
-  expect(expected).toEqual(["owner-3", "owner-1", "owner-2", "owner-0"]);
+  expect(expected).toEqual(["owner-3", "owner-1", "owner-2"]);
   await expect.poll(() => storedOwned(page)).toEqual(expected);
   const after = (await stored(page)).retainedSyncs;
-  for (const id of ["legacy", "closed", "record-0"])
+  for (const id of ["legacy", "closed"])
     expect(after.find((r) => r.id === id)).toEqual(
       original.find((r) => r.id === id),
     );
+  expect(after.find((r) => r.id === "record-0")).toBeUndefined();
   await page.reload();
   await expect.poll(() => order(page)).toEqual(expected);
   expect(sideEffects(await calls(page))).toEqual([]);

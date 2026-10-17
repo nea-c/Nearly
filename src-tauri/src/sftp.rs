@@ -874,6 +874,12 @@ pub fn file_operation(
 pub struct RemoteStamp {
     pub size: u64,
     pub mtime: u32,
+    parent: Option<RemoteDirectoryStamp>,
+}
+impl RemoteStamp {
+    pub fn authority_bytes(&self) -> usize {
+        self.parent.as_ref().map_or(0,RemoteDirectoryStamp::authority_bytes)
+    }
 }
 fn recorded_target(remote: &str, relative: &Path) -> Result<String, String> {
     if relative.as_os_str().is_empty()
@@ -908,13 +914,152 @@ fn remote_stamp(attrs: &FileAttributes) -> Result<RemoteStamp, String> {
             .mtime
             .filter(|mtime| *mtime != 0)
             .ok_or("Remote modification time unavailable or unsupported; deletion refused")?,
+        parent: None,
+    })
+}
+fn protocol_seconds(time: SystemTime) -> Option<u32> {
+    u32::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_secs()).ok().filter(|v| *v != 0)
+}
+fn matching_metadata(local_size: u64, local_time: Option<SystemTime>, attrs: &FileAttributes) -> bool {
+    attrs.file_type().is_file() && !attrs.is_symlink()
+        && attrs.size == Some(local_size)
+        && local_time.and_then(protocol_seconds).is_some_and(|time| attrs.mtime == Some(time))
+}
+pub enum FileComparison {
+    Unchanged(RemoteStamp),
+    Upload { remote_newer: bool },
+}
+// Comparison is metadata-only. Keep the exact source metadata stable across the
+// round trip; unknown times always require upload (which may refuse preservation).
+pub fn compare_file(s: &mut Connection, root: &Path, relative: &Path, remote: &str, stop: &AtomicBool) -> Result<FileComparison, String> {
+    let target = recorded_target(remote, relative)?;
+    let source = root.join(relative);
+    let canonical = source.canonicalize().map_err(|_| "Local source unavailable for comparison")?;
+    if !canonical.starts_with(root) { return Err("Local comparison path escaped root".into()); }
+    let input = std::fs::File::open(&source).map_err(|_| "Local source unreadable for comparison")?;
+    let before = input.metadata().map_err(|_| "Local metadata unavailable for comparison")?;
+    if !before.is_file() { return Err("Local comparison source is not a file".into()); }
+    s.run(stop, async {
+        let parent = target.rsplit_once('/').map(|(p,_)| if p.is_empty(){"/"}else{p}).ok_or("Invalid comparison target")?;
+        let mut current = String::new();
+        for part in parent.split('/').filter(|p| !p.is_empty()) {
+            current.push('/'); current.push_str(part);
+            match s.raw.lstat(current.clone()).await {
+                Ok(a) if a.attrs.file_type().is_dir() && !a.attrs.is_symlink() => (),
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => return Ok(FileComparison::Upload { remote_newer: false }),
+                _ => return Err("Remote comparison parent unavailable or unsafe".into()),
+            }
+        }
+        let attrs = match s.raw.lstat(target.clone()).await {
+            Ok(a) => a.attrs,
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => return Ok(FileComparison::Upload { remote_newer: false }),
+            Err(_) => return Err("Remote comparison lookup failed".into()),
+        };
+        if !attrs.file_type().is_file() || attrs.is_symlink() { return Err("Remote comparison target is not a regular file".into()); }
+        let after = input.metadata().map_err(|_| "Local comparison source changed")?;
+        let current = std::fs::symlink_metadata(&source).map_err(|_| "Local comparison source changed")?;
+        if current.file_type().is_symlink() || before.len()!=after.len() || before.modified().ok()!=after.modified().ok()
+            || current.len()!=before.len() || current.modified().ok()!=before.modified().ok() {
+            return Err("Local source changed during comparison".into());
+        }
+        if matching_metadata(before.len(), before.modified().ok(), &attrs) {
+            let mut stamp = remote_stamp(&attrs)?;
+            stamp.parent = Some(directory_guard(&s.raw, parent).await?);
+            return Ok(FileComparison::Unchanged(stamp));
+        }
+        Ok(FileComparison::Upload { remote_newer: attrs.mtime.zip(before.modified().ok().and_then(protocol_seconds)).is_some_and(|(r,l)| r>l) })
+    })
+}
+
+#[derive(Default)]
+pub struct RetainedDirectories {
+    paths: std::collections::HashSet<std::path::PathBuf>,
+    bytes: usize,
+    exhausted: bool,
+}
+impl RetainedDirectories {
+    pub fn contains(&self,path:&Path)->bool { self.paths.contains(path) }
+    pub fn exhausted(&self)->bool { self.exhausted }
+    pub fn retain(&mut self,path:&Path)->Result<(),String> {
+        let missing:Vec<_>=path.ancestors().filter(|path|!path.as_os_str().is_empty() && !self.paths.contains(*path)).collect();
+        let added=missing.iter().fold(0usize,|sum,path|sum.saturating_add(path.as_os_str().len().saturating_mul(2).saturating_add(64)));
+        let next=self.bytes.saturating_add(added);
+        if self.paths.len().saturating_add(missing.len())>10000 || next>16*1024*1024 {
+            self.exhausted=true;
+            return Err("Retained directory tracking limit reached; deletion paused, stop and start a new sync".into());
+        }
+        for ancestor in missing { self.paths.insert(ancestor.to_path_buf()); }
+        self.bytes=next;
+        Ok(())
+    }
+}
+pub struct RemoteSnapshot {
+    pub files: Vec<(std::path::PathBuf, RemoteStamp)>,
+    pub directories: Vec<(std::path::PathBuf, RemoteDirectoryStamp)>,
+    pub retained: RetainedDirectories,
+}
+// Build everything before publishing authority. A failed READDIR, budget or
+// invalid UTF-8 packet discards the complete snapshot, never authorizes a purge.
+pub fn mirror_snapshot(s: &mut Connection, remote: &str, rules: &crate::exclusion::Rules, recursive: bool, stop: &AtomicBool) -> Result<RemoteSnapshot, String> {
+    let remote = normalize(remote)?;
+    s.run(stop, async {
+        let mut snapshot = RemoteSnapshot { files: Vec::new(), directories: Vec::new(), retained: Default::default() };
+        let mut stack = vec![(std::path::PathBuf::new(), remote)];
+        let mut entries = 0usize;
+        let mut batches = 0usize;
+        let mut authority_bytes = 0usize;
+        while let Some((relative, absolute)) = stack.pop() {
+            crate::file_ops::check(stop)?;
+            let guard = directory_guard(&s.raw, &absolute).await?;
+            authority_bytes=authority_bytes.saturating_add(guard.authority_bytes()+absolute.len()+relative.as_os_str().len()*2);
+            if authority_bytes > 16*1024*1024 { return Err("Remote mirror authority memory limit reached; deletion refused".into()); }
+            if !relative.as_os_str().is_empty() { snapshot.directories.push((relative.clone(), guard.clone())); }
+            let handle = s.raw.opendir(absolute.clone()).await.map_err(|_| "Remote mirror inventory open failed; deletion refused")?.handle;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                batches += 1;
+                if batches > 20000 { return Err("Remote mirror listing budget exceeded; deletion refused".into()); }
+                match s.raw.readdir(handle.clone()).await {
+                    Ok(batch) => for entry in batch.files {
+                        if entry.filename == "." || entry.filename == ".." { continue; }
+                        entries += 1;
+                        if entries > 10000 { return Err("Remote mirror inventory exceeds 10,000 entries; deletion refused".into()); }
+                        if !seen.insert(entry.filename.to_lowercase()) { return Err("Duplicate or case-ambiguous remote mirror entry; deletion refused".into()); }
+                        if crate::file_ops::validate_creation_name(&entry.filename, crate::file_ops::Side::Local).is_err() {
+                            snapshot.retained.retain(&relative)?; continue;
+                        }
+                        let child = relative.join(&entry.filename);
+                        authority_bytes=authority_bytes.saturating_add(child.as_os_str().len()*4+entry.filename.len());
+                        if authority_bytes > 16*1024*1024 { return Err("Remote mirror authority memory limit reached; deletion refused".into()); }
+                        let dir = entry.attrs.file_type().is_dir() && !entry.attrs.is_symlink();
+                        if rules.excludes(&child, dir)? || entry.attrs.is_symlink() || (!dir && !entry.attrs.file_type().is_file()) || (!recursive && dir) {
+                            snapshot.retained.retain(&relative)?; continue;
+                        }
+                        if dir {
+                            if child.components().count() > 64 { return Err("Remote mirror directory depth exceeds 64; deletion refused".into()); }
+                            stack.push((child, format!("{}/{}", absolute.trim_end_matches('/'), entry.filename)));
+                        } else if let Ok(mut stamp) = remote_stamp(&entry.attrs) {
+                            stamp.parent = Some(guard.clone()); snapshot.files.push((child, stamp));
+                        } else { snapshot.retained.retain(&relative)?; }
+                    },
+                    Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                    Err(_) => return Err("Remote mirror inventory read failed; deletion refused".into()),
+                }
+            }
+            s.raw.close(handle).await.map_err(|_| "Remote mirror inventory close failed; deletion refused")?;
+            if directory_guard(&s.raw,&absolute).await? != guard { return Err("Remote mirror directory changed during inventory; deletion refused".into()); }
+        }
+        Ok(snapshot)
     })
 }
 // SFTPv3 has no inode or conditional RMDIR. These session-scoped guards detect
 // observable path/type/permission changes, not indistinguishable same-path swaps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteDirectoryStamp {
-    chain: Vec<(String, Option<u32>, Option<u32>, u32)>,
+    chain: Arc<Vec<(String, Option<u32>, Option<u32>, u32)>>,
+}
+impl RemoteDirectoryStamp {
+    pub fn authority_bytes(&self) -> usize { self.chain.iter().map(|entry|entry.0.len()+32).sum() }
 }
 async fn directory_guard(
     raw: &RawSftpSession,
@@ -958,7 +1103,7 @@ async fn directory_guard(
     if names.len() != 1 || names[0].filename != target {
         return Err("Remote directory canonical path changed; deletion refused".into());
     }
-    Ok(RemoteDirectoryStamp { chain })
+    Ok(RemoteDirectoryStamp { chain: Arc::new(chain) })
 }
 pub fn authorize_directory(
     s: &mut Connection,
@@ -967,16 +1112,27 @@ pub fn authorize_directory(
     stop: &AtomicBool,
     verify_local: &dyn Fn() -> Result<(), String>,
 ) -> Result<RemoteDirectoryStamp, String> {
+    authorize_directory_observed(s,remote,relative,stop,verify_local).map(|(stamp,_)|stamp)
+}
+pub fn authorize_directory_observed(
+    s: &mut Connection, remote: &str, relative: &Path, stop: &AtomicBool,
+    verify_local: &dyn Fn() -> Result<(), String>,
+) -> Result<(RemoteDirectoryStamp, bool), String> {
     let target = recorded_target(remote, relative)?;
     let root = normalize(remote)?;
     s.run(stop, async {
         verify_local()?;
         checked_directory(&s.raw, &root, false).await?;
+        let created = match s.raw.lstat(target.clone()).await {
+            Ok(_) => false,
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => true,
+            Err(_) => return Err("Remote directory lookup failed".into()),
+        };
         checked_directory(&s.raw, &target, true).await?;
         let stamp = directory_guard(&s.raw, &target).await?;
         verify_local()?;
         crate::file_ops::check(stop)?;
-        Ok(stamp)
+        Ok((stamp, created))
     })
 }
 pub fn delete_owned_directory(
@@ -986,7 +1142,7 @@ pub fn delete_owned_directory(
     expected: &RemoteDirectoryStamp,
     stop: &AtomicBool,
     verify_local_absence: &dyn Fn() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let target = recorded_target(remote, relative)?;
     s.run(stop,async {
         if &directory_guard(&s.raw,&target).await? != expected { return Err("Remote directory guard changed since authorization; deletion refused".into()); }
@@ -997,7 +1153,7 @@ pub fn delete_owned_directory(
                 Ok(batch) if batch.files.iter().all(|entry| entry.filename=="." || entry.filename=="..") => (),
                 Ok(_) => {
                     s.raw.close(handle).await.map_err(|_| "Remote directory close failed")?;
-                    return Err("Remote directory contains unowned, excluded, or pending entries; nonrecursive removal refused".into());
+                    return Ok(false);
                 }
                 Err(SftpError::Status(status)) if status.status_code==StatusCode::Eof => {empty=true;break;},
                 Err(_) => return Err("Remote directory read failed; deletion refused".into()),
@@ -1011,7 +1167,7 @@ pub fn delete_owned_directory(
         verify_local_absence()?;
         crate::file_ops::check(stop)?;
         s.raw.rmdir(target).await.map_err(|_| "Remote directory removal failed or outcome is uncertain; authority suspended until a verified local counterpart exists")?;
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -1028,9 +1184,12 @@ pub fn upload_recorded(
     let stamp=s.run(stop,async {
         let parent=target.rsplit_once('/').map(|(parent,_)|if parent.is_empty(){"/"}else{parent}).ok_or("Invalid owned target")?;
         checked_directory(&s.raw,parent,false).await?;
-        let attrs=s.raw.lstat(target).await.map_err(|_|"Upload completed but ownership metadata is unavailable; deletion ownership was not recorded")?.attrs;
-        let stamp=remote_stamp(&attrs)?;
+        let attrs=s.raw.lstat(target.clone()).await.map_err(|_|"Upload completed but ownership metadata is unavailable; deletion ownership was not recorded")?.attrs;
+        let mut stamp=remote_stamp(&attrs)?;
         if stamp.size!=bytes {return Err("Remote file changed after upload; deletion ownership was not recorded".into());}
+        let local=std::fs::metadata(root.join(relative)).map_err(|_|"Local source changed after upload")?;
+        if stamp.mtime != local.modified().ok().and_then(protocol_seconds).ok_or("Local source mtime unavailable")? { return Err("Remote timestamp changed after upload; deletion ownership was not recorded".into()); }
+        stamp.parent=Some(directory_guard(&s.raw,parent).await?);
         Ok(stamp)
     })?;
     Ok((bytes, stamp))
@@ -1041,6 +1200,7 @@ pub fn delete_uploaded_file(
     relative: &Path,
     expected: &RemoteStamp,
     stop: &AtomicBool,
+    verify_local_absence: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     let target = recorded_target(remote, relative)?;
     let root = normalize(remote)?;
@@ -1051,6 +1211,8 @@ pub fn delete_uploaded_file(
             .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
             .ok_or("Invalid owned target")?;
         checked_directory(&s.raw, parent, false).await?;
+        let parent_guard=directory_guard(&s.raw,parent).await?;
+        if expected.parent.as_ref()!=Some(&parent_guard) { return Err("Remote file parent changed since verification; deletion refused".into()); }
         let attrs = s
             .raw
             .lstat(target.clone())
@@ -1058,12 +1220,14 @@ pub fn delete_uploaded_file(
             .map_err(|_| "Owned remote file unavailable; no removal attempted")?
             .attrs;
         let current = remote_stamp(&attrs)?;
-        if &current != expected {
-            return Err("Remote file changed since this job uploaded it; deletion refused".into());
+        if current.size != expected.size || current.mtime != expected.mtime {
+            return Err("Remote file changed since verification; deletion refused".into());
         }
+        if directory_guard(&s.raw,parent).await? != parent_guard { return Err("Remote file parent changed during verification; deletion refused".into()); }
+        verify_local_absence()?;
         crate::file_ops::check(stop)?;
         // This is deliberately REMOVE for one known regular file. There is no
-        // initial purge, recursive directory removal, or delete fallback.
+        // recursive directory removal or delete fallback.
         s.raw.remove(target).await.map_err(|_| {
             "Owned remote deletion failed or outcome is uncertain; refresh before retrying"
         })?;
@@ -1127,6 +1291,7 @@ pub fn upload(
         let mut input=tokio::fs::File::open(canonical).await.map_err(|_|"Local source unavailable")?;
         let before=input.metadata().await.map_err(|_|"Local metadata unavailable")?;
         if !before.is_file(){return Err("Local source is not a regular file".into());}
+        let source_mtime=before.modified().ok().and_then(protocol_seconds).ok_or("Local source timestamp unsupported by SFTPv3; upload was not committed")?;
         let handle=s.raw.open(stage.clone(),OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|remote_error("staging open"))?.handle;
         let mut offset=0u64;
         loop {
@@ -1139,6 +1304,13 @@ pub fn upload(
             let writes=chunks.into_iter().map(|(at,data)|s.raw.write(handle.clone(),at,data));
             futures_util::future::try_join_all(writes).await.map_err(|_|remote_error("upload"))?;
         }
+        let mut times=FileAttributes::empty();
+        times.atime=Some(before.accessed().ok().and_then(protocol_seconds).unwrap_or(source_mtime));
+        times.mtime=Some(source_mtime);
+        let status=s.raw.fsetstat(handle.clone(),times).await.map_err(|_|"SFTP source timestamp preservation failed; staging was not committed")?;
+        if status.status_code != StatusCode::Ok { return Err("SFTP source timestamp preservation refused; staging was not committed".into()); }
+        let staged=s.raw.fstat(handle.clone()).await.map_err(|_|"SFTP staging timestamp verification failed; staging was not committed")?.attrs;
+        if staged.mtime!=Some(source_mtime) || staged.size!=Some(offset) { return Err("SFTP staging timestamp or size was not preserved; staging was not committed".into()); }
         s.raw.close(handle).await.map_err(|_|remote_error("staging close"))?;
         let after=input.metadata().await.map_err(|_|"Local source changed")?;
         let current=tokio::fs::metadata(source).await.map_err(|_|"Local source changed")?;
@@ -1158,6 +1330,41 @@ pub fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_directory_authority_is_bounded_across_distinct_lifetime_paths() {
+        let mut retained=RetainedDirectories::default();
+        for n in 0..10000 {retained.retain(Path::new(&format!("retained-{n}"))).unwrap();}
+        assert!(retained.retain(Path::new("one-more/child")).is_err(),"Repeated nonempty removals cannot accumulate unbounded lifetime retention paths");
+        assert_eq!(retained.paths.len(),10000,"Budget failure must not publish partial new ancestors");
+        assert!(retained.exhausted());
+        retained.retain(Path::new("retained-1")).unwrap();
+    }
+    #[test]
+    fn retained_directory_bytes_are_bounded_without_partial_ancestor_adoption() {
+        let mut retained=RetainedDirectories::default();
+        let prefix=("a".repeat(250)+"/").repeat(16);
+        for n in 0..5000 {
+            let path=format!("{prefix}retained-{n}/new-child");
+            let count=retained.paths.len();let bytes=retained.bytes;
+            if retained.retain(Path::new(&path)).is_err() {
+                assert_eq!(retained.paths.len(),count);assert_eq!(retained.bytes,bytes);
+                assert!(retained.bytes<=16*1024*1024);assert!(retained.paths.len()<10000);
+                assert!(retained.exhausted());return;
+            }
+        }
+        panic!("Distinct deep lifetime paths must hit the byte budget before the count budget");
+    }
+    #[test]
+    fn metadata_comparison_floors_subseconds_and_refuses_unknown_protocol_times() {
+        let mut attrs=FileAttributes::empty();attrs.permissions=Some(0o100644);attrs.size=Some(5);attrs.mtime=Some(1700000000);
+        assert!(matching_metadata(5,Some(UNIX_EPOCH+Duration::new(1700000000,999999999)),&attrs));
+        assert!(!matching_metadata(6,Some(UNIX_EPOCH+Duration::from_secs(1700000000)),&attrs));
+        assert!(!matching_metadata(5,Some(UNIX_EPOCH+Duration::from_secs(1700000001)),&attrs));
+        for time in [None,Some(UNIX_EPOCH),Some(UNIX_EPOCH-Duration::from_secs(1)),Some(UNIX_EPOCH+Duration::from_secs(u32::MAX as u64+1))] { assert!(!matching_metadata(5,time,&attrs)); }
+        attrs.mtime=None;assert!(!matching_metadata(5,Some(UNIX_EPOCH+Duration::from_secs(1700000000)),&attrs));
+        attrs.mtime=Some(1700000000);attrs.permissions=Some(0o120777);
+        assert!(!matching_metadata(5,Some(UNIX_EPOCH+Duration::from_secs(1700000000)),&attrs));
+    }
     #[test]
     fn host_probe_is_cancelled_without_loading_a_private_key_or_authenticating() {
         let p = Profile {
@@ -1218,7 +1425,8 @@ mod tests {
             stamp,
             RemoteStamp {
                 size: 5,
-                mtime: 100
+                mtime: 100,
+                parent: None,
             }
         );
         attrs.size = Some(6);

@@ -155,7 +155,7 @@ fn local_transfer_action(
         Err(_) => Err("Local file inaccessible; deletion refused".into()),
     }
 }
-// Directory tracking is opt-in and per job/session. No remote-only discovery.
+// Directory tracking is opt-in and per job/session.
 fn queue_directories(
     path: &Path,
     root: &Path,
@@ -282,6 +282,12 @@ fn suspend_directories(directories: &mut HashMap<PathBuf, Option<sftp::RemoteDir
     for stamp in directories.values_mut() {
         *stamp = None;
     }
+}
+fn remember_directory(directories: &mut HashMap<PathBuf,Option<sftp::RemoteDirectoryStamp>>, path: PathBuf, stamp: sftp::RemoteDirectoryStamp, bytes: &mut usize) -> Result<(),String> {
+    let old=directories.get(&path).and_then(Option::as_ref).map_or(0,sftp::RemoteDirectoryStamp::authority_bytes);
+    let next=bytes.saturating_sub(old).saturating_add(stamp.authority_bytes());
+    if next>16*1024*1024 { return Err("Directory authority memory limit reached; stop and start a shallower sync".into()); }
+    directories.insert(path,Some(stamp)); *bytes=next; Ok(())
 }
 
 const REMOTE_CHANGE_LIMIT: usize = 64;
@@ -456,9 +462,16 @@ fn scan(
             return Ok(());
         }
         let entry = entry.map_err(|_| "Local entry failed")?;
-        let ty = entry.file_type().map_err(|_| "Local metadata failed")?;
-        if ty.is_symlink() {
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|_| "Local metadata failed")?;
+        let ty = metadata.file_type();
+        if reparse(&metadata) {
             continue;
+        }
+        if ty.is_file() {
+            let relative=entry.path().strip_prefix(root).map_err(|_|"Local scan path outside root")?.to_path_buf();
+            if (recursive || relative.components().count()==1) && !rules.excludes(&relative,false)? {
+                std::fs::File::open(entry.path()).map_err(|_|"Local source entry unreadable; initial scan incomplete, mirror deletion refused")?;
+            }
         }
         if ty.is_dir() || ty.is_file() {
             queue_candidate(
@@ -534,6 +547,17 @@ fn remember_upload<T>(
         return Err("Deletion disabled: uploaded-file tracking limit reached. Stop and start a new sync; no further remote deletions will be attempted by this job".into());
     }
     inventory.insert(path, stamp);
+    Ok(())
+}
+fn remember_file(
+    inventory: &mut HashMap<PathBuf,sftp::RemoteStamp>, path: PathBuf, stamp: sftp::RemoteStamp,
+    authority_bytes: &mut usize,
+) -> Result<(),String> {
+    let previous=inventory.get(&path).map_or(0,|old|old.authority_bytes()+path.as_os_str().len()*2);
+    let next=authority_bytes.saturating_sub(previous).saturating_add(stamp.authority_bytes()+path.as_os_str().len()*2);
+    if next > 16*1024*1024 { return Err("Deletion disabled: file authority memory limit reached; stop and start a shallower sync".into()); }
+    remember_upload(inventory,path,stamp)?;
+    *authority_bytes=next;
     Ok(())
 }
 impl Engine {
@@ -1237,6 +1261,7 @@ fn worker(
     let mut queue = HashMap::new();
     if let Err(e) = scan(&root, &root, &mut queue, &stop, &rules, options.recursive) {
         fatal(e);
+        if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
         return;
     }
     let mut directories: HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>> = HashMap::new();
@@ -1251,12 +1276,43 @@ fn worker(
             Instant::now(),
         ) {
             fatal(error);
+            if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
             return;
         }
     }
     state.lock().unwrap().activity.scan_finished();
     let mut connection = Some(initial);
     let mut inventory: HashMap<PathBuf, sftp::RemoteStamp> = HashMap::new();
+    let mut file_authority_bytes = 0usize;
+    let mut retained_directories = sftp::RetainedDirectories::default();
+    let mut directory_authority_bytes=0usize;
+    if let Err(error) = crate::file_ops::check(&stop).and_then(|()| {
+        if local_root_identity(&root)? != root_identity { return Err("Local root changed during initial scan; deletion refused".into()); }
+        if options.delete_removed {
+            let snapshot = sftp::mirror_snapshot(connection.as_mut().unwrap(), &remote, &rules, options.recursive, &stop)?;
+            // Authority is published only after both scans have completed and the
+            // original readable root still exists. Every removal rechecks absence.
+            if local_root_identity(&root)? != root_identity { return Err("Local root changed during mirror inventory; deletion refused".into()); }
+            for entry in std::fs::read_dir(&root).map_err(|_| "Local root unreadable after mirror inventory")? { entry.map_err(|_| "Local root entry unreadable after mirror inventory")?; }
+            for (path, stamp) in snapshot.files {
+                remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes)?;
+                enqueue_at(&mut queue,path,Instant::now())?;
+            }
+            retained_directories = snapshot.retained;
+            for (path,stamp) in snapshot.directories {
+                if directories.len() >= 10000 && !directories.contains_key(&path) { return Err("Directory tracking limit reached; deletion refused".into()); }
+                remember_directory(&mut directories,path.clone(),stamp,&mut directory_authority_bytes)?;
+                enqueue_at(&mut queue,path,Instant::now())?;
+            }
+            state.lock().unwrap().log("Mirror inventory verified; only in-scope source-absent files and empty directories may be deleted");
+        }
+        Ok(())
+    }) {
+        fatal(error);
+        if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
+        return;
+    }
+    state.lock().unwrap().log("Comparison uses size and whole-second UTC mtime; equal metadata does not prove equal content");
     let mut delete_enabled = options.delete_removed;
     let mut blocked = false;
     let mut rescan_required = false;
@@ -1411,6 +1467,7 @@ fn worker(
             let start = Instant::now();
             if connection.as_ref().is_some_and(|c| c.needs_recycle()) {
                 suspend_directories(&mut directories);
+                directory_authority_bytes=0;
                 connection = None;
                 state
                     .lock()
@@ -1419,6 +1476,7 @@ fn worker(
             }
             if connection.is_none() {
                 suspend_directories(&mut directories);
+                directory_authority_bytes=0;
                 match sftp::connect(&p, &passphrase, &stop) {
                     Ok((s, identity)) => {
                         if identity != expected_identity {
@@ -1447,9 +1505,14 @@ fn worker(
                     let action = directory_action(&root, &path, &root_identity, &stop)?;
                     let connection = connection.as_mut().unwrap();
                     if action == LocalAction::Delete {
+                        if retained_directories.contains(&path) {
+                            if let Some(Some(stamp))=directories.remove(&path) {directory_authority_bytes=directory_authority_bytes.saturating_sub(stamp.authority_bytes());}
+                            state.lock().unwrap().log(&format!("Retained remote directory with excluded or unsupported entries {}",path.display()));
+                            return Ok((0,None,LocalAction::Skip,false));
+                        }
                         let _local_parents = deletion_parent_guard(&root, &path)?;
                         let stamp=directories.get(&path).and_then(Option::as_ref).ok_or("Directory deletion authority unavailable after reconnect or incomplete verification; restore local directory or stop and restart")?;
-                        sftp::delete_owned_directory(
+                        let removed = sftp::delete_owned_directory(
                             connection,
                             &remote,
                             &path,
@@ -1464,11 +1527,15 @@ fn worker(
                                 Ok(())
                             },
                         )?;
-                        directories.remove(&path);
-                        return Ok((0, None, LocalAction::Delete));
+                        if !removed {
+                            retained_directories.retain(&path)?;
+                            state.lock().unwrap().log(&format!("Retained nonempty remote directory {}",path.display()));
+                        }
+                        if let Some(Some(stamp))=directories.remove(&path) {directory_authority_bytes=directory_authority_bytes.saturating_sub(stamp.authority_bytes());}
+                        return Ok((0, None, if removed {LocalAction::Delete} else {LocalAction::Skip}, removed));
                     }
-                    let stamp =
-                        sftp::authorize_directory(connection, &remote, &path, &stop, &|| {
+                    let (stamp, created) =
+                        sftp::authorize_directory_observed(connection, &remote, &path, &stop, &|| {
                             if directory_action(&root, &path, &root_identity, &stop)?
                                 != LocalAction::Skip
                             {
@@ -1478,8 +1545,8 @@ fn worker(
                             }
                             Ok(())
                         })?;
-                    directories.insert(path.clone(), Some(stamp));
-                    return Ok((0, None, LocalAction::Skip));
+                    remember_directory(&mut directories,path.clone(),stamp,&mut directory_authority_bytes)?;
+                    return Ok((0, None, LocalAction::Skip, created));
                 }
                 let action = local_transfer_action(
                     &root,
@@ -1489,40 +1556,55 @@ fn worker(
                     &stop,
                 )?;
                 let connection = connection.as_mut().unwrap();
+                if action == LocalAction::Upload {
+                    match sftp::compare_file(connection,&root,&path,&remote,&stop)? {
+                        sftp::FileComparison::Unchanged(stamp) => return Ok((0, if delete_enabled {Some(stamp)}else{None},LocalAction::Skip,false)),
+                        sftp::FileComparison::Upload { remote_newer: true } => state.lock().unwrap().log(&format!("Remote newer; source-authoritative overwrite {}",path.display())),
+                        sftp::FileComparison::Upload { remote_newer: false } => (),
+                    }
+                }
                 match action {
                     LocalAction::Upload if delete_enabled => {
                         let (bytes, stamp) =
                             sftp::upload_recorded(connection, &root, &path, &remote, &stop, &id)?;
-                        Ok((bytes, Some(stamp), LocalAction::Upload))
+                        Ok((bytes, Some(stamp), LocalAction::Upload, true))
                     }
                     LocalAction::Upload => {
                         sftp::upload(connection, &root, &path, &remote, &stop, &id)
-                            .map(|bytes| (bytes, None, LocalAction::Upload))
+                            .map(|bytes| (bytes, None, LocalAction::Upload, true))
                     }
                     LocalAction::Delete => {
                         let stamp = inventory
                             .get(&path)
                             .ok_or("File was not uploaded by this sync job")?;
-                        sftp::delete_uploaded_file(connection, &remote, &path, stamp, &stop)?;
-                        Ok((0, None, LocalAction::Delete))
+                        let _local_parents = deletion_parent_guard(&root,&path)?;
+                        sftp::delete_uploaded_file(connection, &remote, &path, stamp, &stop, &|| {
+                            if local_transfer_action(&root,&path,&root_identity,true,&stop)? != LocalAction::Delete { return Err("Local file recreated before remote removal; deletion refused".into()); }
+                            Ok(())
+                        })?;
+                        Ok((0, None, LocalAction::Delete, true))
                     }
-                    LocalAction::Skip => Ok((0, None, LocalAction::Skip)),
+                    LocalAction::Skip => Ok((0, None, LocalAction::Skip, false)),
                 }
             })();
             match transfer {
-                Ok((bytes, stamp, action)) => {
+                Ok((bytes, stamp, action, changed)) => {
+                    if let Some(stamp) = stamp {
+                        if let Err(error) = remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes) {
+                            delete_enabled=false; inventory.clear(); directories.clear();
+                            state.lock().unwrap().failure(&error,false);
+                        }
+                    }
                     if action == LocalAction::Skip {
                         if is_directory {
                             let mut status = state.lock().unwrap();
-                            // Successful verification may have created missing directories.
-                            // Adoption of an existing directory conservatively dirties its parent.
-                            status.committed_remote_change(&remote, &path);
+                            if changed { status.committed_remote_change(&remote, &path); }
                             status.pending = queue.len();
                             status.log(&format!(
                                 "Verified local/remote directory {}",
                                 path.display()
                             ));
-                        }
+                        } else { state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display())); }
                         continue;
                     }
                     last_transfer = Instant::now();
@@ -1533,28 +1615,19 @@ fn worker(
                         s.committed_remote_change(&remote, &path);
                     }
                     if action == LocalAction::Delete {
-                        inventory.remove(&path);
+                        if let Some(stamp)=inventory.remove(&path) { file_authority_bytes=file_authority_bytes.saturating_sub(stamp.authority_bytes()+path.as_os_str().len()*2); }
                         s.log(&format!(
                             "{} {}",
                             if is_directory {
                                 "Deleted verified empty directory"
                             } else {
-                                "Deleted previously uploaded file"
+                                "Deleted verified file"
                             },
                             path.display()
                         ));
                     } else {
                         s.sent += 1;
                         s.log(&format!("Uploaded {}", path.display()));
-                        if let Some(stamp) = stamp {
-                            if let Err(error) = remember_upload(&mut inventory, path.clone(), stamp)
-                            {
-                                delete_enabled = false;
-                                inventory.clear();
-                                directories.clear();
-                                s.failure(&error, false);
-                            }
-                        }
                     }
                     s.latency = item.first.elapsed().as_millis() as u64;
                     s.speed = (bytes as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64;
@@ -1562,12 +1635,18 @@ fn worker(
                 }
                 Err(e) => {
                     suspend_directories(&mut directories);
+                    directory_authority_bytes=0;
                     connection = None;
                     item.attempt += 1;
                     item.last = Instant::now() + Duration::from_secs(1 << item.attempt.min(4));
                     queue.insert(path, item.clone());
                     let mut s = state.lock().unwrap();
                     s.failure(&e, stop.load(Ordering::Relaxed));
+                    if retained_directories.exhausted() {
+                        rescan_required=true;
+                        blocked=true;
+                        s.status="failed".into();
+                    }
                     if item.attempt >= 3 {
                         s.status = "failed".into();
                         blocked = true;
@@ -1588,6 +1667,21 @@ fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn complete_scan_refuses_unreadable_source_entries_before_mirror_authority() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root=std::env::temp_dir().join(format!("nearly-unreadable-scan-{}",std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("locked.txt");std::fs::write(&path,b"generated").unwrap();
+        let held=std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let mut queue=HashMap::new();
+        let result=scan(&root,&root,&mut queue,&AtomicBool::new(false),&crate::exclusion::Rules::compile("").unwrap(),true);
+        let excluded=scan(&root,&root,&mut HashMap::new(),&AtomicBool::new(false),&crate::exclusion::Rules::compile("locked.txt").unwrap(),true);
+        drop(held);std::fs::remove_file(&path).unwrap();std::fs::remove_dir(&root).unwrap();
+        assert!(result.is_err(),"An unreadable source entry cannot count as a completed scan before mirror deletion");
+        assert!(excluded.is_ok(),"Excluded unreadable files are outside the mirror scope");
+    }
     #[test]
     fn scan_depth_is_bounded_even_for_empty_directories_after_filtering() {
         let fixture = std::env::temp_dir().join(format!(
@@ -2553,6 +2647,159 @@ mod directory_regression {
         assert_eq!(status.pending, 0, "{:?}", status.logs);
         assert_eq!(status.error_count, 0, "{:?}", status.logs);
     }
+    fn set_mtime(path: &Path, seconds: u64, nanos: u32) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH + Duration::new(seconds, nanos),
+        )).unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_metadata_and_resume() {
+        let f = Fixture::load();
+        let (local, remote) = f.roots("difference-metadata");
+        write(&local, "same.txt");
+        set_mtime(&local.join("same.txt"), 1_700_000_000, 750_000_000);
+        let engine = f.start("difference-metadata", &local, SyncOptions::default());
+        wait(|| engine.status("difference-metadata").unwrap().sent == 1);
+        settled(&engine, "difference-metadata");
+        assert_eq!(std::fs::metadata(remote.join("same.txt")).unwrap().modified().unwrap()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 1_700_000_000,
+            "Upload must preserve source mtime at SFTPv3 second precision");
+        engine.stop("difference-metadata").unwrap();
+        let resumed = f.start("difference-metadata", &local, SyncOptions::default());
+        settled(&resumed, "difference-metadata");
+        let status = resumed.status("difference-metadata").unwrap();
+        assert_eq!(status.sent, 0, "Resume new job must skip unchanged metadata: {:?}", status.logs);
+        assert_eq!(status.remote_changes.revision, 0);
+        assert!(status.logs.iter().any(|line| line.starts_with("Skipped unchanged ")));
+        set_mtime(&local.join("same.txt"), 1_700_000_001, 0);
+        wait(|| resumed.status("difference-metadata").unwrap().sent == 1);
+        std::fs::write(local.join("same.txt"), b"changed size").unwrap();
+        wait(|| std::fs::read(remote.join("same.txt")).ok().as_deref() == Some(b"changed size"));
+        write(&local, "added.txt");
+        wait(|| remote.join("added.txt").is_file());
+        settled(&resumed,"difference-metadata");
+        let before_burst=resumed.status("difference-metadata").unwrap().sent;
+        for n in 1..=20 { std::fs::write(local.join("added.txt"),vec![n as u8;n]).unwrap(); }
+        wait(|| std::fs::read(remote.join("added.txt")).ok()==Some(vec![20u8;20]));
+        settled(&resumed,"difference-metadata");
+        assert_eq!(resumed.status("difference-metadata").unwrap().sent,before_burst+1,"Burst events must coalesce to the latest file");
+        resumed.stop("difference-metadata").unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_initial_mirror_and_skipped_delete() {
+        let f = Fixture::load();
+        let (local, remote) = f.roots("difference-mirror");
+        write(&local, "same.txt"); write(&remote, "same.txt");
+        for root in [&local, &remote] { set_mtime(&root.join("same.txt"), 1_700_000_000, 0); }
+        write(&remote, "remote-only/nested/remove.txt");
+        write(&remote, "kept/nested/keep.tmp");
+        write(&remote, "excluded/keep.txt");
+        let engine = f.start("difference-mirror", &local, SyncOptions {
+            delete_removed: true, exclusion_rules: "*.tmp\nexcluded/".into(), ..SyncOptions::default()
+        });
+        wait(|| !remote.join("remote-only").exists());
+        settled(&engine, "difference-mirror");
+        assert_eq!(engine.status("difference-mirror").unwrap().sent, 0);
+        assert!(remote.join("kept/nested/keep.tmp").is_file());
+        assert!(remote.join("excluded/keep.txt").is_file());
+        engine.stop("difference-mirror").unwrap();
+        let engine=f.start("difference-mirror",&local,SyncOptions { delete_removed:true,exclusion_rules:"*.tmp\nexcluded/".into(),..SyncOptions::default() });
+        settled(&engine,"difference-mirror");
+        assert_eq!(engine.status("difference-mirror").unwrap().sent,0);
+        assert_eq!(engine.status("difference-mirror").unwrap().remote_changes.revision,0,"Adopting unchanged directories must not dirty the browse journal");
+        std::fs::remove_file(local.join("same.txt")).unwrap();
+        wait(|| !remote.join("same.txt").exists());
+        settled(&engine, "difference-mirror");
+        engine.stop("difference-mirror").unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_scope_and_remote_changes() {
+        let f = Fixture::load();
+        for (name, delete, recursive) in [("difference-off", false, true), ("difference-shallow", true, false)] {
+            let (local, remote) = f.roots(name);
+            write(&remote, "root-only.txt"); write(&remote, "nested/keep.txt");
+            write(&local, "source.txt");
+            let engine = f.start(name, &local, SyncOptions { delete_removed: delete, recursive, ..SyncOptions::default() });
+            wait(|| remote.join("source.txt").is_file());
+            settled(&engine, name);
+            assert_eq!(remote.join("root-only.txt").exists(), !delete);
+            assert!(remote.join("nested/keep.txt").is_file());
+            engine.stop(name).unwrap();
+        }
+        let (local, remote) = f.roots("difference-newer");
+        write(&local, "newer.txt"); std::fs::write(remote.join("newer.txt"), b"different remote bytes").unwrap();
+        set_mtime(&local.join("newer.txt"), 1_700_000_000, 0);
+        set_mtime(&remote.join("newer.txt"), 1_800_000_000, 0);
+        let engine = f.start("difference-newer", &local, SyncOptions { delete_removed: true, ..SyncOptions::default() });
+        wait(|| std::fs::read(remote.join("newer.txt")).ok() == std::fs::read(local.join("newer.txt")).ok());
+        settled(&engine, "difference-newer");
+        assert!(engine.status("difference-newer").unwrap().logs.iter().any(|line| line.starts_with("Remote newer; source-authoritative overwrite ")));
+        // A changed remote file must not inherit the original deletion authority.
+        std::fs::write(remote.join("newer.txt"), b"independent remote edit").unwrap();
+        std::fs::remove_file(local.join("newer.txt")).unwrap();
+        wait(|| engine.status("difference-newer").unwrap().error_count > 0);
+        assert_eq!(std::fs::read(remote.join("newer.txt")).unwrap(), b"independent remote edit");
+        engine.stop("difference-newer").unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_inventory_and_delete_guards() {
+        let f=Fixture::load();
+        for name in ["difference-partial","difference-mutated","difference-root-race"] {
+            let (local,remote)=f.roots(name);
+            write(&remote,"orphan.txt");
+            if name=="difference-partial" { for n in 0..101 { write(&remote,&format!("entry-{n}.txt")); } }
+            let engine=f.start(name,&local,SyncOptions {delete_removed:true,..SyncOptions::default()});
+            wait(||engine.status(name).unwrap().error_count>0);
+            assert!(remote.join("orphan.txt").is_file(),"{name} must not infer deletion from uncertain source/remote state");
+            if name=="difference-partial" { assert_eq!(std::fs::read_dir(&remote).unwrap().count(),102,"Partial listing cannot publish even the first batch's authority"); }
+            engine.stop(name).unwrap();
+        }
+        let (local,remote)=f.roots("difference-unsupported");
+        write(&remote,"link.txt"); write(&remote,"remove.txt");
+        let engine=f.start("difference-unsupported",&local,SyncOptions {delete_removed:true,..SyncOptions::default()});
+        wait(||!remote.join("remove.txt").exists());
+        settled(&engine,"difference-unsupported");
+        assert!(remote.join("link.txt").exists(),"Symlink metadata must never authorize deletion");
+        engine.stop("difference-unsupported").unwrap();
+        let (local,remote)=f.roots("difference-real-link");
+        let engine=f.start("difference-real-link",&local,SyncOptions {delete_removed:true,..SyncOptions::default()});
+        settled(&engine,"difference-real-link");
+        assert!(std::fs::symlink_metadata(remote.join("link")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(f.remote.join("other/link-sentinel.txt")).unwrap(),b"generated out-of-selected-root sentinel");
+        engine.stop("difference-real-link").unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_timestamp_refusal_preserves_target() {
+        let f=Fixture::load();
+        for name in ["difference-timestamp-refused","difference-timestamp-lying"] {
+            let (local,remote)=f.roots(name);write(&local,"target.txt");
+            set_mtime(&local.join("target.txt"),1_700_000_000,0);
+            std::fs::write(remote.join("target.txt"),b"existing remote must survive").unwrap();
+            let stop=AtomicBool::new(false);
+            let (mut connection,_)=sftp::connect(&f.profile,&f.secret,&stop).unwrap();
+            let error=sftp::upload(&mut connection,&local.canonicalize().unwrap(),Path::new("target.txt"),&format!("/{name}"),&stop,"generated").unwrap_err();
+            assert!(error.contains("timestamp"),"{error}");
+            assert_eq!(std::fs::read(remote.join("target.txt")).unwrap(),b"existing remote must survive");
+            assert!(std::fs::read_dir(&remote).unwrap().any(|e|e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+        }
+    }
+    #[test]
+    #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
+    fn sync_difference_generated_localhost_stop_during_inventory_preserves_queue_summary() {
+        let f=Fixture::load();let (local,remote)=f.roots("difference-stop-inventory");
+        write(&local,"pending.txt");write(&remote,"orphan.txt");
+        let engine=f.start("difference-stop-inventory",&local,SyncOptions {delete_removed:true,..SyncOptions::default()});
+        wait(||f.output.join("inventory-stop-observed").exists());
+        let summary=engine.stop_with_summary("difference-stop-inventory").unwrap();
+        assert!(summary.known_unreflected,"Canceled inventory must retain the already-scanned transfer queue in the stop summary");
+        assert!(remote.join("orphan.txt").exists());assert!(!remote.join("pending.txt").exists());
+    }
     #[test]
     #[ignore = "generated localhost fixture launched by scripts/directory-delete-test.mjs"]
     fn directory_deletion_generated_localhost_basics() {
@@ -2583,7 +2830,7 @@ mod directory_regression {
         });
         settled(&engine, "dir-basics");
         assert!(!remote.join("excluded").exists());
-        assert!(remote.join("remote-only/nested").is_dir());
+        assert!(!remote.join("remote-only").exists());
         for path in ["empty", "nonempty", "preexisting"] {
             std::fs::remove_dir_all(local.join(path)).unwrap();
         }
@@ -2599,7 +2846,7 @@ mod directory_regression {
         std::fs::create_dir_all(local.join("renamed/deep")).unwrap();
         thread::sleep(Duration::from_millis(1500));
         assert!(remote.join("renamed/deep").is_dir());
-        assert!(remote.join("remote-only/nested").is_dir());
+        assert!(!remote.join("remote-only").exists());
         engine.stop("dir-basics").unwrap();
     }
     #[test]
@@ -2731,9 +2978,10 @@ mod directory_regression {
         settled(&engine, "dir-unknown");
         write(&remote, "owned/deep/unknown.tmp");
         std::fs::remove_dir_all(local.join("owned")).unwrap();
-        wait(|| engine.status("dir-unknown").unwrap().error_count > 0);
+        wait(|| !remote.join("owned/deep/file.txt").exists());
+        settled(&engine,"dir-unknown");
         assert!(remote.join("owned/deep/unknown.tmp").exists());
-        assert!(engine.status("dir-unknown").unwrap().pending > 0);
+        assert_eq!(engine.status("dir-unknown").unwrap().pending, 0);
         engine.stop("dir-unknown").unwrap();
         let (local, remote) = f.roots("dir-type");
         std::fs::create_dir(local.join("changed")).unwrap();

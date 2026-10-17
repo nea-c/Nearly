@@ -1,6 +1,6 @@
 {
   "name": "nearly",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,8 +11,15 @@
     "test:ui": "playwright test",
     "tauri": "tauri",
     "build:windows": "node scripts/build-windows.mjs",
-    "test:native": "node scripts/native-drag-launch-test.mjs",
-    "test:ui:production": "npm run build && playwright test --config playwright.production.config.ts"
+    "test:native": "node scripts/native-lifecycle-test.mjs",
+    "test:ui:production": "npm run build && playwright test --config playwright.production.config.ts",
+    "build:installer": "node scripts/build-installer.mjs",
+    "test:installer": "node --test src-tauri/windows/template.test.mjs tests/build-installer.test.mjs",
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/check-version.mjs",
+    "predev": "npm run version:check",
+    "prebuild": "npm run version:check",
+    "pretest": "npm run version:check"
   },
   "devDependencies": {
     "@noble/hashes": "^2.4.0",

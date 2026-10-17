@@ -27,7 +27,7 @@ test("first OS choice persists explicitly and all five manual themes ignore late
   await page.locator("#settings-toggle").click();
   const selector=page.locator("#theme-select"),root=page.locator("html");
   await expect(selector).toHaveValue("dark");
-  await expect(selector.locator("option")).toHaveText(["ライト","ダーク","ミッドナイト","フォレスト","ミント"]);
+  await expect(selector.locator("option")).toHaveText(["ライト","ダーク","ミッドナイト","ジェイド","ミント"]);
   await expect.poll(()=>page.evaluate(()=>JSON.parse(localStorage.getItem("syncfiles-v1")).theme)).toBe("dark");
   await page.emulateMedia({colorScheme:"light"});
   await expect(root).toHaveAttribute("data-theme","dark");
@@ -133,7 +133,7 @@ for (const theme of ["light", "dark", "midnight", "forest", "mint"])
       document.querySelector('#start-form').append(hint);
     });
     const accents=await page.evaluate(()=>['.target small','#exclusion-details summary','#theme-hint-probe strong'].map(selector=>getComputedStyle(document.querySelector(selector)).color));
-    expect(accents).toEqual(Array(3).fill(({light:'rgb(82, 101, 125)',dark:'rgb(216, 216, 216)',midnight:'rgb(157, 199, 255)',forest:'rgb(165, 221, 188)',mint:'rgb(40, 93, 62)'})[theme]));
+    expect(accents).toEqual(Array(3).fill(({light:'rgb(82, 101, 125)',dark:'rgb(216, 216, 216)',midnight:'rgb(157, 199, 255)',forest:'rgb(145, 201, 178)',mint:'rgb(40, 93, 62)'})[theme]));
     if(theme==='midnight') {
       const placeholders=await page.evaluate(()=>['#preset-name','#exclusion-rules'].map(selector=>getComputedStyle(document.querySelector(selector),'::placeholder').color));
       expect(placeholders).toEqual(['rgb(137, 151, 170)','rgb(137, 151, 170)']);
@@ -152,7 +152,7 @@ test(`${theme} ${language} covers notices, error, disabled and keyboard focus in
   await page.locator('#language-select').selectOption(language);
   await expect(page.locator('#language-select option')).toHaveText(['English','日本語']);
   await expect(page.locator('#theme-select option')).toHaveText(language==='en'
-    ?['Light','Dark','Midnight','Forest','Mint']:['ライト','ダーク','ミッドナイト','フォレスト','ミント']);
+    ?['Light','Dark','Midnight','Jade','Mint']:['ライト','ダーク','ミッドナイト','ジェイド','ミント']);
   for(const compact of [false,true]) {
     await page.locator('#compact-explorer').setChecked(compact);
     await page.locator('#settings-close').click();

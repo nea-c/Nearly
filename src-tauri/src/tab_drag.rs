@@ -18,17 +18,19 @@ pub struct Viewport { width:f64, height:f64 }
 pub struct Item { workspace_id:String, rect:Rect }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Geometry { rect:Rect, items:Vec<Item>, viewport:Viewport }
+pub struct Geometry { rect:Rect, #[serde(default,rename="appendRect")] append_rect:Option<Rect>, items:Vec<Item>, viewport:Viewport }
 #[derive(Clone)]
 struct Strip { geometry:Geometry, updated:Instant, size:(u32,u32) }
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct DragStatus { pub drag_id:String, pub source_label:String, pub workspace_id:String, pub phase:String, pub target_label:Option<String>, pub before_id:Option<String>, pub target_index:Option<usize>, pub token:Option<String>, pub reason:Option<String> }
 #[derive(Clone)]
-struct Gesture { status:DragStatus, token:String, cancelled:Arc<AtomicBool> }
+struct Gesture { status:DragStatus, token:String, cancelled:Arc<AtomicBool>, move_existing:bool, anchor:Point, preview_label:Option<String>, preview_hydrated:Arc<AtomicBool> }
 #[derive(Default)]
 pub struct Controller { strips:Mutex<HashMap<String,Strip>>, active:Mutex<Option<Gesture>>, history:Mutex<Vec<DragStatus>> }
 impl Controller {
+    pub fn cancel_named(&self,token:&str){if let Ok(active)=self.active.lock(){if let Some(g)=active.as_ref(){if g.token==token{g.cancelled.store(true,Ordering::Release);}}}}
+    pub fn preview_ready(&self,token:&str){if let Ok(active)=self.active.lock(){if let Some(g)=active.as_ref(){if g.token==token&&g.preview_label.is_some(){g.preview_hydrated.store(true,Ordering::Release);}}}}
     pub fn forget(&self,label:&str){if let Ok(mut s)=self.strips.lock(){s.remove(label);}if let Ok(active)=self.active.lock(){if let Some(g)=active.as_ref(){if g.status.source_label==label{g.cancelled.store(true,Ordering::Release);}}}}
     fn publish(&self,app:&tauri::AppHandle,status:&DragStatus){
         if let Ok(mut active)=self.active.lock(){if let Some(g)=active.as_mut(){if g.status.drag_id==status.drag_id{g.status=status.clone();}}}
@@ -40,15 +42,22 @@ impl Controller {
 }
 fn valid_rect(r:Rect,v:&Viewport)->bool{[r.x,r.y,r.width,r.height,v.width,v.height].iter().all(|n|n.is_finite())&&v.width>0.0&&v.height>0.0&&v.width<=32768.0&&v.height<=32768.0&&r.width>=0.0&&r.height>0.0&&r.x>=-1.0&&r.y>=-1.0&&r.x+r.width<=v.width+1.0&&r.y+r.height<=v.height+1.0}
 impl Rect { fn contains(&self,x:f64,y:f64)->bool{x>=self.x&&x<self.x+self.width&&y>=self.y&&y<self.y+self.height} }
+fn eligible_target(label:&str,source:&str,preview:Option<&str>,include_source:bool)->bool{Some(label)!=preview&&(include_source||label!=source)}
+fn preview_should_show(hydrated:bool,target:Option<&str>,source:&str)->bool{hydrated&&target.is_none_or(|label|label==source)}
+fn strip_contains(g:&Geometry,x:f64,y:f64)->bool{g.rect.contains(x,y)||g.append_rect.is_some_and(|r|r.contains(x,y))}
 fn insertion(items:&[Item],source:&str,x:f64)->(usize,Option<String>){let filtered:Vec<_>=items.iter().filter(|i|i.workspace_id!=source).collect();let index=filtered.iter().position(|i|x<i.rect.x+i.rect.width/2.0).unwrap_or(filtered.len());(index,filtered.get(index).map(|i|i.workspace_id.clone()))}
 
+fn physical_anchor(anchor:Point,viewport:&Viewport,size:(u32,u32),frame:(i32,i32))->Result<(i32,i32),String>{
+    if !anchor.x.is_finite()||!anchor.y.is_finite()||anchor.x<0.0||anchor.y<0.0||!viewport.width.is_finite()||!viewport.height.is_finite()||viewport.width<=0.0||viewport.height<=0.0||anchor.x>viewport.width||anchor.y>viewport.height||size.0==0||size.1==0{return Err("Invalid window drag geometry".into());}
+    Ok(((anchor.x*size.0 as f64/viewport.width).round() as i32+frame.0,(anchor.y*size.1 as f64/viewport.height).round() as i32+frame.1))
+}
 #[tauri::command]
 pub fn register_tab_strip(window:tauri::WebviewWindow,state:tauri::State<crate::AppState>,geometry:Option<Geometry>)->Result<(),String>{
     let size=window.inner_size().map_err(|_|"Window geometry unavailable")?;
     let registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;registry.registered(window.label())?;
     let mut strips=state.tab_drag.strips.lock().map_err(|_|"Drag geometry lock failed")?;
     let Some(g)=geometry else {strips.remove(window.label());return Ok(());};
-    if !valid_rect(g.rect,&g.viewport)||g.items.len()>128||g.items.iter().any(|i|![i.rect.x,i.rect.y,i.rect.width,i.rect.height].iter().all(|n|n.is_finite()&&n.abs()<=32768.0)||i.rect.width<=0.0||i.rect.height<=0.0||registry.owner(window.label(),&i.workspace_id).is_err()){return Err("Invalid tab strip geometry".into());}
+    if !valid_rect(g.rect,&g.viewport)||g.append_rect.is_some_and(|r|!valid_rect(r,&g.viewport)||r.x<g.rect.x+g.rect.width)||g.items.len()>128||g.items.iter().any(|i|![i.rect.x,i.rect.y,i.rect.width,i.rect.height].iter().all(|n|n.is_finite()&&n.abs()<=32768.0)||i.rect.width<=0.0||i.rect.height<=0.0||registry.owner(window.label(),&i.workspace_id).is_err()){return Err("Invalid tab strip geometry".into());}
     let mut ids=std::collections::HashSet::new();if g.items.iter().any(|i|!ids.insert(i.workspace_id.clone())){return Err("Duplicate tab geometry".into());}
     strips.insert(window.label().into(),Strip{geometry:g,updated:Instant::now(),size:(size.width,size.height)});Ok(())
 }
@@ -69,14 +78,16 @@ pub async fn begin_tab_drag(window:tauri::WebviewWindow,app:tauri::AppHandle,sta
     #[cfg(windows)] {
         if !native::button_down(){return Err("The physical mouse button is no longer held".into());}
         if !native::is_foreground(&window){return Err("Source window is not active".into());}
+        // This getter waits for the UI thread. Never hold the drag mutex while
+        // a close callback may need it to forget the source window.
+        let size=window.inner_size().map_err(|_|"Window geometry unavailable")?;
         let mut active=state.tab_drag.active.lock().map_err(|_|"Drag lock failed")?;if active.is_some(){return Err("Another tab drag is active".into());}
         let strip=state.tab_drag.strips.lock().map_err(|_|"Drag geometry lock failed")?.get(window.label()).cloned().ok_or("Tab strip geometry unavailable")?;
-        let size=window.inner_size().map_err(|_|"Window geometry unavailable")?;
         let item=strip.geometry.items.iter().find(|i|i.workspace_id==workspace_id).ok_or("Dragged tab geometry unavailable")?;
         if strip.updated.elapsed()>Duration::from_millis(1500)||(size.width,size.height)!=strip.size||grab.x>item.rect.width||grab.y>item.rect.height{return Err("Tab strip geometry is stale".into());}
-        let transfer={let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;crate::validate_native_transfer(&state,&registry,window.label(),&workspace_id,&payload)?;registry.begin_drag(window.label(),&workspace_id,payload)?};
+        let (transfer,move_existing)={let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;crate::validate_native_transfer(&state,&registry,window.label(),&workspace_id,&payload)?;let move_existing=registry.owned(window.label()).len()==1;let transfer=registry.begin_drag(window.label(),&workspace_id,payload)?;(transfer,move_existing)};
         let status=DragStatus{drag_id:transfer.token.clone(),source_label:window.label().into(),workspace_id,phase:"dragging".into(),target_label:None,before_id:None,target_index:None,token:None,reason:None};
-        let gesture=Gesture{status:status.clone(),token:transfer.token.clone(),cancelled:Arc::new(AtomicBool::new(false))};*active=Some(gesture.clone());drop(active);
+        let gesture=Gesture{status:status.clone(),token:transfer.token.clone(),cancelled:Arc::new(AtomicBool::new(false)),move_existing,anchor:Point{x:item.rect.x+grab.x,y:item.rect.y+grab.y},preview_label:(!move_existing).then_some(transfer.target_label),preview_hydrated:Arc::new(AtomicBool::new(false))};*active=Some(gesture.clone());drop(active);
         let (send,receive)=std::sync::mpsc::sync_channel(1);let controller=state.tab_drag.clone();
         let worker_app=app.clone();std::thread::Builder::new().name("nearly-tab-drag".into()).spawn(move||native::run(worker_app,controller,gesture,grab,title,send)).map_err(|e|{let _=state.ownership.lock().map(|mut r|r.abort(window.label(),&transfer.token));if let Ok(mut a)=state.tab_drag.active.lock(){*a=None;}format!("Drag worker unavailable: {e}")})?;
         // Worker reports only after both scoped hooks are installed and button state checked.
@@ -105,52 +116,70 @@ fn input()->Result<Input,String>{
     let thread=std::thread::Builder::new().name("nearly-drag-input".into()).spawn(move||{let hooks=match hooks(){Ok(h)=>h,Err(e)=>{let _=send.send(Err(e));return;}};if !button_down(){let _=send.send(Err("Mouse released before native drag was ready".into()));return;}let began=Instant::now();let _=send.send(Ok(()));while !stopping.load(Ordering::Acquire){if began.elapsed()>Duration::from_secs(60){ESCAPED.store(true,Ordering::Release);break;}pump();std::thread::sleep(Duration::from_millis(3));}drop(hooks);}).map_err(|_|"Native input thread unavailable")?;
     let guard=Input{stop,thread:Some(thread)};receive.recv_timeout(Duration::from_secs(3)).map_err(|_|"Native input thread did not become ready")??;Ok(guard)
 }
-fn root_at(app:&tauri::AppHandle,p:POINT)->HWND{unsafe{
-    let root=GetAncestor(WindowFromPoint(p),GA_ROOT);let ghost=app.get_webview_window("tab-drag-preview").and_then(|w|w.hwnd().ok()).map(|h|h.0);
-    if ghost!=Some(root.0){return root;}
-    // Some Windows versions include click-through layered windows in
-    // WindowFromPoint. Walk actual top-level z-order, skipping only our ghost.
+fn root_at(p:POINT,ignored:&[HWND])->HWND{unsafe{
+    let skip=|w:HWND|ignored.iter().any(|h|h.0==w.0);
+    let root=GetAncestor(WindowFromPoint(p),GA_ROOT);if !skip(root){return root;}
+    // Ignore only the actual moving app surface. Every unrelated top-level
+    // window still occludes targets in the real desktop z-order.
     let mut current=GetTopWindow(None).ok();let mut budget=4096;
-    while let Some(w)=current{if budget==0{break;}budget-=1;if ghost!=Some(w.0)&&IsWindowVisible(w).as_bool()&&!IsIconic(w).as_bool(){let mut r=RECT::default();if GetWindowRect(w,&mut r).is_ok()&&p.x>=r.left&&p.x<r.right&&p.y>=r.top&&p.y<r.bottom{return w;}}current=GetWindow(w,GW_HWNDNEXT).ok();}HWND::default()
+    while let Some(w)=current{if budget==0{break;}budget-=1;if !skip(w)&&IsWindowVisible(w).as_bool()&&!IsIconic(w).as_bool(){let mut r=RECT::default();if GetWindowRect(w,&mut r).is_ok()&&p.x>=r.left&&p.x<r.right&&p.y>=r.top&&p.y<r.bottom{return w;}}current=GetWindow(w,GW_HWNDNEXT).ok();}HWND::default()
 }}
 fn point_in_strip(w:&tauri::WebviewWindow,s:&Strip,p:POINT)->Result<Option<(f64,f64)>,String>{
     if s.updated.elapsed()>Duration::from_millis(1500){return Err("Tab strip geometry expired".into());}let size=w.inner_size().map_err(|_|"Window geometry unavailable")?;if (size.width,size.height)!=s.size{return Err("Tab strip changed size".into());}
     let origin=w.inner_position().map_err(|_|"Window position unavailable")?;let x=(p.x-origin.x) as f64*s.geometry.viewport.width/size.width.max(1) as f64;let y=(p.y-origin.y) as f64*s.geometry.viewport.height/size.height.max(1) as f64;
-    Ok(s.geometry.rect.contains(x,y).then_some((x,y)))
+    Ok(strip_contains(&s.geometry,x,y).then_some((x,y)))
 }
-fn target(app:&tauri::AppHandle,c:&Controller,g:&Gesture,p:POINT)->Result<Option<(String,usize,Option<String>)>,String>{
-    let root=root_at(app,p);let strips=c.strips.lock().map_err(|_|"Drag geometry lock failed")?.clone();
-    for (label,w) in app.webview_windows(){if label=="tab-drag-preview"{continue;}if w.hwnd().ok().map(|h|h.0)!=Some(root.0){continue;}let Some(s)=strips.get(&label) else{return Err("Target tab strip is unavailable".into());};if let Some((x,_))=point_in_strip(&w,s,p)?{let(index,before)=insertion(&s.geometry.items,&g.status.workspace_id,x);return Ok(Some((label,index,before)));}return Ok(None);}
+fn target(app:&tauri::AppHandle,c:&Controller,g:&Gesture,p:POINT,include_source:bool)->Result<Option<(String,usize,Option<String>)>,String>{
+    let moving=if g.move_existing{Some(g.status.source_label.as_str())}else{g.preview_label.as_deref()};
+    let ignored:Vec<_>=moving.and_then(|label|app.get_webview_window(label)).and_then(|w|w.hwnd().ok()).map(|h|HWND(h.0)).into_iter().collect();
+    let root=root_at(p,&ignored);let strips=c.strips.lock().map_err(|_|"Drag geometry lock failed")?.clone();
+    for (label,w) in app.webview_windows(){if !eligible_target(&label,&g.status.source_label,g.preview_label.as_deref(),include_source){continue;}if w.hwnd().ok().map(|h|h.0)!=Some(root.0){continue;}let Some(s)=strips.get(&label) else{return Err("Target tab strip is unavailable".into());};if let Some((x,_))=point_in_strip(&w,s,p)?{let(index,before)=insertion(&s.geometry.items,&g.status.workspace_id,x);return Ok(Some((label,index,before)));}return Ok(None);}
     Ok(None)
 }
-pub fn run(app:tauri::AppHandle,controller:Arc<Controller>,g:Gesture,grab:Point,title:String,ready:std::sync::mpsc::SyncSender<Result<(),String>>){
+pub fn run(app:tauri::AppHandle,controller:Arc<Controller>,g:Gesture,grab:Point,_title:String,ready:std::sync::mpsc::SyncSender<Result<(),String>>){
     let mut status=g.status.clone();let result=(||->Result<(),String>{
         // A dedicated hook-only thread is pumping before any WebView/UI work.
-        let scoped_input=input()?;cursor()?;let _=ready.send(Ok(()));
-        let url=tauri::WebviewUrl::App("drag-preview.html".into());
-        let title_script=format!("window.__NEARLY_DRAG_TITLE__={};",serde_json::to_string(&title).map_err(|_|"Invalid drag title")?);
-        let preview=tauri::WebviewWindowBuilder::new(&app,"tab-drag-preview",url).initialization_script(&title_script).title(&title).inner_size(220.0,42.0).decorations(false).resizable(false).skip_taskbar(true).always_on_top(true).focused(false).focusable(false).visible(false).build().map_err(|e|format!("Drag preview unavailable: {e}"))?;
-        struct Preview(tauri::WebviewWindow);impl Drop for Preview{fn drop(&mut self){let _=self.0.destroy();}}
-        let preview=Preview(preview);preview.0.set_ignore_cursor_events(true).map_err(|_|"Drag preview passthrough unavailable")?;
-        let initial=cursor()?;let _=preview.0.set_position(tauri::PhysicalPosition::new(initial.x.saturating_add(14),initial.y.saturating_add(18)));let _=preview.0.show();let began=Instant::now();
+        let scoped_input=input()?;cursor()?;let _=ready.send(Ok(()));controller.publish(&app,&status);
+        let source=app.get_webview_window(&status.source_label).ok_or("Source window closed")?;
+        let move_offset=if g.move_existing{
+            let strip=controller.strips.lock().map_err(|_|"Drag geometry lock failed")?.get(&status.source_label).cloned().ok_or("Source tab strip unavailable")?;
+            if !button_down(){return Err("Mouse released before window movement".into());}
+            if source.is_maximized().map_err(|_|"Window state unavailable")?{source.unmaximize().map_err(|_|"Unable to restore dragged window")?;}
+            let inner=source.inner_position().map_err(|_|"Window position unavailable")?;let outer=source.outer_position().map_err(|_|"Window position unavailable")?;let size=source.inner_size().map_err(|_|"Window geometry unavailable")?;
+            let (x,y)=physical_anchor(g.anchor,&strip.geometry.viewport,strip.size,(inner.x-outer.x,inner.y-outer.y))?;
+            // Restoring a maximized window keeps the original vertical grip;
+            // constrain only the horizontal grip to its restored width.
+            Some((x.min(size.width.saturating_sub(8) as i32),y))
+        }else{None};
+        struct Preview{app:tauri::AppHandle,window:tauri::WebviewWindow,keep:bool}
+        impl Drop for Preview{fn drop(&mut self){if !self.keep{crate::discard_drag_preview(&self.app,self.window.label());}}}
+        let initial=cursor()?;
+        let mut preview=if g.move_existing{None}else{Some(Preview{window:crate::create_drag_preview(&app,&status.source_label,&g.token,initial.x,initial.y,grab.x,grab.y)?,app:app.clone(),keep:false})};
+        let began=Instant::now();
         let release=loop{
             if g.cancelled.load(Ordering::Acquire)||ESCAPED.load(Ordering::Acquire){return Err("Drag cancelled".into());}
             if began.elapsed()>Duration::from_secs(60){return Err("Drag timed out".into());}
             if RELEASED.load(Ordering::Acquire){break POINT{x:X.load(Ordering::Relaxed),y:Y.load(Ordering::Relaxed)};}
             if !button_down(){return Err("Native mouse release could not be verified".into());}
             let p=cursor()?;if app.get_webview_window(&status.source_label).is_none(){return Err("Source window closed".into());}
-            let candidate=target(&app,&controller,&g,p).ok().flatten();status.target_label=candidate.as_ref().map(|t|t.0.clone());status.target_index=candidate.as_ref().map(|t|t.1);status.before_id=candidate.and_then(|t|t.2);controller.publish(&app,&status);
-            let scale=preview.0.scale_factor().unwrap_or(1.0);let _=preview.0.set_position(tauri::PhysicalPosition::new(p.x.saturating_add((14.0*scale) as i32),p.y.saturating_add((18.0*scale) as i32)));
+            let candidate=target(&app,&controller,&g,p,false).ok().flatten();status.target_label=candidate.as_ref().map(|t|t.0.clone());status.target_index=candidate.as_ref().map(|t|t.1);status.before_id=candidate.and_then(|t|t.2);controller.publish(&app,&status);
+            if let Some((x,y))=move_offset{source.set_position(tauri::PhysicalPosition::new(p.x.saturating_sub(x),p.y.saturating_sub(y))).map_err(|_|"Unable to move dragged window")?;}
+            if let Some(preview)=preview.as_ref(){let scale=preview.window.scale_factor().unwrap_or(1.0);preview.window.set_position(tauri::PhysicalPosition::new(p.x.saturating_sub((grab.x*scale) as i32),p.y.saturating_sub((grab.y*scale) as i32))).map_err(|_|"Detached window movement failed")?;
+                if g.preview_hydrated.load(Ordering::Acquire){let show=preview_should_show(true,status.target_label.as_deref(),&status.source_label);let visible=preview.window.is_visible().map_err(|_|"Detached window visibility unavailable")?;if show!=visible{if show{preview.window.show()}else{preview.window.hide()}.map_err(|_|"Detached window visibility failed")?;}}
+            }
             std::thread::sleep(Duration::from_millis(24));
         };
-        // No native listeners remain while creating/hydrating application windows.
-        drop(scoped_input);drop(preview);
-        let destination=target(&app,&controller,&g,release)?;
+        // Native mouse-up is the only point that activates transfer ownership.
+        drop(scoped_input);
+        if let Some((x,y))=move_offset{source.set_position(tauri::PhysicalPosition::new(release.x.saturating_sub(x),release.y.saturating_sub(y))).map_err(|_|"Unable to move dragged window")?;}
+        let destination=target(&app,&controller,&g,release,true)?;
+        if g.move_existing&&destination.is_none(){app.state::<crate::AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.abort(&status.source_label,&g.token)?;status.phase="moved".into();status.target_label=None;status.target_index=None;status.before_id=None;return Ok(());}
         if let Some((label,index,before))=destination.as_ref(){if label==&status.source_label{app.state::<crate::AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.abort(&status.source_label,&g.token)?;status.phase="reordered".into();status.target_label=Some(label.clone());status.target_index=Some(*index);status.before_id=before.clone();return Ok(());}}
         let transfer=crate::stage_drag_transfer(&app,&status.source_label,&g.token,destination,release.x,release.y,grab.x,grab.y)?;
+        if let Some(preview)=preview.as_mut(){preview.keep=transfer.target_kind=="new"&&transfer.target_label==preview.window.label();}
         status.phase="pending".into();status.target_label=Some(transfer.target_label);status.target_index=transfer.target_index;status.before_id=transfer.before_id;status.token=Some(transfer.token);Ok(())
     })();
-    if let Err(error)=result{let _=ready.try_send(Err(error.clone()));let _=app.state::<crate::AppState>().ownership.lock().map(|mut r|r.abort(&status.source_label,&g.token));status.phase="cancelled".into();status.target_label=None;status.target_index=None;status.before_id=None;status.reason=Some(error);}
+    if let Err(error)=result{let _=ready.try_send(Err(error.clone()));let _=crate::abort_native_transfer(&app,&status.source_label,&g.token);status.phase="cancelled".into();status.target_label=None;status.target_index=None;status.before_id=None;status.reason=Some(error);}
     controller.finish(&app,status);
 }
 pub fn place(w:&tauri::WebviewWindow,x:i32,y:i32,grab_x:f64,grab_y:f64)->Result<(),String>{
@@ -165,6 +194,12 @@ pub fn clamp_origin(value:f64,min:i32,max:i32,size:u32)->i32{(value.round() as i
 #[cfg(windows)]pub use native::place;
 
 #[cfg(test)]mod tests {use super::*;
+#[test]fn preview_visibility_waits_for_dom_and_only_yields_to_foreign_target(){assert!(!preview_should_show(false,None,"source"));assert!(!preview_should_show(false,Some("source"),"source"));assert!(preview_should_show(true,None,"source"));assert!(preview_should_show(true,Some("source"),"source"));assert!(!preview_should_show(true,Some("foreign"),"source"));}
+#[test]fn moving_app_preview_and_source_are_not_foreign_targets(){assert!(!eligible_target("preview","source",Some("preview"),false));assert!(!eligible_target("preview","source",Some("preview"),true));assert!(!eligible_target("source","source",Some("preview"),false));assert!(eligible_target("source","source",Some("preview"),true));assert!(eligible_target("target","source",Some("preview"),false));}
+#[test]fn physical_grip_uses_client_scale_and_frame_not_desktop_origin(){let v=Viewport{width:1000.,height:800.};assert_eq!(physical_anchor(Point{x:100.,y:20.},&v,(1500,1200),(8,8)).unwrap(),(158,38));assert_eq!(physical_anchor(Point{x:100.,y:20.},&v,(2000,1600),(0,0)).unwrap(),(200,40));}
+#[test]fn physical_grip_rejects_invalid_viewports_and_forged_points(){let v=Viewport{width:800.,height:600.};for point in [Point{x:f64::NAN,y:0.},Point{x:-1.,y:0.},Point{x:801.,y:0.},Point{x:0.,y:601.}]{assert!(physical_anchor(point,&v,(800,600),(0,0)).is_err());}assert!(physical_anchor(Point{x:1.,y:1.},&v,(0,600),(0,0)).is_err());}
+#[test]fn blank_title_strip_appends_but_add_settings_and_content_are_excluded(){let items=vec![Item{workspace_id:"a".into(),rect:Rect{x:6.,y:5.,width:180.,height:35.}}];let g=Geometry{rect:Rect{x:6.,y:0.,width:180.,height:40.},append_rect:Some(Rect{x:224.,y:0.,width:576.,height:40.}),items,viewport:Viewport{width:1000.,height:800.}};assert!(strip_contains(&g,790.,20.));assert_eq!(insertion(&g.items,"external",790.),(1,None));assert!(!strip_contains(&g,203.,20.));assert!(!strip_contains(&g,800.,20.));assert!(!strip_contains(&g,700.,41.));}
+
 #[test]fn clamping_preserves_negative_monitor_coordinates(){assert_eq!(clamp_origin(-1500.0,-1920,0,1180),-1500);assert_eq!(clamp_origin(-10.0,-1920,0,1180),-1180);assert_eq!(clamp_origin(1.0,-800,0,1180),-800);}
 #[test]fn insertion_uses_midpoints_and_excludes_moving_tab(){let items=vec![Item{workspace_id:"a".into(),rect:Rect{x:10.,y:0.,width:100.,height:40.}},Item{workspace_id:"b".into(),rect:Rect{x:110.,y:0.,width:100.,height:40.}},Item{workspace_id:"c".into(),rect:Rect{x:210.,y:0.,width:100.,height:40.}}];assert_eq!(insertion(&items,"b",155.),(1,Some("c".into())));assert_eq!(insertion(&items,"z",159.),(1,Some("b".into())));assert_eq!(insertion(&items,"z",500.),(3,None));}
 #[test]fn geometry_rejects_nan_and_offscreen_rectangles(){let v=Viewport{width:800.,height:600.};assert!(!valid_rect(Rect{x:f64::NAN,y:0.,width:10.,height:10.},&v));assert!(!valid_rect(Rect{x:790.,y:0.,width:100.,height:40.},&v));}

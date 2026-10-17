@@ -32,3 +32,8 @@
   .tabs.tab-reordering .tab { transition: none; }
 }
 .tab-drop-indicator{position:fixed;width:3px;border-radius:2px;background:var(--accent,#3b8c65);box-shadow:0 0 0 1px #fff8;pointer-events:none;z-index:10000}
+.tab-merge-hint{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0;pointer-events:none}
+.tab-merge-status{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap;border:0}
+
+.tab.tab-detached-source{border:1px dashed var(--border-main,#a2b8d3);background:var(--surface-hover,#cad8eb);box-shadow:none}
+.tab.tab-detached-source > *{visibility:hidden}

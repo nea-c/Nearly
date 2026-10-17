@@ -192,15 +192,15 @@ test("workspace close and stopped job replacement preserve retained entries and 
   assert.equal(store.retainedSyncs.length, 1);
 });
 
-test("retained profile references block deletion until explicit removal", () => {
+test("retained historical profile snapshots survive saved connection deletion", () => {
   const store = new Store({ profiles: [profile()] });
   store.upsertRetainedSync(record());
   store.saveProfile({ ...profile(), host: "changed.invalid" });
-  assert.throws(() => store.deleteConnectionNode("generated"));
-  assert.equal(store.profiles.length, 1);
-  store.removeRetainedSync("retained-1");
+  const retained = JSON.stringify(store.retainedSyncs);
   store.deleteConnectionNode("generated");
   assert.equal(store.profiles.length, 0);
+  assert.equal(JSON.stringify(store.retainedSyncs), retained);
+  assert.equal(new Store(store.serialize()).retainedSyncs.length, 1);
 });
 
 test("retained profile snapshots preserve exact authentication strings and Unicode bounds match native", async () => {

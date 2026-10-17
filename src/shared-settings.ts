@@ -12,4 +12,5 @@ export function applyPersistentSettings(store: Store, data: Partial<Settings>): 
   store.bookmarkTreeWarning = validated.bookmarkTreeWarning;
   store.preferenceWarnings = [...validated.preferenceWarnings];
   store.browsePreferencesRevision++;
+  store.lastSelectedProfileRevision++;
 }

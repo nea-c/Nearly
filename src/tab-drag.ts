@@ -25,12 +25,24 @@ export function bindTabDrag(tabs: HTMLElement, options: TabDragOptions) {
     current.point = point;
     current.observedScroll = tabs.scrollLeft;
     const viewport = tabs.getBoundingClientRect();
+    if (current.original.length === 1 && options.externalStart) {
+      const workspaceId = id(source)!;
+      const grab = {x:current.grab,y:current.grabY};
+      const title = source.querySelector<HTMLElement>("[data-tab]")?.textContent?.trim() || "Nearly";
+      // The pointer controller has crossed its click threshold. Hand this to
+      // native tracking immediately: a lone tab moves its existing window.
+      cancelPointerReorder();
+      options.externalStart(workspaceId,grab,title);
+      return;
+    }
     if (point.x < viewport.left || point.x > viewport.right ||
         point.y < viewport.top || point.y > viewport.bottom) {
       if (options.externalStart) {
-        const outside = Math.max(viewport.left - point.x, point.x - viewport.right,
-          viewport.top - point.y, point.y - viewport.bottom);
-        if (outside < 42) return;
+        const outsideX = Math.max(viewport.left - point.x, point.x - viewport.right);
+        const outsideY = Math.max(viewport.top - point.y, point.y - viewport.bottom);
+        // Cross a short strip threshold during pointermove; allow more horizontal
+        // overtravel while placing a tab at either end of a crowded strip.
+        if (outsideX < 16 && outsideY < 8) return;
         const workspaceId = id(source)!;
         const grab = {x: current.grab, y: current.grabY};
         const title = source.querySelector<HTMLElement>("[data-tab]")?.textContent?.trim() || "Nearly";
@@ -66,7 +78,7 @@ export function bindTabDrag(tabs: HTMLElement, options: TabDragOptions) {
         if (shift && !reduceMotion()) {
           current.animations.set(node, node.animate([
             { transform: `translateX(${shift}px)` }, { transform: "translateX(0)" },
-          ], { duration: 160, easing: "cubic-bezier(.2,.8,.2,1)" }));
+          ], { duration: 120, easing: "cubic-bezier(.2,.8,.2,1)" }));
         }
       });
     }
@@ -150,7 +162,7 @@ export function bindTabDrag(tabs: HTMLElement, options: TabDragOptions) {
       if (!reduceMotion()) source.animate([
         { transform: `translate(${destination.left - bounds.left}px, ${destination.top - bounds.top}px)` },
         { transform: "translate(0, 0)" },
-      ], { duration: 140, easing: "cubic-bezier(.2,.8,.2,1)" });
+      ], { duration: 120, easing: "cubic-bezier(.2,.8,.2,1)" });
       if (destination.ids.some((value, index) => value !== oldOrder[index])) options.reorder!(destination.ids);
     },
     cancel: restore,

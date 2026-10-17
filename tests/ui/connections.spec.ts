@@ -10,8 +10,12 @@ async function browse(page, side, path) {
   await page.locator(`[data-path=${side}] input`).press("Enter");
 }
 async function start(page, local?) {
+  if (local) {
+    await browse(page, "local", local);
+    await expect(page.locator("#local-path")).toHaveValue(local);
+  }
   await page.locator("#prepare").click();
-  if (local) await page.locator("#start-form [name=local]").fill(local);
+  await expect(page.locator("#start-form [name=local]")).toHaveAttribute("type", "hidden");
   await page.locator("#start-form .primary").click();
 }
 async function addProfile(page, name, host) {
@@ -39,9 +43,11 @@ test("idle connection has no cancel and profile editing returns to connection", 
   await editSelectedProfile(page);
   await page.getByLabel("名前", { exact: true }).fill("Edited site");
   await page.locator("#profile-form .primary").click();
-  await expect(page.locator("[data-connection-node][aria-selected=true] [data-connection-select]")).toContainText(
-    "Edited site",
-  );
+  await expect(
+    page.locator(
+      "[data-connection-node][aria-selected=true] [data-connection-select]",
+    ),
+  ).toContainText("Edited site");
   await connect(page);
   await expect(page.locator("[data-tab][aria-selected=true]")).toContainText(
     "Edited site",
@@ -50,61 +56,66 @@ test("idle connection has no cancel and profile editing returns to connection", 
     page.locator("#connection-tree, #profile-select, #edit-profile"),
   ).toHaveCount(0);
 });
-test("connected profiles stay fixed and stopped context returns only through its owning tab", async ({
+test("connected profiles stay fixed and closed stopped context cannot reopen from history", async ({
   page,
 }) => {
   await addProfile(page, "My site", "example.invalid");
   await connect(page);
-  const ownerId=await page.locator('[role=tab][aria-selected=true]').getAttribute('data-tab');
+  const ownerId = await page
+    .locator("[role=tab][aria-selected=true]")
+    .getAttribute("data-tab");
   await browse(page, "remote", "/one");
   await start(page, "C:\\custom");
   await browse(page, "remote", "/other");
-  await expect(page.locator("#prepare")).toHaveAttribute(
-    "title",
-    /同期先: \/one/,
-  );
+  await expect(page.locator("#prepare")).toHaveAttribute("title", /\/one/);
   await page.locator("[data-close]").click();
-  await expect(page.locator(".notice")).toContainText("停止完了後");
+  await expect(page.locator("#window-close-notice")).toBeVisible();
   await page.locator("#prepare").click();
-  await expect(page.locator("#prepare")).toHaveText("同期");
+  await expect(page.locator("#retained-resume")).toBeVisible();
+  await browse(page, "local", "C:\\browse-current");
   await expect(page.locator("[data-tab][aria-selected=true]")).toHaveAttribute(
     "title",
     /example.invalid/,
   );
   await page.locator("[data-close]").click();
-  await expect(page.locator("#connect-form")).toBeVisible();
-  await expect(page.locator('#tab-sync-context')).toHaveCount(0);
-  await expect(page.locator('#retained-resume')).toHaveCount(0);
-  const history=await page.evaluate(()=>JSON.parse(localStorage.getItem('syncfiles-v1')).history);
-  expect(Object.values(history)).toContain('C:\\custom');
-  await page.locator("[data-connection-select]").filter({ hasText: "My site" }).click();
+  await expect(page.locator("[data-tab]")).toHaveCount(0);
+  await expect(page.locator("#restore-tab")).toHaveCount(0);
+  const history = await page.evaluate(
+    () => JSON.parse(localStorage.getItem("syncfiles-v1")).history,
+  );
+  expect(Object.values(history)).toContain("C:\\custom");
+  await page.reload();
+  await page
+    .locator("[data-connection-select]")
+    .filter({ hasText: "My site" })
+    .click();
   await connect(page);
-  const freshLocal=await page.locator('#local-path').inputValue();
-  expect(freshLocal).not.toBe('C:\\custom');
-  await expect(page.locator('#tab-sync-context')).toHaveCount(0);
+  const freshLocal = await page.locator("#local-path").inputValue();
+  expect(freshLocal).not.toBe("C:\\custom");
+  await expect(page.locator("#retained-resume")).toHaveCount(0);
   await browse(page, "remote", "/one");
   await page.locator("#prepare").click();
   await expect(page.locator("#start-form [name=local]")).toHaveValue(
     freshLocal,
   );
+  await expect(page.locator("[data-sync-source]")).toHaveText(freshLocal);
+  await expect(page.locator("#local-path")).toHaveValue(freshLocal);
+  await expect(page.locator(".sync-roots")).toHaveCount(0);
   await page.locator("#cancel").click();
   await page.reload();
-  await expect(page.locator('#connect-form')).toBeVisible();
-  await expect(page.locator('#tab-sync-context')).toHaveCount(0);
-  expect(Object.values(await page.evaluate(()=>JSON.parse(localStorage.getItem('syncfiles-v1')).history))).toContain('C:\\custom');
-  await page.locator('#restore-tab').click();
-  await expect(page.locator('[role=tab][aria-selected=true]')).toHaveAttribute('data-tab',ownerId);
-  await expect(page.locator('#tab-sync-context')).toHaveAttribute('data-owner-tab',ownerId);
-  await expect(page.locator('#tab-sync-context')).toContainText('C:\\custom');
-  await expect(page.locator('#tab-sync-context')).toContainText('/one');
-  await expect(page.locator('#start-form')).toHaveCount(0);
+  await expect(page.locator("#connect-form")).toBeVisible();
+  await expect(
+    page.locator("#restore-tab,.stopped-context,#retained-resume"),
+  ).toHaveCount(0);
+  await expect(page.locator(`[data-tab="${ownerId}"]`)).toHaveCount(0);
+  await page
+    .locator("[data-connection-select]")
+    .filter({ hasText: "My site" })
+    .click();
   await connect(page);
-  await expect(page.locator('#local-path')).toHaveValue('C:\\custom');
-  await expect(page.locator('#remote-path')).toHaveValue('/one');
-  await page.locator("#retained-resume").click();
-  await expect(page.locator("#start-form [name=local]")).toHaveValue(
-    "C:\\custom",
-  );
+  await expect(page.locator("#local-path")).toHaveValue(freshLocal);
+  await expect(page.locator("#remote-path")).toHaveValue("/one");
+  await expect(page.locator("#retained-resume")).toHaveCount(0);
 });
 test("titlebar tabs separate connections, browsing positions and log drawers", async ({
   page,

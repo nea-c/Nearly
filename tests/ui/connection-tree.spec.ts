@@ -31,7 +31,9 @@ const select = (page, id) => page.locator(`[data-connection-select="${id}"]`).cl
 const data = page => page.evaluate(() => JSON.parse(localStorage.getItem("tree-settings")));
 async function manage(page, action, id = undefined) {
   const row = id === null ? page.locator('#connection-tree') : id ? page.locator(`[data-connection-node="${id}"]`) : page.locator('[data-connection-node][aria-selected="true"]');
-  if (await row.count()) await row.first().dispatchEvent('contextmenu',{clientX:100,clientY:150});
+  // Real pointer actionability waits for the post-save row to settle; a direct
+  // contextmenu dispatch can run before the deferred committed-tree render.
+  if (id !== null && await row.count()) await row.first().click({button:'right',position:{x:20,y:12}});
   else await page.locator('#connection-tree').dispatchEvent('contextmenu',{clientX:100,clientY:150});
   await page.locator(`[data-menu-action="${action}"]`).click();
 }
@@ -88,6 +90,7 @@ test("flat profiles migrate into nested editable groups, duplicate with fresh ID
   await page.locator("#connection-node-name").fill("Production");
   await page.locator("#connection-node-submit").click();
   await expect(page.locator("#connection-node-form")).toHaveCount(0);
+  await expect.poll(async () => (await data(page)).connectionTree.nodes.find(n=>n.id===outer).name).toBe("Production");
   await manage(page,"duplicate",outer);
   await expect.poll(async () => (await data(page)).profiles.length).toBe(3);
   const saved = await data(page);

@@ -33,7 +33,7 @@ export interface WindowTransferRecord {
   workspaceId: string;
   sourceLabel: string;
   targetLabel: string;
-  phase: "pending" | "committed" | "aborted";
+  phase: "dragging" | "pending" | "committed" | "aborted";
   payload: unknown;
   targetKind?: "new" | "existing";
   beforeId?: string | null;
@@ -43,7 +43,7 @@ export interface TabDragStatus {
   dragId: string;
   sourceLabel: string;
   workspaceId: string;
-  phase: "dragging" | "cancelled" | "pending" | "reordered" | "committed";
+  phase: "dragging" | "cancelled" | "pending" | "reordered" | "committed" | "moved";
   targetLabel: string | null;
   beforeId: string | null;
   targetIndex: number | null;
@@ -53,6 +53,7 @@ export interface TabDragStatus {
 export type TabStripRect = { x: number; y: number; width: number; height: number };
 export interface TabStripGeometry {
   rect: TabStripRect;
+  appendRect?: TabStripRect;
   items: {workspaceId: string; rect: TabStripRect}[];
   viewport: {width: number; height: number};
 }
@@ -65,7 +66,19 @@ export interface WindowRegistration {
   jobs: { id: string; workspaceId: string; job?: unknown }[];
   workspaces?: { id: string; connection?: Profile }[];
 }
+export interface StartupUpdateReport {state:string;latestVersion:string|null;canInstall:boolean;errorCode?:string|null}
+export interface UpdateRestartReport {phase:string;reason?:string;revision:number}
 interface Commands {
+  update_restart_status: { args: undefined; result: UpdateRestartReport };
+  ack_update_restart_ready: { args: undefined; result: void };
+  check_startup_update: { args: undefined; result: StartupUpdateReport };
+  startup_update_status: { args: undefined; result: StartupUpdateReport };
+  prepare_startup_update: { args: undefined; result: StartupUpdateReport };
+  cancel_startup_update: { args: undefined; result: StartupUpdateReport };
+  dismiss_startup_update: { args: undefined; result: StartupUpdateReport };
+  install_startup_update: { args: undefined; result: StartupUpdateReport };
+  ack_startup_update: { args: {token:string;ready:boolean}; result: void };
+  close_empty_window: { args: undefined; result: void };
   register_tab_strip: { args: {geometry: TabStripGeometry | null}; result: void };
   begin_tab_drag: { args: {workspaceId: string; payload: unknown; grab: {x: number; y: number}; title: string}; result: TabDragStatus };
   cancel_tab_drag: { args: {dragId: string | null}; result: TabDragStatus };
@@ -75,6 +88,7 @@ interface Commands {
   unregister_workspace: { args: { id: string }; result: void };
   begin_workspace_transfer: { args: { workspaceId: string; payload: unknown }; result: WindowTransferRecord };
   workspace_transfer_ready: { args: { token: string }; result: WindowTransferRecord };
+  workspace_drag_preview_ready: { args: { token: string }; result: WindowTransferRecord };
   workspace_transfer_status: { args: { token: string }; result: WindowTransferRecord };
   abort_workspace_transfer: { args: { token: string }; result: WindowTransferRecord };
   watch_local_directory: { args: { id: string; path: string; token: number }; result: {token:number;revision:number;error?:string} };

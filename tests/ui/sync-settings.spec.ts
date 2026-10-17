@@ -5,6 +5,16 @@ async function connected(page) {
   await expect(page.locator("#connect-form")).toHaveCount(0);
   await expect(page.locator("#prepare")).toBeEnabled();
 }
+async function currentPair(page, path, committed = path) {
+  await page.locator("#cancel").click();
+  await page.locator("#local-path").fill(path);
+  await page.locator("#local-path").press("Enter");
+  await expect(page.locator("#local-path")).toHaveValue(committed);
+  await page.locator("#prepare").click();
+  await expect(page.locator("#start-form [name=local]")).toHaveAttribute("type", "hidden");
+  await expect(page.locator("[data-sync-source]")).toHaveText(committed);
+  await page.locator("#exclusion-details summary").click();
+}
 test("splitter persists only on release, survives resize and keeps global theme", async ({
   page,
 }) => {
@@ -88,19 +98,24 @@ test("sync setting presets save, duplicate, rename and retain independent combo 
   await page.locator("#recursive-sync").uncheck();
   await page.locator("#delete-removed").check();
   await expect(page.locator("#delete-warning")).toBeVisible();
-  await expect(page.locator("#delete-warning")).toContainText("開始時に既存");
+  await expect(page.locator("#delete-warning")).toContainText("開始時の比較");
+  await expect(page.locator("#delete-warning")).toContainText("ローカルにないリモート");
   await page.locator("#preset-save").click();
   await expect(page.locator("#preset-result")).toContainText("保存しました");
   await page.locator("#sync-preset").selectOption(original);
   await expect(page.locator("#recursive-sync")).toBeChecked();
   await expect(page.locator("#delete-removed")).not.toBeChecked();
-  await page.locator("#start-form [name=local]").fill("C:\\one");
+  await currentPair(page, "C:\\one");
   await expect(page.locator("#exclusion-rules")).toHaveValue("");
   await page.locator("#sync-preset").selectOption(copy);
   await page.locator("#exclusion-rules").fill("custom-one/");
-  await page.locator("#start-form [name=local]").fill("C:\\two");
+  // Save the first pair by starting it before opening a different explorer pair.
+  await page.locator("#start-form .primary").click();
+  await page.locator("#prepare").click();
+  await page.locator("#prepare").click();
+  await currentPair(page, "C:\\two");
   await expect(page.locator("#exclusion-rules")).toHaveValue("");
-  await page.locator("#start-form [name=local]").fill("c:/one/");
+  await currentPair(page, "c:/one/", "c:\\one");
   await expect(page.locator("#exclusion-rules")).toHaveValue("custom-one/");
   await expect(page.locator("#recursive-sync")).not.toBeChecked();
   await page.locator("#start-form .primary").click();

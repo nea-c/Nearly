@@ -36,3 +36,5 @@ Use the same isolated QA identifier and generated fixture/settings, with two win
 9. After the original `main` window closes, repeat a physical detach/merge between surviving windows and invoke the EXE again. Verify all remaining windows and the secondary job continue, then stop all owned jobs and close all owned windows. Confirm the QA process, CDP listener and fixture connections exit without affecting any pre-existing Nearly process.
 
 Mark each item PASS/FAIL/UNVERIFIED with evidence. Do not report “native cross-window drag passed” from automated launch/backend evidence alone.
+
+R2追加確認: 複数タブをドラッグしたままタブ列を出て、実際のファイル閲覧画面を持つ別ウインドウがボタンを離す前に現れ、ポインターに追従することを確認する。結合先へ重ねた間だけ仮ウインドウが隠れ、受け入れ先にだけ挿入位置が出ること、元のウインドウには結合位置の線が出ないことを確認する。Escape・移動先を閉じる操作・初期化失敗では元の所有権と同期が残ることを確認する。1タブでは新しい窓が増えず、元の窓を動かすこと。異なるDPIの画面間で繰り返す。これは手動確認項目であり、自動テストで合格したとは扱わない。

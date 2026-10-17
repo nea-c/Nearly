@@ -3,24 +3,24 @@
 :root:is([data-theme="forest"], [data-theme="mint"]) { accent-color: var(--action-bg); }
 :root[data-theme="forest"] {
   color-scheme: dark;
-  --surface-base: #111e19;
-  --surface-panel: #192a23;
-  --surface-raised: #243a30;
-  --surface-input: #13231c;
-  --surface-hover: #2c493b;
-  --surface-selected: #305b46;
-  --surface-selected-hover: #38674e;
-  --surface-active: #315440;
-  --text-main: #e7f2eb;
-  --text-muted: #afc6b8;
-  --text-accent: #a5ddbc;
-  --border-main: #607e6c;
-  --border-soft: #3c5849;
-  --focus-ring: #8fdfb0;
-  --action-bg: #286444;
-  --action-hover: #2c704b;
+  --surface-base: #19231f;
+  --surface-panel: #23322c;
+  --surface-raised: #2e4038;
+  --surface-input: #1d2b25;
+  --surface-hover: #3a4d43;
+  --surface-selected: #375a48;
+  --surface-selected-hover: #416b54;
+  --surface-active: #385542;
+  --text-main: #e8efeb;
+  --text-muted: #becfc4;
+  --text-accent: #91c9b2;
+  --border-main: #6d8b78;
+  --border-soft: #496453;
+  --focus-ring: #8bcbb0;
+  --action-bg: #2b634a;
+  --action-hover: #347557;
   --action-text: #ffffff;
-  --action-border: #73b991;
+  --action-border: #638e79;
   --danger-text: #ffb8ae;
   --danger-bg: #903b34;
   --danger-hover: #a43f36;
@@ -29,16 +29,20 @@
   --warning-bg: #3a3220;
   --warning-text: #f3d6a0;
   --warning-border: #9c8254;
-  --success-text: #9bdbb5;
-  --disabled-text: #abc0b3;
-  --selection-marquee: #8fdfb025;
-  --overlay: #04110ba6;
+  --success-text: #91c9b2;
+  --disabled-text: #a2b3a9;
+  --selection-marquee: #8bcbb025;
+  --overlay: #070b09a6;
   --shadow-dialog: #00000088;
   --shadow-toast: #00000066;
   --theme-control-bg: var(--surface-input);
   --theme-control-fg: var(--text-main);
   --theme-control-border: var(--border-main);
   --theme-label: var(--text-muted);
+  --checkbox-on: #91c9b2;
+  --checkbox-on-hover: #b2deca;
+  --checkbox-mark: #10271c;
+  --checkbox-disabled-on: #779486;
   scrollbar-color: var(--border-main) var(--surface-base);
 }
 :root[data-theme="mint"] {
@@ -339,3 +343,72 @@
 :root:is([data-theme="forest"], [data-theme="mint"]) :is(.brandmark, .connection-node[data-drop] .connection-node-row::after) { color: var(--text-accent); }
 :root:is([data-theme="forest"], [data-theme="mint"]) .connection-details .passphrase-error { color: var(--danger-text); }
 :root:is([data-theme="forest"], [data-theme="mint"]) :is(button, input, select, textarea, summary, a):focus-visible { outline-color: var(--focus-ring); }
+
+/* Shared geometry is deliberately independent of palette and checkbox state.
+   The legacy forest settings ID now selects the Jade appearance. */
+:root input[type="checkbox"] {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  box-sizing: border-box;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  max-width: 14px;
+  max-height: 14px;
+  padding: 0;
+  border-width: 1px;
+  border-style: solid;
+  vertical-align: -2px;
+  border-radius: 3px;
+  border-color: var(--border-main,#7d8fa6);
+  background: var(--surface-input,#fff);
+  color: var(--checkbox-mark,#fff);
+  cursor: pointer;
+}
+/* Palette tokens provide the fill/tick colors without overriding geometry. */
+:root input[type="checkbox"]::before {
+  content: "";
+  width: 9px;
+  height: 8px;
+  background: currentColor;
+  clip-path: polygon(0 40%, 22% 65%, 83% 0, 100% 16%, 23% 100%, 0 64%);
+  transform: scale(0);
+}
+:root input[type="checkbox"]:checked {
+  background: var(--checkbox-on,var(--action-bg,#2468c9));
+  border-color: var(--checkbox-on,var(--action-bg,#2468c9));
+  color: var(--checkbox-mark,#fff);
+}
+:root input[type="checkbox"]:checked::before { transform: scale(1); }
+:root input[type="checkbox"]:hover:not(:disabled) {
+  background: var(--surface-hover,#edf3fb);
+  border-color: var(--focus-ring,#2468c9);
+}
+:root input[type="checkbox"]:checked:hover:not(:disabled) { background: var(--checkbox-on-hover,var(--action-hover,#1858b2)); }
+:root input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--focus-ring,#2468c9);
+  outline-offset: 3px;
+}
+:root input[type="checkbox"]:disabled {
+  background: var(--surface-raised,#e9edf3);
+  border-color: var(--border-soft,#c2ccd8);
+  opacity: 1;
+  cursor: default;
+}
+:root input[type="checkbox"]:disabled:checked {
+  background: var(--checkbox-disabled-on,var(--action-bg,#2468c9));
+  border-color: var(--checkbox-disabled-on,var(--action-bg,#2468c9));
+  color: var(--checkbox-mark,#fff);
+}
+@media (forced-colors: active) {
+  :root[data-theme] input[type="checkbox"] { forced-color-adjust: none; background: Canvas; border-color: ButtonText; color: CanvasText; }
+  :root[data-theme] input[type="checkbox"]:checked { background: Highlight; border-color: Highlight; color: HighlightText; }
+  :root[data-theme] input[type="checkbox"]:hover:not(:disabled) { background: Canvas; border-color: Highlight; }
+  :root[data-theme] input[type="checkbox"]:checked:hover:not(:disabled) { background: Highlight; }
+  :root[data-theme] input[type="checkbox"]:disabled { background: Canvas; border-color: GrayText; }
+  :root[data-theme] input[type="checkbox"]:disabled:checked { background: Canvas; border-color: GrayText; color: GrayText; }
+  :root[data-theme] input[type="checkbox"]:focus-visible { outline-color: Highlight; }
+}

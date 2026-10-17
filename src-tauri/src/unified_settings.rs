@@ -21,6 +21,8 @@ pub(crate) struct Document {
 #[serde(deny_unknown_fields)]
 struct Connections {
     profiles: Vec<sftp::Profile>,
+    #[serde(rename = "lastSelectedProfileId", default, skip_serializing_if = "Option::is_none")]
+    last_selected_profile_id: Option<String>,
     history: HashMap<String, String>,
     tree: connection_tree::Tree,
 }
@@ -174,6 +176,7 @@ impl Document {
         Self::parse(&bytes)
     }
     fn validate(&self) -> Result<(), String> {
+        if let Some(size)=self.appearance.window_size{size.validate()?;}
         self.trust.validate()?;
         let data = self.settings();
         validate_settings(&data)?;
@@ -197,6 +200,7 @@ impl Document {
             revision,
             connections: Connections {
                 profiles: data.profiles.clone(),
+                last_selected_profile_id: data.last_selected_profile_id.clone().filter(|id| data.profiles.iter().any(|p| &p.id == id)),
                 history: data.history.clone(),
                 tree: data
                     .connection_tree
@@ -210,6 +214,7 @@ impl Document {
                 local_pane_ratio: data.local_pane_ratio,
                 local_tree_ratio: data.local_tree_ratio,
                 remote_tree_ratio: data.remote_tree_ratio,
+                window_size: None,
             },
             explorer: Explorer {
                 folder_bookmarks: data.folder_bookmarks.clone(),
@@ -246,6 +251,7 @@ impl Document {
             version: 1,
             settings_revision: self.revision,
             profiles: self.connections.profiles.clone(),
+            last_selected_profile_id: self.connections.last_selected_profile_id.clone(),
             history: self.connections.history.clone(),
             theme: self.appearance.theme,
             language: self.appearance.language,
@@ -277,6 +283,7 @@ impl Document {
             ..Default::default()
         }
     }
+    pub(crate) fn window_size(&self)->Option<window_size::SavedSize>{self.appearance.window_size}
     fn write(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Settings serialization failed")?;
@@ -332,6 +339,50 @@ impl Drop for Staged {
 pub(crate) fn save(path: &Path, data: &Settings) -> Result<u64, String> {
     save_impl(path, data, None)
 }
+/// Native-only preference transaction. Caller holds AppState.settings so every
+/// update rereads the latest document and preserves all unrelated live settings.
+pub(crate) fn save_window_size(path:&Path,size:window_size::SavedSize)->Result<Option<u64>,String>{
+    size.validate()?;
+    let mut current=Document::read(path)?;
+    if current.appearance.window_size==Some(size){return Ok(None)}
+    current.revision=current.revision.checked_add(1).filter(|v|*v<=MAX_REVISION).ok_or("Settings revision exhausted")?;
+    current.appearance.window_size=Some(size);
+    current.write(path)?;Ok(Some(current.revision))
+}
+/// Ephemeral rollback data for one natively sealed window. Never persisted or
+/// inferred from profiles: only the window's captured workspace IDs may match.
+#[derive(Default)]
+pub(crate) struct RetainedCloseCleanup {
+    removed: Vec<(usize, RetainedSync)>,
+    pub(crate) revision: Option<u64>,
+}
+pub(crate) fn prune_owned_retained_syncs(path:&Path, owned:&[String])->Result<RetainedCloseCleanup,String>{
+    if owned.is_empty(){return Ok(RetainedCloseCleanup::default());}
+    let mut data=Document::read(path)?.settings();
+    let mut removed=Vec::new();
+    for (index,record) in data.retained_syncs.iter().enumerate(){
+        if record.owner_tab_id.as_ref().is_some_and(|id|owned.contains(id)){removed.push((index,record.clone()));}
+    }
+    if removed.is_empty(){return Ok(RetainedCloseCleanup::default());}
+    data.retained_syncs.retain(|record|!record.owner_tab_id.as_ref().is_some_and(|id|owned.contains(id)));
+    let revision=save(path,&data)?;
+    Ok(RetainedCloseCleanup{removed,revision:Some(revision)})
+}
+/// Roll back only removed records against the latest document. A concurrent
+/// foreign edit must never be overwritten by a pre-close full snapshot.
+pub(crate) fn restore_owned_retained_syncs(path:&Path, cleanup:&RetainedCloseCleanup)->Result<Option<u64>,String>{
+    if cleanup.removed.is_empty(){return Ok(None);}
+    let mut data=Document::read(path)?.settings();let mut changed=false;
+    for (index,record) in &cleanup.removed{
+        if let Some(existing)=data.retained_syncs.iter().find(|other|other.id==record.id||
+            (record.owner_tab_id.is_some()&&other.owner_tab_id==record.owner_tab_id)){
+            if serde_json::to_value(existing).map_err(|_|"Retained context unavailable")?==serde_json::to_value(record).map_err(|_|"Retained context unavailable")?{continue;}
+            return Err("Retained tab context changed concurrently; no newer record was overwritten".into());
+        }
+        data.retained_syncs.insert((*index).min(data.retained_syncs.len()),record.clone());changed=true;
+    }
+    if changed{save(path,&data).map(Some)}else{Ok(None)}
+}
 // Only called inside HostVerification::approve's one-use token callback.
 pub(crate) fn save_approved(
     path: &Path,
@@ -374,7 +425,9 @@ fn save_impl(
     if data.bookmark_tree.is_none() && current.revision != 0 {
         data.bookmark_tree = Some(current.explorer.bookmark_tree);
     }
-    Document::from_settings(&data, trust, revision)?.write(path)?;
+    let mut next=Document::from_settings(&data, trust, revision)?;
+    next.appearance.window_size=current.appearance.window_size;
+    next.write(path)?;
     Ok(revision)
 }
 pub(crate) fn guard_pin(path: &Path, profile: &sftp::Profile) -> Result<(), String> {
@@ -392,6 +445,64 @@ pub(crate) fn guard_pin(path: &Path, profile: &sftp::Profile) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_window_size_defaults_without_writing_and_regular_saves_preserve_latest_size(){
+        let f=Fixture::new();let p=f.path();let initial=save_reload(&p,&settings());let before=value(&p);
+        assert!(Document::read(&p).unwrap().window_size().is_none());assert!(before["appearance"].get("windowSize").is_none());
+        let old_bytes=std::fs::read(&p).unwrap();let _=Document::read(&p).unwrap();assert_eq!(std::fs::read(&p).unwrap(),old_bytes);
+        let size=window_size::SavedSize{width:1060.5,height:740.,maximized:true};
+        assert_eq!(save_window_size(&p,size).unwrap(),Some(initial.settings_revision+1));
+        let after=value(&p);for section in ["connections","explorer","browse","sync","trust"]{assert_eq!(after[section],before[section]);}
+        for field in ["theme","language","compactExplorer","localPaneRatio","localTreeRatio","remoteTreeRatio"]{assert_eq!(after["appearance"][field],before["appearance"][field]);}
+        assert_eq!(after["appearance"]["windowSize"],serde_json::json!({"width":1060.5,"height":740.,"maximized":true}));
+        assert!(save(&p,&initial).unwrap_err().contains("revision conflict"));
+        let mut current=Document::read(&p).unwrap().settings();current.theme=Theme::Mint;let final_settings=save_reload(&p,&current);
+        assert!(matches!(final_settings.theme,Theme::Mint));assert_eq!(Document::read(&p).unwrap().window_size(),Some(size));
+        assert!(serde_json::to_value(final_settings).unwrap().get("windowSize").is_none(),"Native preference is absent from renderer DTO");
+        let bytes=std::fs::read(&p).unwrap();assert_eq!(save_window_size(&p,size).unwrap(),None);assert_eq!(std::fs::read(&p).unwrap(),bytes);
+    }
+    #[test]
+    fn native_size_write_failure_and_invalid_preferences_leave_existing_settings_unchanged(){
+        let f=Fixture::new();let p=f.path();save_reload(&p,&settings());let bytes=std::fs::read(&p).unwrap();
+        for size in [window_size::SavedSize{width:0.,height:700.,maximized:false},window_size::SavedSize{width:900.,height:f64::NAN,maximized:false}] {
+            assert!(save_window_size(&p,size).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
+        }
+        std::fs::create_dir(p.with_extension("backup.json")).unwrap();
+        assert!(save_window_size(&p,window_size::SavedSize{width:900.,height:700.,maximized:false}).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
+    }
+    #[test]
+    fn native_size_transaction_preserves_ordinary_client_baselines_and_concurrent_edits(){
+        let f=Fixture::new();let p=f.path();let initial=save_reload(&p,&settings());
+        let mut clients=settings_clients::SettingsClients::default();let initial_value=serde_json::to_value(&initial).unwrap();clients.remember_loaded("main",initial_value.clone()).unwrap();
+        let size=window_size::SavedSize{width:1000.,height:700.,maximized:false};save_window_size(&p,size).unwrap();
+        let mut proposed=initial_value;proposed["language"]="en".into();
+        let latest=Document::read(&p).unwrap().settings();
+        let merged=clients.prepare_save("main",&proposed,&serde_json::to_value(&latest).unwrap()).unwrap();
+        let merged:Settings=serde_json::from_value(merged).unwrap();save(&p,&merged).unwrap();
+        let final_doc=Document::read(&p).unwrap();assert!(matches!(final_doc.settings().language,Language::En));assert_eq!(final_doc.window_size(),Some(size));
+    }
+    #[test]
+    fn delayed_size_worker_cannot_overwrite_newer_acknowledged_close_flush(){
+        let f=Fixture::new();let p=f.path();save_reload(&p,&settings());
+        let state=Arc::new(AppState::default());state.ownership.lock().unwrap().bootstrap("main").unwrap();
+        {let mut session=state.window_size.lock().unwrap();session.activate();session.observe("main",900.,700.,false,false,false);}
+        let settings_lock=state.settings.lock().unwrap();
+        let worker_state=state.clone();let worker_path=p.clone();
+        let (waiting_tx,waiting_rx)=std::sync::mpsc::channel();
+        let worker=std::thread::spawn(move||persist_window_size_transaction(&worker_state,&worker_path,false,||{
+            waiting_tx.send(()).unwrap();
+            worker_state.settings.lock().map_err(|_|"Settings lock failed".into())
+        }));
+        // The worker has reached the actual lock acquisition and is blocked by
+        // our guard. Complete a newer close flush first, without timing sleeps.
+        waiting_rx.recv().unwrap();
+        {let mut session=state.window_size.lock().unwrap();session.observe("main",1100.,800.,false,false,false);}
+        let revision=persist_window_size_transaction(&state,&p,false,||Ok(settings_lock)).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(),None,"The late worker must reread the now-clean session");
+        let final_doc=Document::read(&p).unwrap();assert_eq!(Some(final_doc.revision),revision);
+        assert_eq!(final_doc.window_size(),Some(window_size::SavedSize{width:1100.,height:800.,maximized:false}));
+        assert!(!state.window_size.lock().unwrap().is_dirty());
+    }
     #[test]
     fn retained_syncs_default_to_empty_in_settings_dto() {
         assert_eq!(serde_json::to_value(Settings::default()).unwrap()["retainedSyncs"], serde_json::json!([]));
@@ -453,6 +564,53 @@ mod tests {
         assert_eq!(saved.retained_syncs[1].owner_tab_id.as_deref(),Some("stable-tab"));assert_eq!(saved.retained_syncs[1].owner_tab_closed,Some(false));
         let mut closed=saved.clone();closed.retained_syncs[1].owner_tab_closed=Some(true);let closed=save_reload(&p,&closed);
         assert_eq!(closed.retained_syncs[1].owner_tab_closed,Some(true));assert!(save(&p,&saved).unwrap_err().contains("revision conflict"));
+    }
+    fn owned_retained(id:&str,owner:&str)->RetainedSync{let mut record=retained();record.id=id.into();record.owner_tab_id=Some(owner.into());record.owner_tab_closed=Some(false);record}
+    #[test]
+    fn closing_window_prunes_only_its_owned_records_and_preserves_other_sections(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.profiles=vec![profile()];
+        data.retained_syncs=vec![retained(),owned_retained("own-a","tab-a"),owned_retained("foreign","tab-b"),owned_retained("own-c","tab-c")];
+        let saved=save_reload(&p,&data);let before=value(&p);
+        let cleanup=prune_owned_retained_syncs(&p,&["tab-a".into(),"tab-c".into()]).unwrap();let after=value(&p);
+        assert_eq!(cleanup.revision,Some(saved.settings_revision+1));assert_eq!(after["sync"]["retainedSyncs"],serde_json::json!([before["sync"]["retainedSyncs"][0],before["sync"]["retainedSyncs"][2]]));
+        for section in ["connections","appearance","explorer","browse","trust"]{assert_eq!(before[section],after[section]);}
+        for key in ["exclusions","syncOptions","syncPresets"]{assert_eq!(before["sync"][key],after["sync"][key]);}
+    }
+    #[test]
+    fn closing_window_cleanup_noop_never_creates_files_or_advances_revision(){
+        let f=Fixture::new();let p=f.path();
+        assert!(prune_owned_retained_syncs(&p,&[]).unwrap().revision.is_none());
+        assert!(prune_owned_retained_syncs(&p,&["absent".into()]).unwrap().revision.is_none());assert!(!p.exists());assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),0);
+        let mut data=settings();data.retained_syncs=vec![retained(),owned_retained("foreign","other-tab")];save_reload(&p,&data);let bytes=std::fs::read(&p).unwrap();
+        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap().revision.is_none());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),1);
+    }
+    #[test]
+    fn closing_window_cleanup_write_failure_preserves_primary(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![owned_retained("own","own-tab")];save_reload(&p,&data);let bytes=std::fs::read(&p).unwrap();std::fs::create_dir(p.with_extension("backup.json")).unwrap();
+        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),2);
+    }
+    #[test]
+    fn closing_window_rollback_preserves_concurrent_foreign_updates_and_exact_own_context(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![retained(),owned_retained("own","own-tab"),owned_retained("foreign","other-tab")];save_reload(&p,&data);let before=value(&p);
+        let cleanup=prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap();let mut foreign=Document::read(&p).unwrap().settings();foreign.theme=Theme::Mint;foreign.retained_syncs[1].exclusion_rules="changed-by-other-window/".into();foreign.retained_syncs.push(owned_retained("new-foreign","new-other-tab"));save_reload(&p,&foreign);let concurrent=value(&p);
+        assert!(restore_owned_retained_syncs(&p,&cleanup).unwrap().is_some());let after=value(&p);
+        assert_eq!(after["appearance"],concurrent["appearance"]);assert_eq!(after["sync"]["retainedSyncs"][1],before["sync"]["retainedSyncs"][1]);assert_eq!(after["sync"]["retainedSyncs"][2],concurrent["sync"]["retainedSyncs"][1]);assert_eq!(after["sync"]["retainedSyncs"][3],concurrent["sync"]["retainedSyncs"][2]);
+        let bytes=std::fs::read(&p).unwrap();assert!(restore_owned_retained_syncs(&p,&cleanup).unwrap().is_none());assert_eq!(std::fs::read(&p).unwrap(),bytes);
+    }
+    #[test]
+    fn closing_window_rollback_conflict_preserves_newer_record(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![owned_retained("own","own-tab")];save_reload(&p,&data);let cleanup=prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap();
+        let mut current=Document::read(&p).unwrap().settings();let mut changed=owned_retained("own","own-tab");changed.remote="/newer".into();current.retained_syncs.push(changed);save_reload(&p,&current);let bytes=std::fs::read(&p).unwrap();assert!(restore_owned_retained_syncs(&p,&cleanup).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
+    }
+    #[test]
+    fn closing_window_cleanup_stale_foreign_snapshot_does_not_resurrect_removed_records(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![owned_retained("own","own-tab"),owned_retained("foreign","other-tab")];let base=save_reload(&p,&data);let mut clients=settings_clients::SettingsClients::default();clients.remember_loaded("other",serde_json::to_value(&base).unwrap()).unwrap();
+        prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap();let current=Document::read(&p).unwrap().settings();let mut proposed=base.clone();proposed.theme=Theme::Forest;let merged=clients.prepare_save("other",&serde_json::to_value(proposed).unwrap(),&serde_json::to_value(current).unwrap()).unwrap();let merged:Settings=serde_json::from_value(merged).unwrap();let after=save_reload(&p,&merged);assert_eq!(after.retained_syncs.len(),1);assert_eq!(after.retained_syncs[0].owner_tab_id.as_deref(),Some("other-tab"));assert!(matches!(after.theme,Theme::Forest));
+    }
+    #[test]
+    fn closing_window_repeated_cycles_do_not_accumulate_owned_retained_capacity(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![retained(),owned_retained("foreign","other-tab")];save_reload(&p,&data);
+        for n in 0..120{let owner=format!("closing-tab-{n}");let mut current=Document::read(&p).unwrap().settings();current.retained_syncs.push(owned_retained(&format!("closing-context-{n}"),&owner));save_reload(&p,&current);prune_owned_retained_syncs(&p,&[owner]).unwrap();let after=Document::read(&p).unwrap().settings();assert_eq!(after.retained_syncs.len(),2);assert_eq!(after.retained_syncs[0].id,"retained-one");assert_eq!(after.retained_syncs[1].id,"foreign");}
     }
     #[test]
     fn retained_tab_ownership_rejects_partial_null_duplicate_invalid_and_excess_open_owners() {
@@ -542,6 +700,24 @@ mod tests {
         assert!(save(path, &settings()).is_err());
         assert!(guard_pin(path, &profile()).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn last_selected_profile_roundtrips_by_id_and_old_documents_remain_readable() {
+        let f=Fixture::new();let p=f.path();let mut data=settings();
+        let mut second=profile();second.id="second".into();second.name="Same name".into();
+        data.profiles=vec![profile(),second];data.last_selected_profile_id=Some("second".into());
+        let mut saved=save_reload(&p,&data);
+        assert_eq!(saved.last_selected_profile_id.as_deref(),Some("second"));
+        assert!(!saved.last_selected_profile_changed);
+        saved.profiles[1].name="Renamed".into();saved=save_reload(&p,&saved);
+        assert_eq!(saved.last_selected_profile_id.as_deref(),Some("second"));
+        let mut old=value(&p);old["connections"].as_object_mut().unwrap().remove("lastSelectedProfileId");
+        let parsed=Document::parse(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(parsed.settings().last_selected_profile_id.is_none());
+        saved.profiles.pop();
+        saved.connection_tree=Some(connection_tree::flat(&saved.profiles));
+        let deleted=save_reload(&p,&saved);
+        assert!(deleted.last_selected_profile_id.is_none());
     }
     #[test]
     fn sync_profile_defaults_roundtrip_and_revision_safety() {

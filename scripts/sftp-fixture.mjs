@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeReadDir, beforeRmdir} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir} = {}) {
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -130,6 +130,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
   let holdListings = false;
   const pendingListings = [];
   const requestCounts = Object.create(null);
+  const requestPaths = [];
   const fileSystemErrors = [];
   const server = new Server({ hostKeys: [host] }, (client) => {
     totalConnections++;
@@ -180,8 +181,11 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
         session.on("sftp", (accept) => {
           const stream = accept(),
             handles = new Map();
-          for (const operation of ["STAT", "LSTAT", "REALPATH", "OPENDIR", "READDIR", "OPEN", "READ", "WRITE", "FSTAT", "CLOSE", "MKDIR", "RENAME", "REMOVE", "RMDIR", "EXTENDED"])
-            stream.on(operation, () => { requestCounts[operation] = (requestCounts[operation] || 0) + 1; });
+          for (const operation of ["STAT", "LSTAT", "REALPATH", "OPENDIR", "READDIR", "OPEN", "READ", "WRITE", "FSTAT", "CLOSE", "MKDIR", "RENAME", "REMOVE", "RMDIR", "EXTENDED", "SETSTAT", "FSETSTAT"])
+            stream.on(operation, (id,p) => {
+              requestCounts[operation] = (requestCounts[operation] || 0) + 1;
+              if (typeof p === 'string' && requestPaths.length < 20000) requestPaths.push({operation,path:p});
+            });
           let next = firstHandle;
           const OK = 0,
             EOF = 1,
@@ -261,11 +265,12 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               stream.status(id, EOF);
               return;
             }
-            const names = entry.list.splice(0, 100).map((name) => ({
+            let names = entry.list.splice(0, 100).map((name) => ({
               filename: name,
               longname: name,
               attrs: attrs(fs.lstatSync(path.join(entry.p, name))),
             }));
+            if (mapReadDir) names = mapReadDir(entry.p, names);
             stream.name(id, names);
           });
           stream.on("OPEN", (id, p, flags) => {
@@ -358,8 +363,18 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             if (override !== undefined) {stream.status(id,override);return;}
             try { fs.rmdirSync(local(p)); status(id); } catch(e) { status(id,e); }
           });
-          stream.on("SETSTAT", (id) => status(id));
-          stream.on("FSETSTAT", (id) => status(id));
+          for (const op of ["SETSTAT", "FSETSTAT"]) stream.on(op, async (id, target, a) => {
+            try {
+              const entry = op === "FSETSTAT" ? handles.get(target.toString("hex")) : undefined;
+              const filename = entry?.p ?? local(target);
+              const override = beforeSetStat ? await beforeSetStat(op, filename, a) : undefined;
+              if (override !== undefined) { stream.status(id, override); return; }
+              if (!Number.isInteger(a.atime) || !Number.isInteger(a.mtime)) throw Error("paired timestamps required");
+              if (entry) fs.futimesSync(entry.fd, a.atime, a.mtime);
+              else fs.utimesSync(filename, a.atime, a.mtime);
+              status(id);
+            } catch (e) { status(id, e); }
+          });
           stream.on("EXTENDED", (id, request, data) => {
             if (request !== "posix-rename@openssh.com")
               return stream.status(id, 8);
@@ -423,6 +438,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     get requestCounts() {
       return { ...requestCounts };
     },
+    get requestPaths() { return requestPaths.map(entry=>({...entry})); },
     get connectionCount() {
       return connections.size;
     },
