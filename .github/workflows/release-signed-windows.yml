@@ -220,7 +220,6 @@ jobs:
       UNSIGNED_ARTIFACT_ID: ${{ needs.unsigned-build.outputs.artifact-id }}
       UNSIGNED_ARTIFACT_DIGEST: ${{ needs.unsigned-build.outputs.artifact-digest }}
       UNSIGNED_MANIFEST_SHA256: ${{ needs.unsigned-build.outputs.manifest-sha256 }}
-      NEARLY_UPDATER_EXTRACTOR: ${{ runner.temp }}/nearly-tools/7z.exe
     defaults:
       run:
         shell: pwsh
@@ -251,12 +250,14 @@ jobs:
         run: node control/.github/scripts/signed-release.mjs prepare-sign "$env:RUNNER_TEMP/nearly-unsigned" "$env:RUNNER_TEMP/nearly-tools"
       - name: Preflight exact embedded payload and pinned reader before secrets enter a step
         env:
+          NEARLY_UPDATER_EXTRACTOR: ${{ runner.temp }}/nearly-tools/7z.exe
           SIGNING_PLAN_SHA256: ${{ steps.plan.outputs.manifest-sha256 }}
         run: |
           & "$env:RUNNER_TEMP/nearly-tools/nearly-updater-signer.exe" preflight --installer "$env:RUNNER_TEMP/nearly-unsigned/Nearly_$env:RELEASE_TAG`_x64-setup.exe" --payload "$env:RUNNER_TEMP/nearly-unsigned/Nearly.exe" --manifest "$env:RUNNER_TEMP/nearly-signing-plan.json" --manifest-sha256 "$env:SIGNING_PLAN_SHA256" --source-commit "$env:RELEASE_COMMIT" --artifact-id "$env:UNSIGNED_ARTIFACT_ID"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign only the verified bytes in the protected step
         env:
+          NEARLY_UPDATER_EXTRACTOR: ${{ runner.temp }}/nearly-tools/7z.exe
           SIGNING_PLAN_SHA256: ${{ steps.plan.outputs.manifest-sha256 }}
           NEARLY_UPDATER_PRIVATE_KEY: ${{ secrets.NEARLY_UPDATER_PRIVATE_KEY }}
           NEARLY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.NEARLY_UPDATER_PRIVATE_KEY_PASSWORD }}

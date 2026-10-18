@@ -75,7 +75,10 @@ export async function auditSource(root, request, options={}) {
   const names = git(root, ['ls-files', '-z']).toString('utf8').split('\0').filter(Boolean);
   for (const name of names) assertSafeSourcePath(name);
   const identities = git(root, ['log', '--format=%ae%n%ce', request.commit]).toString('utf8').trim().split(/\r?\n/);
-  if (identities.some(e => !exact(/[a-zA-Z0-9+_.-]+@users\.noreply\.github\.com/, e))) fail('History uses a non-public commit email; review it before release');
+  // Ordinary protected PR merges use GitHub's public web-flow committer.
+  // Authors still require an account's public noreply identity; do not allow a
+  // general github.com domain exception or a private owner address.
+  if (identities.some((e,i) => !exact(/[a-zA-Z0-9+_.-]+@users\.noreply\.github\.com/, e) && !(i%2===1 && e==='noreply@github.com'))) fail('History uses a non-public commit email; review it before release');
   const objects = git(root, ['rev-list', '--objects', request.commit]).toString('utf8').trim().split('\n');
   if (objects.length > 100000) fail('History audit object budget exceeded');
   for (const line of objects) {const n = line.indexOf(' '); if (n >= 0 && line.slice(n + 1)) assertSafeSourcePath(line.slice(n + 1));}

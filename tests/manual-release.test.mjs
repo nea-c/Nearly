@@ -122,6 +122,21 @@ test('only exact reviewed public source-example blobs get narrow path exceptions
     assert.throws(()=>contracts.auditGitObjects(record(changed)),/privacy/i);
   }
 });
+
+test('normal GitHub merge committer is public while private or Github-style author identities still fail',async t=>{
+  for(const kind of ['github-committer','private-committer','github-author']){
+    const f=await fixture(t),git=(args,extra={})=>execFileSync('git',['-C',f.root,...args],{encoding:'utf8',stdio:['pipe','pipe','pipe'],...extra}).trim();
+    await fs.writeFile(path.join(f.root,'.gitignore'),'/build/\n/payload.exe\n');
+    git(['init','-b','main']);git(['config','user.name','Generated fixture']);git(['config','user.email','fixture@users.noreply.github.com']);
+    git(['add','.gitignore','version.json','src-tauri/src/update_package.rs','src-tauri/src/startup_update.rs']);
+    const env={...process.env,GIT_COMMITTER_EMAIL:kind==='private-committer'?'fixture@example.invalid':'noreply@github.com'};
+    if(kind==='github-author')env.GIT_AUTHOR_EMAIL='noreply@github.com';
+    git(['commit','-m','Generated commit identity fixture'],{env});
+    const r={...request(),commit:git(['rev-parse','HEAD'])};git(['update-ref','refs/remotes/origin/main',r.commit]);
+    if(kind==='github-committer')assert.match(await contracts.auditSource(f.root,r),/^[a-f0-9]{40}$/);
+    else await assert.rejects(()=>contracts.auditSource(f.root,r),/non-public commit email/);
+  }
+});
 test('GitHub adapter never retries failed writes and rejects foreign upload endpoints before sending credentials',async t=>{
   let calls=0;t.mock.method(globalThis,'fetch',async()=>{calls++;return new Response('unavailable',{status:503});});
   const api=publisher.githubApi('generated-ephemeral-token');
