@@ -177,3 +177,22 @@ test('Nearly bookmark drag click guard does not block a different bookmark',asyn
   await expect(page.locator('#remote-path')).toHaveValue('/two');
 });
 
+test('hierarchy save exposes fresh menu handlers when its dialog closes',async({page})=>{
+  const group=await create(page,'Acknowledged parent');
+  await context(page,group);await page.locator('[data-bookmark-action=create]').click();
+  await page.locator('#bookmark-folder-name').fill('Acknowledged child');
+  const observed=await page.evaluate(async group=>{
+    const dialog=document.querySelector('#bookmark-tree-dialog')!;
+    const closed=new Promise<void>(resolve=>{
+      const observer=new MutationObserver(()=>{if(!dialog.isConnected){observer.disconnect();resolve();}});
+      observer.observe(document.body,{childList:true,subtree:true});
+    });
+    (dialog.querySelector('form') as HTMLFormElement).requestSubmit();
+    await closed;
+    const child=JSON.parse(localStorage.getItem('bookmark-fixture')!).bookmarkTree.nodes.find((node:any)=>node.name==='Acknowledged child');
+    (document.querySelector(`[data-bookmark-group="${group}"]`) as HTMLButtonElement).click();
+    return {childId:child.id,menuChildren:[...document.querySelectorAll('[data-bookmark-folder-menu] [data-bookmark-tree-node]')].map((button:HTMLElement)=>button.dataset.bookmarkTreeNode)};
+  },group);
+  expect(observed.menuChildren).toContain(observed.childId);
+});
+

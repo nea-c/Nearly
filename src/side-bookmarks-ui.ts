@@ -231,7 +231,8 @@ export function bindSideBookmarks(
       else if(change.action==='move')candidate.moveSideBookmarkNode(side,change.id,change.parentId,change.beforeId,profile);
       else if(change.action==='ungroup')candidate.ungroupSideBookmarkFolder(side,change.id,profile);
       else candidate.removeSideBookmark(side,change.id,key);
-    });if(owned())render();},
+    });},
+    refresh:()=>{if(owned())render();},
     open:bookmark=>{if(owned())void navigate(side==='local'?bookmark.local:bookmark.remote).catch(report);},
     register:parentId=>show(undefined,false,bar,parentId),
     edit:(bookmark,opener)=>show(records().find(b=>b.id===bookmark.id),false,opener),

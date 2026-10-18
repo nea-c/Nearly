@@ -2561,6 +2561,9 @@ function render() {
     deferredPathRender = true;
     return;
   }
+  // This render supersedes any retry queued while a popup or gesture was active.
+  clearTimeout(interactionRenderTimer);
+  interactionRenderTimer = undefined;
   deferredPathRender = false;
   if (!store.workspaces.length) {
     const w = store.createWorkspace(selected, defaultLocalBrowse);

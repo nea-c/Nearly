@@ -260,6 +260,7 @@ export function bindBookmarks(
       register: (parentId) => show("save", undefined, undefined, parentId),
       history: () => show("history"),
       report,
+      refresh: () => { if(bar.isConnected&&owned())render(); },
       change: async (change) => {
         if (mutationPending)
           throw Error(t("前の保存が完了するまでお待ちください"));
@@ -284,7 +285,6 @@ export function bindBookmarks(
         } finally {
           mutationPending = false;
         }
-        if(bar.isConnected&&owned())render();
       },
     });
 }

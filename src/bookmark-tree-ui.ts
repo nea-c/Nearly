@@ -32,6 +32,7 @@ type Options = {
   owner: string;
   busy: () => boolean;
   change: (change: BookmarkChange) => Promise<void>;
+  refresh: () => void;
   open: (bookmark: FolderBookmark) => void;
   register: (parentId: string | null) => void;
   history: () => void;
@@ -174,6 +175,8 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
           : popup === startedPopup && popupOwner === options.owner
       )
         closeBookmarkTree();
+      // Publish fresh handlers only after removing this mutation's own popup.
+      options.refresh();
     } catch (error) {
       const message = view?.querySelector<HTMLElement>(".form-error");
       if (message)
