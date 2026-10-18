@@ -32,7 +32,21 @@ test('native evidence loss rejects startup and a stale Success cannot admit work
  }finally{await f.dispose();}
 });
 test('ordinary startup remains immediate and does not show probation',async()=>{
- const f=await fixture('idle');try{await f.api.initializeUpdateRestart('main',()=>true);assert.equal(f.ack,1);assert(!f.elements.has('update-probation'));}finally{await f.dispose();}
+ const f=await fixture('idle'),frames=[];globalThis.requestAnimationFrame=fn=>frames.push(fn);
+ try{let completed=false;const startup=f.api.initializeUpdateRestart('main',()=>true).then(()=>completed=true);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(completed,true,'ordinary startup must not wait for animation frames in a background window');
+ await startup;assert.equal(f.ack,1);assert.equal(frames.length,0);assert(!f.elements.has('update-probation'));
+ }finally{while(frames.length)frames.shift()();await f.dispose();}
+});
+
+test('actual probation still requires both rendered frames and authenticated native Success',async()=>{
+ const f=await fixture(),frames=[];globalThis.requestAnimationFrame=fn=>frames.push(fn);
+ try{let completed=false;const startup=f.api.initializeUpdateRestart('main',()=>true).then(()=>completed=true);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(f.ack,0);assert.equal(completed,false);assert.equal(frames.length,1);
+ frames.shift()();assert.equal(f.ack,0);assert.equal(frames.length,1);
+ frames.shift()();await new Promise(resolve=>setImmediate(resolve));assert.equal(f.ack,1);assert.equal(completed,false);
+ f.event('succeeded',2);await startup;assert.equal(completed,true);
+ }finally{while(frames.length)frames.shift()();await f.dispose();}
 });
 test('actual app orders rendered readiness before native workspace or connection admission',async()=>{
  const source=await readFile(process.env.HEALTH_APP_SOURCE??new URL('../src/app.ts',import.meta.url),'utf8');
