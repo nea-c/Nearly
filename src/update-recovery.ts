@@ -37,7 +37,9 @@ export async function initializeUpdateRestart(label:string|undefined,ready:()=>b
   if(disposed){stop?.();return;}
   // Subscribe first: the revision check protects a newer event from this read.
   accept(await invoke('update_restart_status'));
-  await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
+  // Background windows may suspend animation frames. Only actual update
+  // probation needs a painted readiness proof; ordinary startup must progress.
+  if(probation)await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
   if(!disposed&&ready())await invoke('ack_update_restart_ready');
  }catch{
   // This carries no renderer claims about signatures, paths, or installer exit.

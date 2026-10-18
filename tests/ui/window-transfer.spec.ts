@@ -308,6 +308,7 @@ const effects = (calls: Call[]) =>
 async function move(page: Page, id: string, _keyboard = false) {
   // The former context-menu milestone now enters the native protocol through
   // the same real DOM pointer gesture as the dedicated drag regression suite.
+  await tab(page,id).click({trial:true});
   const bounds = (await tab(page, id).boundingBox())!;
   const strip = (await page.locator(".tabs").boundingBox())!;
   const x = bounds.x + Math.min(30, bounds.width / 2),

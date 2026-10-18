@@ -270,6 +270,7 @@ const effects = (calls: Call[]) =>
     ),
   );
 async function box(p: Page, id: string) {
+  await tab(p,id).click({trial:true});
   return (await tab(p, id).boundingBox())!;
 }
 async function hold(p: Page, id = "owner-0") {

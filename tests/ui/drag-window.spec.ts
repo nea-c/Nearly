@@ -289,7 +289,15 @@ const effects = (calls: Call[]) =>
       c.cmd,
     ),
   );
+
+test('ordinary startup acknowledges readiness even when animation frames are suspended',async({context})=>{
+  await context.addInitScript(()=>{window.requestAnimationFrame=()=>0;});
+  const native=await registry(context),page=await native.open();
+  await expect.poll(()=>native.calls.filter(c=>c.cmd==='ack_update_restart_ready').length).toBe(1);
+  await expect(page.locator('[data-tab="owner-0"]')).toBeVisible();
+});
 async function box(p: Page, id: string) {
+  await tab(p,id).click({trial:true});
   return (await tab(p, id).boundingBox())!;
 }
 async function hold(p: Page, id = "owner-0") {
@@ -343,6 +351,7 @@ test("close button cannot arm dragging and the removed menu action is absent for
 }) => {
   const n = await registry(context),
     p = await n.open();
+  await p.locator('[data-close="owner-0"]').click({trial:true});
   const close = (await p.locator('[data-close="owner-0"]').boundingBox())!;
   await p.mouse.move(close.x + close.width / 2, close.y + close.height / 2);
   await p.mouse.down();
