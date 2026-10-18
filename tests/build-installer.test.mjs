@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {validateInstallerPolicy, requireCachedTools, publishInstaller} from '../scripts/build-installer.mjs';
+import {createPackage,verifyPackage} from '../.github/scripts/release-contract.mjs';
 
 const config = JSON.parse(await fs.readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url)));
 const pe = Buffer.alloc(80); pe.write('MZ'); pe.writeUInt32LE(64,60); pe.writeUInt32LE(0x4550,64);
@@ -41,7 +43,42 @@ test('publication backs previous pair up and leaves app/settings untouched',asyn
   assert.equal(result.signed,false);
   assert.equal(result.version,'1.0.0');
   assert.equal(result.displayVersion,'r1.0');
+  assert.equal(result.updaterProtocol,3);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dir,'build/installer-build-info.json'),'utf8')).updaterProtocol,3);
   assert.equal(path.basename(result.path),'Nearly_r1.0_x64-setup.exe');
+});
+test('publication rejects a conflicting protocol before writing any output',async()=>{
+  for(const updaterProtocol of [2,'3',null,0,4]){
+    const dir=await fixture();
+    await assert.rejects(publishInstaller(dir,path.join(dir,'artifact.exe'),{version:'1.0.0',updaterProtocol}),/updater protocol/);
+    assert.deepEqual((await fs.readdir(path.join(dir,'build'))).sort(),['Nearly.exe','settings.json']);
+  }
+});
+test('protocol3 manifest publication leaves retained r2 release bytes immutable',async()=>{
+  const dir=await fixture(),name='Nearly_r2.0_x64-setup.exe';
+  await fs.writeFile(path.join(dir,'build',name),'published r2 installer');
+  const result=await publishInstaller(dir,path.join(dir,'artifact.exe'),{version:'2.1.0',updaterProtocol:3});
+  assert.equal(result.updaterProtocol,3);
+  assert.equal(await fs.readFile(path.join(dir,'build',name),'utf8'),'published r2 installer');
+});
+test('protocol3 build metadata remains compatible with the disabled unsigned release controller',async()=>{
+  const dir=await fixture(),binary=Buffer.alloc(160);
+  binary.write('MZ');binary.writeUInt32LE(64,60);binary.writeUInt32LE(0x4550,64);binary.writeUInt16LE(0x14c,68);
+  await fs.writeFile(path.join(dir,'artifact.exe'),binary);
+  const payload=Buffer.from(binary);payload.writeUInt16LE(0x8664,68);
+  const payloadPath=path.join(dir,'payload.exe');await fs.writeFile(payloadPath,payload);
+  await fs.mkdir(path.join(dir,'src-tauri/src'),{recursive:true});
+  await fs.writeFile(path.join(dir,'version.json'),'{"version":"1.0.0"}');
+  await fs.writeFile(path.join(dir,'src-tauri/src/update_package.rs'),'fn production_key() -> Option<TrustedKey> { None }');
+  await fs.writeFile(path.join(dir,'src-tauri/src/startup_update.rs'),'const HANDOFF_RELEASE_VALIDATED: bool = false;');
+  const built=await publishInstaller(dir,path.join(dir,'artifact.exe'),{version:'1.0.0',identifier:'local.syncfiles.native',payloadArchitecture:'x64',installMode:'currentUser',settingsIncluded:false,adjacentSettingsPreserved:true,updaterInstallationEnabled:false,embeddedApplicationSha256:createHash('sha256').update(payload).digest('hex')});
+  assert.equal(built.updaterProtocol,3);assert.equal(built.signed,false);
+  const request={repository:'nea-c/Nearly',commit:'a'.repeat(40),tag:'r1.0',version:'1.0.0',mode:'validate',workflowCommit:'b'.repeat(40),runId:'123'};
+  const output=path.join(dir,'release-output');
+  const packaged=await createPackage(dir,output,request,{payloadPath,tree:'c'.repeat(40)});
+  const checked=await verifyPackage(output,request,{manifestHash:packaged.manifestHash});
+  assert.equal(checked.manifest.schemaVersion,1);
+  assert.deepEqual((await fs.readdir(output)).sort(),['Nearly_r1.0_x64-setup.exe','Nearly_r1.0_x64-setup.exe.sha256','manifest.json']);
 });
 test('failed manifest publication restores previous installer and manifest',async()=>{
   const dir=await fixture(), name='Nearly_r1.0_x64-setup.exe';

@@ -1,8 +1,8 @@
 //! Fixed-repository updater trust boundary. No renderer supplied paths or URLs.
 //! Minisign framing follows jedisct1/rust-minisign-verify; cryptography is provided
 //! by maintained ring Ed25519 and RustCrypto BLAKE2b, never local crypto code.
-//! Production deliberately has no trusted key. Independent review and an isolated
-//! signed-NSIS end-to-end test remain prerequisites for enabling distribution.
+//! Registered public trust is embedded for a reviewed bootstrap distribution.
+//! The separate installation gate remains false pending installed-NSIS qualification.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use blake2::{Blake2b512, Digest};
 use reqwest::Url;
@@ -13,10 +13,10 @@ pub const MAX_METADATA: usize = 131_072;
 pub const MAX_PACKAGE: usize = 256 * 1024 * 1024;
 const MAX_SIGNATURE: usize = 16_384;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackageError { SigningNotConfigured, InvalidMetadata, NoCompatibleAsset, Network, TooLarge, Cancelled, InvalidSignature, SignedVersion, SignedPayload, Architecture, Staging, UnsupportedPlatform }
+pub enum PackageError { SigningNotConfigured, InvalidMetadata, NoCompatibleAsset, Network, TooLarge, Cancelled, InvalidSignature, SignedVersion, SignedPayload, SignedProtocol, Architecture, Staging, UnsupportedPlatform }
 impl PackageError {
     pub fn code(self) -> &'static str { match self {
-        Self::SigningNotConfigured=>"signingNotConfigured", Self::InvalidMetadata=>"invalidMetadata", Self::NoCompatibleAsset=>"noCompatibleAsset", Self::Network=>"downloadFailed", Self::TooLarge=>"packageTooLarge", Self::Cancelled=>"cancelled", Self::InvalidSignature=>"invalidSignature", Self::SignedVersion=>"signedVersionMismatch", Self::SignedPayload=>"invalidSignedPayload", Self::Architecture=>"incompatibleArchitecture", Self::Staging=>"stagingFailed", Self::UnsupportedPlatform=>"unsupportedPlatform",
+        Self::SigningNotConfigured=>"signingNotConfigured", Self::InvalidMetadata=>"invalidMetadata", Self::NoCompatibleAsset=>"noCompatibleAsset", Self::Network=>"downloadFailed", Self::TooLarge=>"packageTooLarge", Self::Cancelled=>"cancelled", Self::InvalidSignature=>"invalidSignature", Self::SignedVersion=>"signedVersionMismatch", Self::SignedPayload=>"invalidSignedPayload", Self::SignedProtocol=>"signedProtocolMismatch", Self::Architecture=>"incompatibleArchitecture", Self::Staging=>"stagingFailed", Self::UnsupportedPlatform=>"unsupportedPlatform",
     }}
 }
 type Result<T> = std::result::Result<T, PackageError>;
@@ -54,14 +54,15 @@ impl ReleaseCandidate {
 }
 /// Only native embedded configuration can establish trust; no public key setter.
 pub struct TrustedKey { bytes: [u8;42] }
-pub fn production_key() -> Option<TrustedKey> { None }
+const PRODUCTION_KEY_BYTES:[u8;42]=[69,100,204,60,239,74,226,200,249,50,76,211,219,189,45,171,194,223,151,77,145,136,167,90,146,246,161,87,252,110,169,52,0,234,165,86,42,84,149,211,117,49];
+pub fn production_key() -> Option<TrustedKey> { Some(TrustedKey{bytes:PRODUCTION_KEY_BYTES}) }
 
 /// Constructed only after both minisign signatures and every binding verify.
 /// Journal deserialization must never manufacture this trusted type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PackageProof {
     target_version:String, public_label:String, arch:Architecture, asset_name:String,
-    installer_sha256:String, payload_sha256:String, signature:Vec<u8>,
+    installer_sha256:String, payload_sha256:String, updater_protocol:u8, signature:Vec<u8>,
 }
 impl PackageProof {
     pub(crate) fn target_version(&self)->&str {&self.target_version}
@@ -70,6 +71,7 @@ impl PackageProof {
     pub(crate) fn asset_name(&self)->&str {&self.asset_name}
     pub(crate) fn installer_sha256(&self)->&str {&self.installer_sha256}
     pub(crate) fn payload_sha256(&self)->&str {&self.payload_sha256}
+    pub(crate) fn updater_protocol(&self)->u8 {self.updater_protocol}
     pub(crate) fn signature(&self)->&[u8] {&self.signature}
 }
 fn sha256(bytes:&[u8])->String {
@@ -112,9 +114,13 @@ fn verify_proof(bytes:&[u8], signature:&[u8], key:&TrustedKey, candidate:&Releas
     if files.len()!=1 || files[0]!=expected {return Err(PackageError::Architecture)}
     let payloads:Vec<_>=comment.split('\t').filter_map(|s|s.strip_prefix("payload-sha256:")).collect();
     if payloads.len()!=1 || payloads[0].len()!=64 || !payloads[0].bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {return Err(PackageError::SignedPayload)}
+    // Capabilities come only from the globally authenticated trusted comment.
+    // Old installers and duplicate or noncanonical fields cannot reach handoff.
+    let protocols:Vec<_>=comment.split('\t').filter_map(|s|s.strip_prefix("updater-protocol:")).collect();
+    if protocols.len()!=1 || protocols[0]!="3" {return Err(PackageError::SignedProtocol)}
     verify_pe(bytes,candidate.arch)?;
     Ok(PackageProof {target_version:candidate.version(),public_label:candidate.display_version(),arch:candidate.arch,
-        asset_name:expected,installer_sha256:sha256(bytes),payload_sha256:payloads[0].into(),signature:signature.to_vec()})
+        asset_name:expected,installer_sha256:sha256(bytes),payload_sha256:payloads[0].into(),updater_protocol:3,signature:signature.to_vec()})
 }
 
 fn read_snapshot_bytes(file:&mut File)->Result<Vec<u8>> {
@@ -321,7 +327,7 @@ mod tests {
         let candidate=ReleaseCandidate {version:version.clone(),arch,
             asset:Url::parse(&format!("https://github.com/nea-c/Nearly/releases/download/{tag}/{name}")).unwrap(),
             signature:Url::parse(&format!("https://github.com/nea-c/Nearly/releases/download/{tag}/{name}.sig")).unwrap(),size:bytes.len()};
-        let comment=format!("version:{version}\tfile:{name}\tpayload-sha256:{payload_hash}");
+        let comment=format!("version:{version}\tfile:{name}\tpayload-sha256:{payload_hash}\tupdater-protocol:3");
         let (key,signature)=signed_document(&bytes,&comment,true);
         let stage=win::stage_in(parent,&bytes,signature,&candidate,&key,&AtomicBool::new(false)).unwrap();
         (stage,candidate,key)
@@ -360,7 +366,7 @@ mod tests {
     }
     fn fixture_payload()->&'static [u8] {b"Nearly generated application payload; not the installer"}
     fn signed_file(bytes:&[u8],comment:&str,prehashed:bool,file:&str)->(TrustedKey,Vec<u8>) {
-        signed_document(bytes,&format!("{comment}\tfile:{file}\tpayload-sha256:{}",sha256(fixture_payload())),prehashed)
+        signed_document(bytes,&format!("{comment}\tfile:{file}\tpayload-sha256:{}\tupdater-protocol:3",sha256(fixture_payload())),prehashed)
     }
     fn signed_document(bytes:&[u8],comment:&str,prehashed:bool)->(TrustedKey,Vec<u8>) {
         let rng=ring::rand::SystemRandom::new();let pkcs8=Ed25519KeyPair::generate_pkcs8(&rng).unwrap();let pair=Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
@@ -393,6 +399,30 @@ mod tests {
         }
     }
     #[test]
+    fn protocol_proof_requires_one_authenticated_exact_protocol3() {
+        let bytes=pe();
+        assert_eq!(PackageError::SignedProtocol.code(),"signedProtocolMismatch");
+        let base=format!("version:0.3.0\tfile:Nearly_r0.3_x64-setup.exe\tpayload-sha256:{}",sha256(fixture_payload()));
+        for fields in ["","\tupdater-protocol:","\tupdater-protocol:2","\tupdater-protocol:4","\tupdater-protocol:03","\tupdater-protocol:3 ","\tupdater-protocol:3\tupdater-protocol:3","\tupdater-protocol:2\tupdater-protocol:3"] {
+            let (key,signature)=signed_document(&bytes,&format!("{base}{fields}"),true);
+            assert_eq!(verify_proof(&bytes,&signature,&key,&candidate()),Err(PackageError::SignedProtocol));
+        }
+        for prehashed in [false,true] {
+            let (key,signature)=signed_document(&bytes,&format!("{base}\tupdater-protocol:3"),prehashed);
+            assert_eq!(verify_proof(&bytes,&signature,&key,&candidate()).unwrap().updater_protocol(),3);
+            let document=String::from_utf8(decode(std::str::from_utf8(&signature).unwrap()).unwrap()).unwrap();
+            for changed in [document.replace("updater-protocol:3","updater-protocol:2"),document.replace("\tupdater-protocol:3",""),document.replace("updater-protocol:3","updater-protocol:3\tupdater-protocol:3")] {
+                assert_eq!(verify_proof(&bytes,STANDARD.encode(changed).as_bytes(),&key,&candidate()),Err(PackageError::InvalidSignature));
+            }
+            // Neither an untrusted minisign comment nor unsigned release metadata
+            // can supply the authenticated package capability.
+            let (missing_key,missing_signature)=signed_document(&bytes,&base,prehashed);
+            let document=String::from_utf8(decode(std::str::from_utf8(&missing_signature).unwrap()).unwrap()).unwrap();
+            let untrusted=document.replace("untrusted comment: test only","untrusted comment: updater-protocol:3");
+            assert_eq!(verify_proof(&bytes,STANDARD.encode(untrusted).as_bytes(),&missing_key,&candidate()),Err(PackageError::SignedProtocol));
+        }
+    }
+    #[test]
     fn recovery_regains_proof_only_from_valid_canonical_signed_file() {
         let mut nonce=[0u8;8];getrandom::fill(&mut nonce).unwrap();
         let path=std::env::temp_dir().join(format!("Nearly-snapshot-proof-{:x}.bin",u64::from_le_bytes(nonce)));
@@ -401,7 +431,10 @@ mod tests {
         {
             let mut file=File::open(&path).unwrap();
             let proof=authenticate_snapshot(&mut file,&signature,"0.3.0",Architecture::X64,&key).unwrap();
+            assert_eq!(proof.updater_protocol(),3);
             assert_eq!(proof.payload_sha256(),sha256(fixture_payload()));assert_eq!(proof.installer_sha256(),sha256(&bytes));
+            let (legacy_key,legacy_signature)=signed_document(&bytes,&format!("version:0.3.0\tfile:Nearly_r0.3_x64-setup.exe\tpayload-sha256:{}",sha256(fixture_payload())),true);
+            assert_eq!(authenticate_snapshot(&mut file,&legacy_signature,"0.3.0",Architecture::X64,&legacy_key),Err(PackageError::SignedProtocol));
             for version in ["r0.3","0.3.1","0.3.0+build","0.3.0-beta","65536.0.0"] {assert_eq!(authenticate_snapshot(&mut file,&signature,version,Architecture::X64,&key),Err(PackageError::InvalidMetadata));}
             assert_eq!(authenticate_snapshot(&mut file,&signature,"0.4.0",Architecture::X64,&key),Err(PackageError::SignedVersion));
             assert_eq!(authenticate_snapshot(&mut file,&signature,"0.3.0",Architecture::Arm64,&key),Err(PackageError::Architecture));
@@ -438,8 +471,17 @@ mod tests {
         assert_eq!(verify(&bytes,&s,&k,&c),Err(PackageError::Architecture));
     }
     #[test]
+    fn registered_public_key_is_embedded_without_enabling_installation() {
+        let public=include_str!("../../.github/updater-public-key.pub");
+        let bytes=STANDARD.decode(public.lines().nth(1).unwrap()).unwrap();
+        assert!(production_key().is_some());
+        assert_eq!(production_key().unwrap().bytes.as_slice(),bytes.as_slice());
+        assert_eq!(sha256(public.as_bytes()),"2592845a518adb9df5b7773dd58672ea411b3038758bfaf2808a3cb13dcc8695");
+        assert!(!crate::startup_update::HANDOFF_RELEASE_VALIDATED);
+    }
+    #[test]
     fn validates_fixed_release_urls_sizes_duplicates_and_precedence() {
-        let c=candidate();assert_eq!(c.version(),"0.3.0");assert!(production_key().is_none());
+        let c=candidate();assert_eq!(c.version(),"0.3.0");assert!(production_key().is_some());
         for current in ["0.3.0","0.4.0","0.3.0+build"]{assert!(ReleaseCandidate::from_github_metadata(&serde_json::to_vec(&metadata()).unwrap(),current,Architecture::X64).unwrap().is_none())}
         for value in ["https://evil.invalid/x","https://github.com/other/Nearly/releases/download/r0.3/Nearly_r0.3_x64-setup.exe","http://github.com/nea-c/Nearly/releases/download/r0.3/Nearly_r0.3_x64-setup.exe","https://github.com/nea-c/Nearly/releases/download/r0.3/Nearly_r0.3_x64-setup.exe?x=1"]{let mut m=metadata();m["assets"][0]["browser_download_url"]=value.into();assert!(ReleaseCandidate::from_github_metadata(&serde_json::to_vec(&m).unwrap(),"0.2.0",Architecture::X64).is_err())}
         let mut m=metadata();m["assets"][0]["size"]=((MAX_PACKAGE+1) as u64).into();assert!(matches!(ReleaseCandidate::from_github_metadata(&serde_json::to_vec(&m).unwrap(),"0.2.0",Architecture::X64),Err(PackageError::TooLarge)));

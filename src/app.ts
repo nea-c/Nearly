@@ -4136,6 +4136,7 @@ try {
     if(incomingTransfer?.phase === "pending")await finishIncomingTransfer(incomingTransfer);
     else if(incomingTransfer?.phase !== "dragging" && incomingTransfer?.phase !== "committed")throw Error("Workspace transfer did not commit");
   } else {
+    await initializeUpdateRestart(windowRegistration?.label,()=>settingsAvailable&&!startupFailed&&!previewBootstrap&&!incomingTransfer);
     await Promise.all(store.workspaces.map(w => registerWorkspace(w.id)));
     initialized = true;
     openConnection(workspace());

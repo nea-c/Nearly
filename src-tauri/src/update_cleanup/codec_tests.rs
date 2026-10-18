@@ -49,6 +49,20 @@ fn valid_metadata_roundtrips_without_any_authorization_flags() {
     assert!(!json.contains("\"healthy\":"));
 }
 #[test]
+fn abandoned_receipt_is_terminal_metadata_with_no_cleanup_retry_authority() {
+    let mut value = serde_json::to_value(receipt()).unwrap();
+    value["state"] = serde_json::json!("Abandoned");
+    value["sequence"] = serde_json::json!(1);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let decoded = decode(&bytes).expect("a proved never-launched attempt can be abandoned durably");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&encode(&decoded).unwrap()).unwrap(), value);
+    for (field, invalid) in [("sequence", 0), ("attempts", 1)] {
+        let mut bad = value.clone();
+        bad[field] = serde_json::json!(invalid);
+        assert!(decode(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+}
+#[test]
 fn nonce_version_public_asset_and_installer_name_must_match_exactly() {
     let mut b = binding();
     b.installer.basename = "Nearly_r1.0_x64-setup.exe".into();

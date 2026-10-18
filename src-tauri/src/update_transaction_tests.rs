@@ -471,7 +471,10 @@ fn authenticated_signature_never_substitutes_for_the_running_image(){
 #[test]
 fn fresh_signed_update_does_not_replace_an_active_or_uncertain_journal(){
  let fixture=Fixture::new();let context=fixture.context();let(mut stage,candidate,key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());let snapshot=stage.transaction_snapshot(&candidate,&key).unwrap();let transaction=prepare_transaction(&context,&snapshot).unwrap();let before=transaction.store.recovery_hint().unwrap().unwrap();
- let(mut next_stage,next_candidate,next_key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());let next=next_stage.transaction_snapshot(&next_candidate,&next_key).unwrap();assert!(prepare_transaction(&context,&next).is_err());assert_eq!(transaction.store.recovery_hint().unwrap().unwrap(),before);assert!(fixture.root.join(&before.old_image.basename).exists());fixture.sentinels_unchanged();
+ let backups=||fs::read_dir(&fixture.root).unwrap().flatten().filter(|e|e.file_name().to_string_lossy().ends_with("-previous.exe")).count();
+ assert_eq!(backups(),1);
+ let(mut next_stage,next_candidate,next_key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());let next=next_stage.transaction_snapshot(&next_candidate,&next_key).unwrap();assert!(prepare_transaction(&context,&next).is_err());assert_eq!(transaction.store.recovery_hint().unwrap().unwrap(),before);assert!(fixture.root.join(&before.old_image.basename).exists());
+ assert_eq!(backups(),1,"reject an incomplete journal before creating another backup");fixture.sentinels_unchanged();
 }
 
 #[test]
@@ -479,4 +482,58 @@ fn exact_native_restart_claim_is_idempotent_and_detects_a_prior_crashed_process(
  let fixture=Fixture::new();let context=fixture.context();let record=fixture.record(&context);let mut authority=IndependentFixtureEvidence{binding:record.receipt.binding.clone(),healthy:true};let mut store=windows_impl::fixture_store(&context,record.clone()).unwrap();let mut life=engine::Lifecycle::prepare(record.receipt.binding.clone(),&mut authority,&mut store).unwrap();life.advance(codec::State::HandoffCommitted,&mut authority,&mut store).unwrap();
  let claimed=store.claim_current_restart(life.receipt()).unwrap();assert_eq!(claimed.restart_process.as_ref().unwrap().pid,std::process::id());assert!(claimed.restart_process.as_ref().unwrap().created>0);let again=store.claim_current_restart(&claimed.receipt).unwrap();assert_eq!(again,claimed);drop(store);
  let foreign=Fixture::new();let foreign_context=foreign.context();let mut stale=foreign.record(&foreign_context);stale.restart_process=Some(ProcessIdentity{pid:1,created:1});let mut authority=IndependentFixtureEvidence{binding:stale.receipt.binding.clone(),healthy:true};let mut store=windows_impl::fixture_store(&foreign_context,stale.clone()).unwrap();let mut life=engine::Lifecycle::prepare(stale.receipt.binding.clone(),&mut authority,&mut store).unwrap();life.advance(codec::State::HandoffCommitted,&mut authority,&mut store).unwrap();let before=store.recovery_hint().unwrap().unwrap();assert!(store.claim_current_restart(life.receipt()).is_err());assert_eq!(store.recovery_hint().unwrap().unwrap(),before);foreign.sentinels_unchanged();fixture.sentinels_unchanged();
+}
+
+#[test]
+fn never_spawned_failure_allows_durable_abandonment_and_a_fresh_signed_retry() {
+    let fixture=Fixture::new();let context=fixture.context();
+    let(mut stage,candidate,key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());
+    let snapshot=stage.transaction_snapshot(&candidate,&key).unwrap();
+    let mut prepared=prepare_transaction(&context,&snapshot).unwrap();
+    let before=prepared.store.recovery_hint().unwrap().unwrap();
+    let backup=fixture.root.join(&before.old_image.basename);
+    let failure=crate::update_handoff::fixture_spawn_failure(&fixture.root,&before.receipt.binding.nonce);
+    prepared.abandon_never_spawned(&failure).unwrap();
+    let abandoned=prepared.store.recovery_hint().unwrap().unwrap();
+    assert_eq!(abandoned.receipt.state,codec::State::Abandoned);
+    assert_eq!(abandoned.receipt.sequence,1);
+    assert_eq!(abandoned.old_image,before.old_image);
+    assert_eq!(abandoned.installer_process,None);
+    assert!(stage.verified_path().exists(),"abandonment does not delete artifacts");
+    assert_eq!(fs::read(&backup).unwrap(),b"original fixture Nearly image");
+    let mut life=engine::Lifecycle::recover(&codec::encode(&abandoned.receipt).unwrap()).unwrap();
+    let mut deny=DenyNativeEvidence;
+    let mut authority=EvidenceAdapter{context:&context,record:&abandoned,native:&mut deny};
+    let mut files=NativeFiles::new(&context);
+    assert_eq!(life.cleanup(0,&mut authority,&mut prepared.store,&mut files),Err(engine::Error::NotReady));
+    assert!(prepared.abandon_never_spawned(&failure).is_err());
+    drop(prepared);drop(snapshot);drop(stage);
+    let(mut next_stage,next_candidate,next_key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());
+    let next=next_stage.transaction_snapshot(&next_candidate,&next_key).unwrap();
+    let retry=prepare_transaction(&context,&next).unwrap();
+    assert_eq!(retry.lifecycle.receipt().state,codec::State::Prepared);
+    assert_ne!(retry.lifecycle.receipt().binding.nonce,abandoned.receipt.binding.nonce);
+    assert_eq!(fs::read(backup).unwrap(),b"original fixture Nearly image");fixture.sentinels_unchanged();
+}
+
+#[test]
+fn never_spawned_proof_cannot_abandon_another_nonce_or_a_committed_or_stale_record() {
+    let fixture=Fixture::new();let context=fixture.context();
+    let(mut stage,candidate,key)=crate::update_package::fixture_stage(&fixture.root,"1.1.0",context.installed_image_sha256());
+    let snapshot=stage.transaction_snapshot(&candidate,&key).unwrap();
+    let mut prepared=prepare_transaction(&context,&snapshot).unwrap();
+    let before=prepared.store.recovery_hint().unwrap().unwrap();
+    let foreign=crate::update_handoff::fixture_spawn_failure(&fixture.root,&"f".repeat(32));
+    assert!(prepared.abandon_never_spawned(&foreign).is_err());
+    assert_eq!(prepared.store.recovery_hint().unwrap().unwrap(),before);
+    // Another lease holder advances the journal. The stale in-memory Prepared
+    // capability must not overwrite even a well-formed committed receipt.
+    let mut committed=before.receipt.clone();committed.state=codec::State::HandoffCommitted;committed.sequence=1;
+    prepared.store.begin(Some(&before.receipt)).unwrap();
+    prepared.store.commit(&committed).unwrap();prepared.store.end();
+    let durable=prepared.store.recovery_hint().unwrap().unwrap();
+    let failure=crate::update_handoff::fixture_spawn_failure(&fixture.root,&before.receipt.binding.nonce);
+    assert!(prepared.abandon_never_spawned(&failure).is_err());
+    assert_eq!(prepared.store.recovery_hint().unwrap().unwrap(),durable);
+    assert!(prepare_transaction(&context,&snapshot).is_err());fixture.sentinels_unchanged();
 }

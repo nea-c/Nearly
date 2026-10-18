@@ -1,0 +1,15 @@
+# Review routing for the trusted signing/controller closure. This single-owner
+# file does not enforce independent approval; required approvals remain zero.
+/.github/ @nea-c
+/tools/ @nea-c
+/src-tauri/Cargo.toml @nea-c
+/src-tauri/Cargo.lock @nea-c
+/src-tauri/build.rs @nea-c
+/src-tauri/src/ @nea-c
+/src-tauri/windows/ @nea-c
+/scripts/build-installer.mjs @nea-c
+/scripts/build-windows.mjs @nea-c
+/package.json @nea-c
+/package-lock.json @nea-c
+/version.json @nea-c
+/docs/actions-signing.md @nea-c

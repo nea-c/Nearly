@@ -1,0 +1,314 @@
+name: Manual signed Windows bootstrap release
+run-name: Nearly signed ${{ inputs.version }} / ${{ inputs.mode }} / ${{ inputs.commit }}
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build only, verify signature without Release, or deliberately publish
+        type: choice
+        options: [validate, verify-signature, release]
+        default: validate
+        required: true
+      commit:
+        description: Exact reviewed main-history source commit (40 lowercase hex digits)
+        type: string
+        required: true
+      version:
+        description: Exact canonical rX.Y already present in the source
+        type: string
+        required: true
+      confirmation:
+        description: For signing, type verify-signature rX.Y SHA or release rX.Y SHA exactly
+        type: string
+        default: ''
+        required: false
+permissions: {}
+concurrency:
+  group: nearly-manual-windows-release
+  cancel-in-progress: false
+env:
+  RELEASE_MODE: ${{ inputs.mode }}
+  RELEASE_COMMIT: ${{ inputs.commit }}
+  RELEASE_TAG: ${{ inputs.version }}
+  RELEASE_CONFIRM: ${{ inputs.confirmation }}
+
+jobs:
+  policy:
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Validate exact request, source/version, public key, protected branch and Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node control/.github/scripts/signed-release.mjs policy
+
+  trusted-signer:
+    needs: policy
+    if: (inputs.mode == 'verify-signature' || inputs.mode == 'release') && needs.policy.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Prepare pinned portable reader and anonymous trusted build paths without secrets
+        run: |
+          ./control/.github/scripts/prepare-signing-tools.ps1 -Destination "$env:RUNNER_TEMP/nearly-extractor"
+          ./control/.github/scripts/prepare-signer-paths.ps1
+      - name: Fetch, test and build only the reviewed controller's trusted signing tool
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 fetch --locked --manifest-path control/tools/updater-signer/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 test --release --offline --locked --manifest-path control/tools/updater-signer/Cargo.toml -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 build --release --offline --locked --manifest-path control/tools/updater-signer/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - id: package
+        name: Bind exact trusted source closure, toolchain and executable pair
+        run: node control/.github/scripts/signed-release.mjs tools "$env:RUNNER_TEMP/nearly-tool-bundle"
+      - id: upload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nearly-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nearly-tool-bundle/*
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 1
+
+  unsigned-build:
+    needs: policy
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.commit }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit clean source, main ancestry, canonical version and registered-key bootstrap gate
+        run: node control/.github/scripts/signed-release.mjs preflight source
+      - name: Prepare reviewed portable tools before target builds and tests
+        run: |
+          ./control/.github/scripts/prepare-signing-tools.ps1 -Destination "$env:RUNNER_TEMP/nearly-build-extractor"
+          ./control/.github/scripts/prepare-windows.ps1 -SourceRoot ./source
+      - name: Install locked target dependencies in this secret-free runner
+        working-directory: source
+        run: npm ci
+      - name: Select pinned Rust and fetch locked dependencies
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 fetch --locked --manifest-path source/src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test trusted release controller with existing locked test dependencies
+        env:
+          NEARLY_TEST_DEPENDENCY_ROOT: ${{ github.workspace }}/source
+        run: node --test control/tests/manual-release.test.mjs control/tests/manual-release-workflow.test.mjs control/tests/signed-*.test.mjs
+      - name: Model, TypeScript and installer compile contracts
+        working-directory: source
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Generate disposable keys for isolated native fixtures
+        working-directory: source
+        run: node scripts/ppk-fixtures.mjs
+      - name: Native tests, excluding explicit manual qualification cases
+        working-directory: source
+        run: cargo +1.97.1 test --offline --locked --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+      - name: Generated localhost SFTP fixtures
+        working-directory: source
+        run: |
+          node scripts/sync-difference-test.mjs sync_difference_generated_localhost
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/sync-difference-test.mjs directory_deletion_generated_localhost
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Browser regression and production UI checks
+        working-directory: source
+        run: |
+          npm run test:ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:ui:production
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build bootstrap NSIS without running setup
+        working-directory: source
+        run: npm run build:installer -- --offline --locked
+      - id: package
+        name: Reaudit and bind final installer plus final loose application
+        run: node control/.github/scripts/signed-release.mjs package source "$env:RUNNER_TEMP/nearly-unsigned"
+      - id: upload
+        if: inputs.mode == 'verify-signature' || inputs.mode == 'release'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nearly-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nearly-unsigned/*
+          overwrite: false
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  sign:
+    needs: [policy, trusted-signer, unsigned-build]
+    if: (inputs.mode == 'verify-signature' || inputs.mode == 'release') && needs.policy.result == 'success' && needs.trusted-signer.result == 'success' && needs.unsigned-build.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    environment: nearly-updater-production
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TOOL_ARTIFACT_ID: ${{ needs.trusted-signer.outputs.artifact-id }}
+      TOOL_ARTIFACT_DIGEST: ${{ needs.trusted-signer.outputs.artifact-digest }}
+      TOOL_MANIFEST_SHA256: ${{ needs.trusted-signer.outputs.manifest-sha256 }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.unsigned-build.outputs.artifact-id }}
+      UNSIGNED_ARTIFACT_DIGEST: ${{ needs.unsigned-build.outputs.artifact-digest }}
+      UNSIGNED_MANIFEST_SHA256: ${{ needs.unsigned-build.outputs.manifest-sha256 }}
+      NEARLY_UPDATER_EXTRACTOR: ${{ runner.temp }}/nearly-tools/7z.exe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify immutable artifact server identities before downloading
+        run: node control/.github/scripts/signed-release.mjs artifacts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.trusted-signer.outputs.artifact-id }}
+          path: ${{ runner.temp }}/nearly-tools
+          merge-multiple: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.unsigned-build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/nearly-unsigned
+          merge-multiple: true
+      - id: plan
+        name: Recheck protection, source/tool manifests and construct exact signing plan
+        run: node control/.github/scripts/signed-release.mjs prepare-sign "$env:RUNNER_TEMP/nearly-unsigned" "$env:RUNNER_TEMP/nearly-tools"
+      - name: Preflight exact embedded payload and pinned reader before secrets enter a step
+        env:
+          SIGNING_PLAN_SHA256: ${{ steps.plan.outputs.manifest-sha256 }}
+        run: |
+          & "$env:RUNNER_TEMP/nearly-tools/nearly-updater-signer.exe" preflight --installer "$env:RUNNER_TEMP/nearly-unsigned/Nearly_$env:RELEASE_TAG`_x64-setup.exe" --payload "$env:RUNNER_TEMP/nearly-unsigned/Nearly.exe" --manifest "$env:RUNNER_TEMP/nearly-signing-plan.json" --manifest-sha256 "$env:SIGNING_PLAN_SHA256" --source-commit "$env:RELEASE_COMMIT" --artifact-id "$env:UNSIGNED_ARTIFACT_ID"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign only the verified bytes in the protected step
+        env:
+          SIGNING_PLAN_SHA256: ${{ steps.plan.outputs.manifest-sha256 }}
+          NEARLY_UPDATER_PRIVATE_KEY: ${{ secrets.NEARLY_UPDATER_PRIVATE_KEY }}
+          NEARLY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.NEARLY_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          & "$env:RUNNER_TEMP/nearly-tools/nearly-updater-signer.exe" sign --ci --installer "$env:RUNNER_TEMP/nearly-unsigned/Nearly_$env:RELEASE_TAG`_x64-setup.exe" --payload "$env:RUNNER_TEMP/nearly-unsigned/Nearly.exe" --manifest "$env:RUNNER_TEMP/nearly-signing-plan.json" --manifest-sha256 "$env:SIGNING_PLAN_SHA256" --source-commit "$env:RELEASE_COMMIT" --artifact-id "$env:UNSIGNED_ARTIFACT_ID" --public-key "$env:GITHUB_WORKSPACE/control/.github/updater-public-key.pub"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - id: package
+        name: Independently verify signature and retain only public release assets
+        run: node control/.github/scripts/signed-release.mjs signed "$env:RUNNER_TEMP/nearly-unsigned" "$env:RUNNER_TEMP/nearly-signed"
+      - id: upload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nearly-signed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nearly-signed/*
+          overwrite: false
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: [policy, trusted-signer, unsigned-build, sign]
+    if: inputs.mode == 'release' && needs.sign.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SIGNED_ARTIFACT_ID: ${{ needs.sign.outputs.artifact-id }}
+      SIGNED_ARTIFACT_DIGEST: ${{ needs.sign.outputs.artifact-digest }}
+      SIGNED_MANIFEST_SHA256: ${{ needs.sign.outputs.manifest-sha256 }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.unsigned-build.outputs.artifact-id }}
+      UNSIGNED_MANIFEST_SHA256: ${{ needs.unsigned-build.outputs.manifest-sha256 }}
+      TOOL_ARTIFACT_ID: ${{ needs.trusted-signer.outputs.artifact-id }}
+      TOOL_MANIFEST_SHA256: ${{ needs.trusted-signer.outputs.manifest-sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify exact signed artifact identity before download
+        run: node control/.github/scripts/signed-release.mjs signed-artifact
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: ${{ runner.temp }}/nearly-signed
+          merge-multiple: true
+      - name: Verify public cryptography/bindings and publish without overwriting foreign state
+        run: node control/.github/scripts/signed-release.mjs publish "$RUNNER_TEMP/nearly-signed"

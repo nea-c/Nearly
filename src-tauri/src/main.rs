@@ -43,6 +43,9 @@ mod update_cleanup;
 mod update_transaction;
 mod update_restart;
 mod update_runtime;
+mod update_recovery;
+#[cfg(windows)]
+mod update_recovery_windows;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -499,6 +502,7 @@ where L:FnOnce()->Result<std::sync::MutexGuard<'a,()>,String>{
     // pre-lock size after that flush has already cleared the dirty flag.
     let pending=state.window_size.lock().map_err(|_|"Window size lock failed")?.pending(quiet);
     let Some((size,generation))=pending else{return Ok(None)};
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_mutable("main")?;
     ensure_settings_window_open(state,"main")?;
     let revision=unified_settings::save_window_size(path,size)?;
     state.window_size.lock().map_err(|_|"Window size lock failed")?.acknowledge(generation);
@@ -924,6 +928,7 @@ fn approve_host_key(
     { let mut ownership = state.ownership.lock().map_err(|_| "Ownership lock failed")?; window_ownership::Registry::scoped(&mut ownership.probes, window.label(), &request_id, false)?; }
     let _lock = state.settings.lock().map_err(|_| "Settings lock failed")?;
     ensure_settings_window_open(&state,window.label())?;
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_mutable(window.label())?;
     let path = settings_path(&app)?;
     let mut clients = state.settings_clients.lock().map_err(|_| "Settings client lock failed")?;
     let baselines = clients.profile_approval_baselines(window.label(), expected_revision, &profile.id)?;
@@ -1209,6 +1214,7 @@ async fn list_remote(
     passphrase: zeroize::Zeroizing<String>,
     session_id: Option<String>,
 ) -> Result<Vec<sftp::Entry>, String> {
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
     if let Some(id) = session_id.as_deref() {
         state.ownership.lock().map_err(|_| "Ownership lock failed")?.mutable(window.label(), id)?;
         drop(passphrase);
@@ -1839,14 +1845,13 @@ fn perform_update_handoff(app:&tauri::AppHandle,label:&str)->Result<(),String>{
     stage.reverify(&candidate,&key).map_err(|_|"invalidSignature")?;
     let _child=update_settings_transaction(&path,&ids,||{
         #[cfg(windows)] {
-            let context=update_transaction::NativeContext::capture_current_install().map_err(|_|"installerLaunchFailed")?;
             let snapshot=stage.transaction_snapshot(&candidate,&key).map_err(|_|"invalidSignature")?;
-            let mut prepared=update_transaction::prepare_transaction(&context,&snapshot).map_err(|_|"installerLaunchFailed")?;
-            let nonce=prepared.lifecycle.receipt().binding.nonce.clone();
-            let launched=update_handoff::launch_verified_sibling(stage.verified_path(),&nonce).map_err(|_|"installerLaunchFailed")?;
-            // Publish the exact native child identity durably before signaling
-            // commit. Any failure drops the uncommitted launch and cancels setup.
-            prepared.bind_installer(&launched).map_err(|_|"installerLaunchFailed")?;
+            let mut prepared=update_recovery_windows::prepare_recovery(&snapshot,&path).map_err(|_|"installerLaunchFailed")?;
+            let launched=match update_handoff::launch_verified_recovery(&prepared){
+                Ok(launched)=>launched,
+                Err(failure)=>{let _=prepared.abandon_never_spawned(&failure);return Err("installerLaunchFailed".into());}
+            };
+            update_recovery_windows::bind_recovery(&mut prepared,&launched).map_err(|_|"installerLaunchFailed")?;
             launched.commit().map_err(|_|"installerLaunchFailed".into())
         }
         #[cfg(not(windows))] {Err::<std::process::Child,String>("installerLaunchFailed".into())}
@@ -1906,19 +1911,113 @@ fn window_taskbar_status(window:tauri::WebviewWindow,state:tauri::State<AppState
 #[tauri::command]
 fn update_restart_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
     if window.label()!="main"{return Err("Update restart status is main-window only".into());}
-    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_registered(window.label())?;
     Ok(state.update_restart.status())
 }
 #[tauri::command]
 fn ack_update_restart_ready(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
     if window.label()!="main"{return Err("Update restart health is main-window only".into());}
-    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_registered(window.label())?;
     state.update_restart.ack_ready();Ok(state.update_restart.status())
 }
+/// Native-only proof created after admission sealing and global idle/settings
+/// drain checks. Renderer commands cannot obtain the private Idle authority.
+pub(crate) struct HealthExitSeal { _private: () }
+pub(crate) struct HealthIdleProof { _private: () }
+fn attest_health_idle(state:&AppState)->Result<HealthIdleProof,String>{
+    let registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    registry.attest_health_idle()?;
+    let _settings=state.settings.try_lock().map_err(|_|"Settings writer is busy")?;
+    if !state.sessions.probation_idle()?||!state.engine.probation_idle()?{return Err("Native user work escaped probation".into());}
+    Ok(HealthIdleProof{_private:()})
+}
+#[cfg(test)]
+mod health_shutdown_tests {
+    use super::*;
+    fn probation()->AppState{let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.register_native_window("main").unwrap();r.enter_health_probation();}state}
+    #[test]fn health_shutdown_requires_probation_and_preserves_ordinary_work(){
+        let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.claim("main","tab").unwrap();}
+        assert!(seal_health_shutdown(&state).is_err());assert!(state.ownership.lock().unwrap().mutable("main","tab").is_ok());
+    }
+    #[test]fn health_shutdown_busy_settings_writer_refuses_without_waiting_or_closing(){
+        let state=probation();let writer=state.settings.lock().unwrap();
+        assert!(seal_health_shutdown(&state).is_err());drop(writer);
+        assert!(state.ownership.lock().unwrap().settings_registered("main").is_err());
+        assert!(state.sessions.prepare("evidence-retained").is_ok());
+    }
+    #[test]fn health_shutdown_detects_orphan_native_job_and_preserves_it(){
+        let state=probation();state.engine.prepare("escaped-gate-job".into()).unwrap();
+        assert!(seal_health_shutdown(&state).is_err());
+        assert!(state.engine.window_busy(&["escaped-gate-job".into()],&[]).unwrap());
+        assert!(state.ownership.lock().unwrap().release_health_probation().is_err());
+    }
+    #[test]fn health_shutdown_idle_drains_settings_and_permanently_seals_work(){
+        let state=probation();{let _settled_writer=state.settings.lock().unwrap();}
+        let _proof=seal_health_shutdown(&state).unwrap();
+        assert!(state.sessions.prepare("late-session").is_err());assert!(state.engine.prepare("late-job".into()).is_err());
+        assert!(state.ownership.lock().unwrap().reserve_spawn("late-window").is_err());
+        assert!(state.ownership.lock().unwrap().release_health_probation().is_err());
+    }
+    #[test]fn health_initial_idle_attestation_keeps_readiness_alive_without_closing_engines(){
+        let state=probation();let _proof=attest_health_idle(&state).unwrap();
+        assert!(state.ownership.lock().unwrap().settings_registered("main").is_ok());
+        assert!(state.ownership.lock().unwrap().bootstrap("main").is_ok());
+        assert!(state.ownership.lock().unwrap().claim("main","late").is_err());
+        assert!(state.sessions.probation_idle().unwrap()&&state.engine.probation_idle().unwrap());
+        state.ownership.lock().unwrap().release_health_probation().unwrap();
+        state.sessions.prepare("after-native-success").unwrap();state.engine.prepare("after-native-success".into()).unwrap();
+    }
+    #[test]fn health_initial_idle_attestation_refuses_contended_settings_and_orphan_native_work(){
+        let state=probation();{let _writer=state.settings.lock().unwrap();assert!(attest_health_idle(&state).is_err());}
+        state.sessions.prepare("escaped-session").unwrap();assert!(attest_health_idle(&state).is_err());
+        let state=probation();state.engine.prepare("escaped-job".into()).unwrap();assert!(attest_health_idle(&state).is_err());
+        let state=AppState::default();assert!(attest_health_idle(&state).is_err());
+    }
+}
+fn seal_health_shutdown(state:&AppState)->Result<HealthExitSeal,String>{
+    let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    let labels=registry.seal_health_exit()?;
+    // Never wait ownership -> settings: ordinary writers use the inverse lock
+    // order. A live writer means user editing may have escaped probation; retain
+    // the sealed app for manual repair. A settled writer is drained by this lock.
+    let _settings=state.settings.try_lock().map_err(|_|"Settings writer is busy; automatic health shutdown refused")?;
+    let ids=registry.update_owned_ids();
+    let jobs:Vec<_>=labels.iter().flat_map(|label|registry.job_ids(label)).collect();
+    let operations:Vec<_>=registry.operations.keys().cloned().collect();
+    if !state.sessions.probation_idle()?||!state.engine.probation_idle()?||state.sessions.window_busy(&ids)?||state.engine.window_busy(&jobs,&operations)?{
+        return Err("Native work is busy; automatic health shutdown refused".into());
+    }
+    state.sessions.try_begin_close(||state.engine.try_begin_close())?;
+    Ok(HealthExitSeal{_private:()})
+}
 fn main() {
+    #[cfg(windows)]
+    if let update_recovery_windows::HelperDispatch::Terminal(code)=update_recovery_windows::dispatch_helper(std::env::args_os()){std::process::exit(code);}
     // Parse native argv before the single-instance plugin can route a launch.
-    let restart=update_runtime::Runtime::new(update_runtime::parse_args(std::env::args_os()));
+    let startup=update_runtime::parse_args(std::env::args_os());
+    // Reserved malformed/disabled health routes never become normal windows or
+    // get forwarded to a normal instance's renderer.
+    if startup==update_runtime::Startup::Invalid{return;}
+    let probation=matches!(startup,update_runtime::Startup::Health(_));
+    if probation&&(!startup_update::HANDOFF_RELEASE_VALIDATED||update_package::production_key().is_none()){return;}
+    #[cfg(windows)]
+    if !probation&&startup_update::HANDOFF_RELEASE_VALIDATED&&update_package::production_key().is_some()
+        &&update_recovery_windows::ordinary_startup_allowed().is_err(){return;}
+    #[cfg(windows)]
+    if let update_runtime::Startup::Health(nonce)=&startup{
+        // Helper binds the exact CreateProcess child immediately after spawn.
+        // Authenticate before single-instance routing; a nonce cannot forward a
+        // privileged health launch into an unrelated ordinary application.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+        loop{
+            if update_recovery_windows::authenticate_health(nonce).ok().and_then(|snapshot|update_restart::LiveRecoverySupervisor::open(snapshot).ok()).is_some(){break;}
+            if std::time::Instant::now()>=deadline{return;}
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    let restart=update_runtime::Runtime::new(startup);
     let native_state=AppState{update_restart:restart,..Default::default()};
+    if probation{let mut r=native_state.ownership.lock().expect("Ownership lock failed");r.register_native_window("main").expect("Native main registration failed");r.enter_health_probation();}
     let mut context=tauri::generate_context!();
     for window in &mut context.config_mut().app.windows{if window.label=="main"{window.visible=false;}}
     let closing = Arc::new(AtomicBool::new(false));
@@ -1935,9 +2034,15 @@ fn main() {
             // Native lifetime starts before renderer bootstrap. An early second
             // launch closing again must not make the still-loading main vanish
             // from the shutdown decision or consume its fresh-process startup.
-            app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.register_native_window("main")?;
+            if !probation{app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.register_native_window("main")?;}
             let status_app=app.handle().clone();
-            app.state::<AppState>().update_restart.start(Arc::new(move|report|{let _=status_app.emit("update-restart-status",report);}));
+            let release_app=app.handle().clone();let seal_app=app.handle().clone();let exit_app=app.handle().clone();let idle_app=app.handle().clone();
+            app.state::<AppState>().update_restart.start(Arc::new(move|report|{let _=status_app.emit("update-restart-status",report);}),update_runtime::HealthActions{
+                release:Arc::new(move||release_app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.release_health_probation()),
+                seal_exit:Arc::new(move||seal_health_shutdown(&seal_app.state::<AppState>())),
+                attest_idle:Arc::new(move||attest_health_idle(&idle_app.state::<AppState>())),
+                exit:Arc::new(move||exit_app.exit(0)),
+            });
             if let Some(window)=app.get_webview_window("main"){input_policy::configure(&window);}
             restore_main_window_size(app.handle());
             #[cfg(windows)]

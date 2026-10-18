@@ -83,21 +83,24 @@ impl Drop for ProtectedOutput {
         }
     }
 }
-fn wide(path: &Path) -> Vec<u16> {
+pub(crate) fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
-fn entropy(context: &NativeContext, purpose: &str) -> Vec<u8> {
+fn entropy(root: &codec::Root, purpose: &str) -> Vec<u8> {
     format!(
         "Nearly/updater/v1/{purpose}/{}/{}/{}",
-        context.0.root.path, context.0.root.identity.volume, context.0.root.identity.file_id
+        root.path, root.identity.volume, root.identity.file_id
     )
     .into_bytes()
 }
 fn crypt(context: &NativeContext, purpose: &str, input: &[u8], protect: bool) -> Result<Vec<u8>> {
+    crypt_root(context.root(),purpose,input,protect)
+}
+pub(crate) fn crypt_root(root: &codec::Root, purpose: &str, input: &[u8], protect: bool) -> Result<Vec<u8>> {
     if input.is_empty() || input.len() > MAX_SEALED_RECORD {
         return Err(Error::Invalid);
     }
-    let entropy = entropy(context, purpose);
+    let entropy = entropy(root, purpose);
     let source = Blob {
         length: input.len() as u32,
         bytes: input.as_ptr().cast_mut(),
@@ -143,7 +146,7 @@ fn crypt(context: &NativeContext, purpose: &str, input: &[u8], protect: bool) ->
     }
     Ok(unsafe { std::slice::from_raw_parts(output.0.bytes, output.0.length as usize) }.to_vec())
 }
-fn info(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
+pub(crate) fn info(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
     let mut value = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut value) }
         .map_err(|_| Error::Io)?;
@@ -152,24 +155,24 @@ fn info(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
     }
     Ok(value)
 }
-fn identity(value: &BY_HANDLE_FILE_INFORMATION) -> codec::Identity {
+pub(crate) fn identity(value: &BY_HANDLE_FILE_INFORMATION) -> codec::Identity {
     let index = ((value.nFileIndexHigh as u64) << 32) | value.nFileIndexLow as u64;
     codec::Identity {
         volume: value.dwVolumeSerialNumber as u64,
         file_id: format!("{index:032x}"),
     }
 }
-fn regular(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
+pub(crate) fn regular(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
     let value = info(file)?;
     if value.dwFileAttributes & 0x10 != 0 || value.nNumberOfLinks != 1 {
         return Err(Error::Unsafe);
     }
     Ok(value)
 }
-fn file_length(value: &BY_HANDLE_FILE_INFORMATION) -> u64 {
+pub(crate) fn file_length(value: &BY_HANDLE_FILE_INFORMATION) -> u64 {
     ((value.nFileSizeHigh as u64) << 32) | value.nFileSizeLow as u64
 }
-fn hash_file(file: &mut File, limit: u64) -> Result<(u64, String)> {
+pub(crate) fn hash_file(file: &mut File, limit: u64) -> Result<(u64, String)> {
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
     let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
     let mut total = 0u64;
@@ -194,7 +197,7 @@ fn hash_file(file: &mut File, limit: u64) -> Result<(u64, String)> {
             .collect(),
     ))
 }
-fn directory(path: &Path, access: u32) -> Result<File> {
+pub(crate) fn directory(path: &Path, access: u32) -> Result<File> {
     let file = OpenOptions::new()
         .access_mode(access)
         .share_mode(3)
@@ -307,7 +310,7 @@ struct Owner {
     version: u8,
     root: codec::Root,
 }
-fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let file = match OpenOptions::new()
         .read(true)
         .share_mode(1)
@@ -330,7 +333,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     }
     Ok(Some(bytes))
 }
-fn new_file(path: &Path, bytes: &[u8]) -> Result<File> {
+pub(crate) fn new_file(path: &Path, bytes: &[u8]) -> Result<File> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -731,6 +734,26 @@ pub(crate) struct PreparedTransaction {
     fenced: bool,
 }
 impl PreparedTransaction {
+    /// The opaque failure comes only from the native launch path before spawn.
+    /// Persisted Prepared alone is insufficient, including after a process crash.
+    pub(crate) fn abandon_never_spawned(&mut self,failure:&crate::update_handoff::LaunchFailure)->Result<()> {
+        let expected=self.lifecycle.receipt().clone();
+        if self.fenced || expected.state!=codec::State::Prepared
+            || !failure.never_spawned_for(&expected.binding.nonce) {return Err(Error::Unsafe);}
+        if self.store.begin(Some(&expected)).is_err(){self.fenced=true;return Err(Error::Uncertain);}
+        let result=(||{
+            let mut record=self.store.record.as_ref().ok_or(Error::Missing)?.clone();
+            if record.installer_process.is_some() || record.restart_process.is_some(){return Err(Error::Unsafe);}
+            record.receipt.state=codec::State::Abandoned;
+            record.receipt.sequence=record.receipt.sequence.checked_add(1).filter(|s|*s<=64).ok_or(Error::Invalid)?;
+            self.store.publish(&record)?;
+            self.lifecycle=engine::Lifecycle::recover(&codec::encode(&record.receipt).map_err(|_|Error::Invalid)?).map_err(|_|Error::Invalid)?;
+            self.store.record=Some(record);Ok(())
+        })();
+        self.store.end();
+        if result.is_err(){self.fenced=true;}
+        result
+    }
     pub(crate) fn bind_installer(
         &mut self,
         launched: &crate::update_handoff::LaunchedInstaller,
@@ -869,6 +892,15 @@ pub(crate) fn prepare_transaction(
         },
     };
     codec::validate_binding(&binding).map_err(|_| Error::Invalid)?;
+    // Admit the exact prior terminal receipt under the native lease before
+    // creating a backup. Rejected/stale/uncertain attempts leave no new copy.
+    let mut store = TransactionStore::open(context)?;
+    let existing=store.recovery_hint()?;
+    if let Some(previous)=&existing {
+        if !matches!(previous.receipt.state,codec::State::Cleaned|codec::State::Abandoned)
+            || previous.receipt.binding.nonce==binding.nonce {return Err(Error::Unsafe);}
+    }
+    store.begin(existing.as_ref().map(|r|&r.receipt)).map_err(|_|Error::Busy)?;
     let old_image = backup_current(context, &binding)?;
     let receipt = codec::Receipt {
         version: 1,
@@ -890,40 +922,12 @@ pub(crate) fn prepare_transaction(
         restart_process: None,
     };
     initial.validate()?;
-    let mut store = TransactionStore::open(context)?;
-    store.initial = Some(initial);
-    struct Owned(codec::Binding);
-    impl engine::Authority for Owned {
-        fn verify(
-            &mut self,
-            b: &codec::Binding,
-            e: engine::Evidence,
-        ) -> std::result::Result<(), String> {
-            if b == &self.0 && e == engine::Evidence::Owned {
-                Ok(())
-            } else {
-                Err("Only verified staging ownership is available".into())
-            }
-        }
-    }
-    let existing=store.recovery_hint()?;
-    let lifecycle=if let Some(previous)=existing{
-        if previous.receipt.state!=codec::State::Cleaned
-            || previous.receipt.binding.nonce==binding.nonce{return Err(Error::Unsafe);}
-        // Reuse only the authenticated native namespace's exact terminal record.
-        // The new immutable, verified StageSnapshot and pinned current image own
-        // the replacement. Keep every earlier backup/recovery file untouched.
-        store.begin(Some(&previous.receipt)).map_err(|_|Error::Busy)?;
-        let replacement=(||{
-            let next=store.initial.as_ref().ok_or(Error::Missing)?.clone();
-            engine::Authority::verify(&mut Owned(binding.clone()),&binding,engine::Evidence::Owned).map_err(|_|Error::Unsafe)?;
-            store.publish(&next)?;store.record=Some(next.clone());
-            engine::Lifecycle::recover(&codec::encode(&next.receipt).map_err(|_|Error::Invalid)?).map_err(|_|Error::Invalid)
-        })();
-        store.end();replacement?
-    }else{
-        engine::Lifecycle::prepare(binding.clone(), &mut Owned(binding), &mut store).map_err(|_|Error::Io)?
-    };
+    // Immutable signed StageSnapshot and pinned native context establish this
+    // initial ownership. No previous recovery artifact is a deletion target.
+    store.publish(&initial)?;
+    let lifecycle=engine::Lifecycle::recover(&codec::encode(&initial.receipt).map_err(|_|Error::Invalid)?).map_err(|_|Error::Invalid)?;
+    store.record=Some(initial);
+    store.end();
     Ok(PreparedTransaction {
         store,
         lifecycle,

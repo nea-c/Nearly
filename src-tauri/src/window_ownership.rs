@@ -25,10 +25,32 @@ pub struct Registry {
     update_pending:bool,
     update_sealed:bool,
     main_bootstrapped:bool,
+    health_probation:bool,
+    health_exit_sealed:bool,
 }
 fn identifier(id:&str)->Result<(),String>{if id.is_empty()||id.len()>128||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){Err("Invalid workspace identifier".into())}else{Ok(())}}
 impl Registry {
-    fn update_idle(&self)->Result<(),String>{if self.update_pending||self.update_sealed{Err("Application update is in progress".into())}else{Ok(())}}
+    fn update_idle(&self)->Result<(),String>{if self.health_probation||self.health_exit_sealed||self.shutting_down||self.update_pending||self.update_sealed{Err("Application update is in progress".into())}else{Ok(())}}
+    /// Only native startup and authenticated supervisor completion call these.
+    pub(crate) fn enter_health_probation(&mut self){self.health_probation=true;}
+    pub(crate) fn release_health_probation(&mut self)->Result<(),String>{if !self.health_probation||self.health_exit_sealed{return Err("Health probation cannot be released".into());}self.health_probation=false;Ok(())}
+    /// Seal and check under the ownership lock used by admissions. Refusal
+    /// preserves the app and leaves admissions sealed for manual repair.
+    pub(crate) fn seal_health_exit(&mut self)->Result<Vec<String>,String>{
+        if !self.health_probation||self.health_exit_sealed{return Err("No probation exit is available".into());}
+        self.health_exit_sealed=true;
+        self.health_work_idle()
+    }
+    pub(crate) fn attest_health_idle(&self)->Result<Vec<String>,String>{
+        if !self.health_probation||self.health_exit_sealed{return Err("No live probation admission fence".into());}
+        self.health_work_idle()
+    }
+    fn health_work_idle(&self)->Result<Vec<String>,String>{
+        if !self.owners.is_empty()||!self.closing.is_empty()||!self.spawns.is_empty()||!self.operations.is_empty()||!self.probes.is_empty()||!self.active_operations.is_empty()||!self.provisional.is_empty()||self.jobs.values().any(|j|j.job.is_some())||self.transfers.values().any(|t|t.phase=="pending"||t.phase=="dragging"){
+            return Err("User work detected; automatic health shutdown refused".into());
+        }
+        Ok(self.window_labels())
+    }
     pub fn begin_update(&mut self)->Result<Vec<String>,String>{
         self.update_idle()?;
         if self.shutting_down||!self.closing.is_empty()||!self.spawns.is_empty()||!self.operations.is_empty()||!self.active_operations.is_empty()||!self.provisional.is_empty()||self.jobs.values().any(|j|j.job.is_some())||self.transfers.values().any(|t|t.phase=="pending"||t.phase=="dragging"){
@@ -43,15 +65,15 @@ impl Registry {
     pub fn cancel_update(&mut self){self.update_pending=false;self.update_sealed=false;}
     pub fn register_native_window(&mut self,label:&str)->Result<(),String>{self.update_idle()?;if self.shutting_down||self.closing.contains(label){return Err("Window is closing".into());}if !self.windows.contains(label)&&self.windows.len()>=32{return Err("Window limit reached".into());}self.windows.insert(label.into());Ok(())}
     pub fn bootstrap(&mut self,label:&str)->Result<Bootstrap,String>{
-        self.register_native_window(label)?;
+        if !(self.health_probation&&!self.health_exit_sealed&&label=="main"&&self.windows.contains(label)){self.register_native_window(label)?;}
         let fresh_process=label=="main"&&!self.main_bootstrapped;
         if label=="main"{self.main_bootstrapped=true;}
         self.windows.insert(label.into());
         Ok(Bootstrap{fresh_process,outgoing_transfers:self.transfers.values().filter(|t|t.source_label==label&&(t.phase=="pending"||t.phase=="dragging")).cloned().collect(),workspaces:Vec::new(),label:label.into(),owned_workspace_ids:self.owned(label),pending_transfer:self.transfers.values().find(|t|t.target_label==label&&(t.phase=="pending"||t.phase=="dragging")).cloned(),jobs:self.jobs.values().filter(|j|self.owners.get(&j.workspace_id).is_some_and(|o|o==label)).cloned().collect()})
     }
-    pub fn settings_registered(&self,label:&str)->Result<(),String>{if self.update_sealed{return Err("Application update is sealed".into());}if self.windows.contains(label)&&!self.closing.contains(label){Ok(())}else{Err("Window is not registered or is closing".into())}}
+    pub fn settings_registered(&self,label:&str)->Result<(),String>{if self.update_sealed||self.health_exit_sealed{return Err("Application update is sealed".into());}if self.windows.contains(label)&&!self.closing.contains(label){Ok(())}else{Err("Window is not registered or is closing".into())}}
     pub fn registered(&self,label:&str)->Result<(),String>{self.update_idle()?;self.settings_registered(label)}
-    pub fn settings_mutable(&self,label:&str)->Result<(),String>{self.settings_registered(label)?;if self.transfers.values().any(|t|t.target_label==label&&t.target_kind=="new"&&(t.phase=="dragging"||t.phase=="pending")){return Err("Detached preview cannot change settings before transfer commit".into());}Ok(())}
+    pub fn settings_mutable(&self,label:&str)->Result<(),String>{if self.health_probation||self.health_exit_sealed||self.shutting_down{return Err("Health probation blocks settings edits".into());}self.settings_registered(label)?;if self.transfers.values().any(|t|t.target_label==label&&t.target_kind=="new"&&(t.phase=="dragging"||t.phase=="pending")){return Err("Detached preview cannot change settings before transfer commit".into());}Ok(())}
     pub fn claim(&mut self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;identifier(id)?;match self.owners.get(id){Some(o) if o==label=>Ok(()),Some(_)=>Err("Workspace belongs to another window".into()),None=>{if self.pending(label){return Err("Incoming window must wait for transfer commit".into());}if self.owners.len()>=128{return Err("Workspace limit reached".into());}self.owners.insert(id.into(),label.into());Ok(())}}}
     pub fn owner(&self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;if self.owners.get(id).is_some_and(|o|o==label){Ok(())}else{Err("Workspace belongs to another window".into())}}
     pub fn mutable(&self,label:&str,id:&str)->Result<(),String>{self.owner(label,id)?;if self.pending(label){Err("Workspace transfer is pending".into())}else{Ok(())}}
@@ -140,6 +162,36 @@ fn validate_view_state(v:&Value,w:&serde_json::Map<String,Value>)->Result<(),Str
 use super::*;
 fn setup()->Registry{let mut r=Registry::default();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","tab").unwrap();r}
 fn payload()->Value{serde_json::json!({"version":1,"workspace":{"id":"tab"}})}
+#[test]fn health_probation_rejects_every_user_admission_in_all_windows(){
+ let mut r=setup();r.enter_health_probation();
+ for label in ["main","other"]{
+  assert!(r.registered(label).is_err());assert!(r.claim(label,"late").is_err());
+  assert!(r.prepare_job(label,"job",None).is_err());assert!(r.settings_mutable(label).is_err());
+ }
+ assert!(r.mutable("main","tab").is_err());assert!(r.begin("main","tab",payload()).is_err());
+ assert!(r.reserve_spawn("late").is_err());assert!(r.register_native_window("late").is_err());
+ assert!(r.bootstrap("main").is_ok());assert!(r.settings_registered("main").is_ok());
+ assert!(r.begin_update().is_err());r.cancel_update();assert!(r.registered("main").is_err());
+ r.release_health_probation().unwrap();assert!(r.mutable("main","tab").is_ok());
+}
+#[test]fn health_exit_refuses_user_work_and_retains_permanent_fence(){
+ let mut r=setup();r.enter_health_probation();assert!(r.seal_health_exit().is_err());
+ assert!(r.release_health_probation().is_err());assert!(r.settings_registered("main").is_err());
+ assert!(r.claim("other","late").is_err());assert_eq!(r.owned("main"),vec!["tab"]);
+ let mut ordinary=setup();assert!(ordinary.seal_health_exit().is_err());assert!(ordinary.mutable("main","tab").is_ok());
+}
+#[test]fn health_exit_atomically_seals_against_concurrent_window_and_job_admission(){
+ use std::sync::{Arc,Mutex,Barrier};
+ for _ in 0..64{
+  let mut registry=Registry::default();registry.register_native_window("main").unwrap();registry.enter_health_probation();
+  let shared=Arc::new(Mutex::new(registry));let barrier=Arc::new(Barrier::new(3));
+  let gate=shared.clone();let ready=barrier.clone();let close=std::thread::spawn(move||{ready.wait();gate.lock().unwrap().seal_health_exit()});
+  let gate=shared.clone();let ready=barrier.clone();let work=std::thread::spawn(move||{ready.wait();let mut r=gate.lock().unwrap();(r.reserve_spawn("late"),r.prepare_job("main","late-job",None),r.settings_mutable("main"))});
+  barrier.wait();assert_eq!(close.join().unwrap().unwrap(),vec!["main"]);
+  let(window,job,settings)=work.join().unwrap();assert!(window.is_err()&&job.is_err()&&settings.is_err());
+  assert!(shared.lock().unwrap().release_health_probation().is_err());
+ }
+}
 #[test]fn update_barrier_covers_all_windows_and_late_work(){let mut r=setup();r.claim("other","second").unwrap();assert_eq!(r.begin_update().unwrap(),vec!["main","other"]);assert_eq!(r.update_owned_ids(),vec!["second","tab"]);for label in ["main","other"]{assert!(r.registered(label).is_err());assert!(r.settings_registered(label).is_ok());assert!(r.claim(label,"late").is_err());assert!(r.prepare_job(label,"late-job",None).is_err());assert!(r.seal_close(label).is_err());assert!(r.register_native_window(label).is_err());}assert!(r.mutable("main","tab").is_err());assert!(r.begin("main","tab",payload()).is_err());assert!(r.reserve_spawn("late-window").is_err());assert!(r.begin_update().is_err());r.seal_update().unwrap();assert!(r.settings_registered("main").is_err());assert!(r.seal_update().is_err());r.cancel_update();assert!(r.registered("main").is_ok());assert!(r.settings_registered("other").is_ok());assert!(r.mutable("main","tab").is_ok());r.reserve_spawn("late-window").unwrap();}
 #[test]fn update_rejects_other_window_work_and_pending_window_creation(){let mut r=setup();Registry::scoped(&mut r.operations,"other","op",true).unwrap();assert!(r.begin_update().is_err());r.operations.clear();r.active_operations.insert("active".into());assert!(r.begin_update().is_err());r.active_operations.clear();r.reserve_spawn("child").unwrap();assert!(r.begin_update().is_err());r.finish_spawn("child");r.seal_close("other").unwrap();assert!(r.begin_update().is_err());r.unseal("other");r.begin_update().unwrap();}
 #[test]fn update_rejects_transfer_and_live_job_but_accepts_stopped_descriptor(){let mut r=setup();let t=r.begin_drag("main","tab",payload()).unwrap();assert!(r.begin_update().is_err());r.activate_drag("main",&t.token,Some(("other",0,None))).unwrap();assert!(r.begin_update().is_err());r.abort("main",&t.token).unwrap();r.prepare_job("main","job",Some("tab")).unwrap();r.describe_job("job",serde_json::json!({"id":"job"}));assert!(r.begin_update().is_err());r.finish_job("job");r.begin_update().unwrap();r.cancel_update();assert!(r.begin("main","tab",payload()).is_ok());}

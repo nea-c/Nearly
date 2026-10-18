@@ -4,6 +4,8 @@
 //! mutate anything until that exact process handle signals exit.
 use std::{path::{Path, PathBuf}, process::{Child, Command}, time::{Duration, Instant}};
 pub(crate) use crate::startup_update::HANDOFF_RELEASE_VALIDATED;
+#[cfg(windows)]
+pub(crate) use crate::update_recovery_windows::launch_verified_recovery;
 
 pub(crate) fn installed_executable() -> Result<PathBuf,String> {
     #[cfg(windows)] { native::installed_executable() }
@@ -11,6 +13,23 @@ pub(crate) fn installed_executable() -> Result<PathBuf,String> {
 }
 
 pub struct LaunchedInstaller { pub child: Child, identity:crate::update_transaction::ProcessIdentity, #[cfg(windows)] abort:native::CancelOnDrop, #[cfg(windows)] _health_events:native::HealthEvents }
+/// Only this module can attest that an attempt never obtained a child process.
+/// After spawn, even readiness failure is deliberately an uncertain outcome.
+#[derive(Debug)]
+pub struct LaunchFailure { message:String, never_spawned_nonce:Option<String> }
+impl LaunchFailure {
+    pub(crate) fn before_spawn(nonce:&str,message:String)->Self {Self {message,never_spawned_nonce:Some(nonce.into())}}
+    pub(crate) fn after_spawn(message:String)->Self {Self {message,never_spawned_nonce:None}}
+    pub(crate) fn never_spawned_for(&self,nonce:&str)->bool {self.never_spawned_nonce.as_deref()==Some(nonce)}
+}
+impl std::fmt::Display for LaunchFailure {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str(&self.message)}
+}
+/// Keep the spawn boundary in one place so failure proof cannot accidentally
+/// include identify/readiness errors after the OS has returned a child handle.
+fn spawn_installer(command:&mut Command,nonce:&str)->Result<Child,LaunchFailure> {
+    command.spawn().map_err(|e|LaunchFailure::before_spawn(nonce,format!("Cannot launch verified installer: {e}")))
+}
 impl LaunchedInstaller {
     pub(crate) fn process_identity(&self)->crate::update_transaction::ProcessIdentity {self.identity.clone()}
     /// Call only after sealed settings cleanup succeeds, immediately before
@@ -94,7 +113,9 @@ mod native {
         if std::fs::canonicalize(&fixed).map_err(|e|e.to_string())? != std::fs::canonicalize(registered).map_err(|e|e.to_string())? { return Err("Registered installation is not the fixed per-user location".into()); }
         Ok(fixed.join("Nearly.exe"))
     }
-    pub fn launch(installer: &Path,nonce:&str) -> Result<LaunchedInstaller,String> {
+    pub fn launch(installer: &Path,nonce:&str) -> Result<LaunchedInstaller,LaunchFailure> {
+        // Every fallible preparation step precedes the only spawn call.
+        let (event,abort,health_events,created)=(||->Result<_,String>{
         validate_nonce(nonce)?;
         let current=std::env::current_exe().map_err(|e|e.to_string())?;
         let installed=installed_executable()?;
@@ -105,8 +126,12 @@ mod native {
         let mut abort=CancelOnDrop {event:fresh_event("Abort",nonce)?,commit:None,armed:true};
         abort.commit=Some(fresh_event("Commit",nonce)?);
         let health_events=HealthEvents { _installed:fresh_event("Installed",nonce)?,_healthy:fresh_event("Healthy",nonce)? };
-        let mut child=Command::new(installer).args(["/S".into(),"/NEARLYUPDATE".into(),"/NEARLYPROTOCOL=2".into(),format!("/NEARLYPARENT={}",std::process::id()),format!("/NEARLYCREATED={}",((c.high as u64)<<32)|c.low as u64),format!("/NEARLYREADY={nonce}")]).spawn().map_err(|e|format!("Cannot launch verified installer: {e}"))?;
-        let identity=identify_child(&child)?;
+        Ok((event,abort,health_events,((c.high as u64)<<32)|c.low as u64))
+        })().map_err(|message|LaunchFailure::before_spawn(nonce,message))?;
+        let mut command=Command::new(installer);
+        command.args(["/S".into(),"/NEARLYUPDATE".into(),"/NEARLYPROTOCOL=2".into(),format!("/NEARLYPARENT={}",std::process::id()),format!("/NEARLYCREATED={created}"),format!("/NEARLYREADY={nonce}")]);
+        let mut child=spawn_installer(&mut command,nonce)?;
+        let identity=identify_child(&child).map_err(LaunchFailure::after_spawn)?;
         wait_ready(&mut child,&event,Duration::from_secs(10))?;
         Ok(LaunchedInstaller { child, identity, abort, _health_events:health_events })
     }
@@ -128,16 +153,16 @@ mod native {
         if created==0{return Err("Invalid installer creation identity".into());}
         Ok(crate::update_transaction::ProcessIdentity {pid:child.id(),created})
     }
-    fn wait_ready(child:&mut Child,event:&Event,timeout:Duration)->Result<(),String> {
+    fn wait_ready(child:&mut Child,event:&Event,timeout:Duration)->Result<(),LaunchFailure> {
         let started=Instant::now();
         loop {
-            if let Some(status)=child.try_wait().map_err(|e|e.to_string())? { return Err(format!("Installer rejected handoff ({status}); Nearly remains open")); }
+            if let Some(status)=child.try_wait().map_err(|e|LaunchFailure::after_spawn(e.to_string()))? { return Err(LaunchFailure::after_spawn(format!("Installer rejected handoff ({status}); Nearly remains open"))); }
             match unsafe { WaitForSingleObject(event.0,50) } {
                 0 => return Ok(()),
                 258 => {},
-                _ => return Err("Cannot confirm installer readiness; Nearly remains open".into()),
+                _ => return Err(LaunchFailure::after_spawn("Cannot confirm installer readiness; Nearly remains open".into())),
             }
-            if started.elapsed() >= timeout { return Err("Installer readiness timed out; Nearly remains open. Waiting setup will expire without changing files".into()); }
+            if started.elapsed() >= timeout { return Err(LaunchFailure::after_spawn("Installer readiness timed out; Nearly remains open. Waiting setup will expire without changing files".into())); }
         }
     }
     #[cfg(test)] mod tests {
@@ -206,6 +231,7 @@ mod native {
                 let mut child=command.spawn().unwrap();
                 let result=wait_ready(&mut child,&event,if mode=="timeout" {Duration::from_millis(80)} else {Duration::from_secs(3)});
                 assert_eq!(result.is_ok(),mode=="ready");
+                if let Err(failure)=&result {assert!(!failure.never_spawned_for(&"a".repeat(32)),"a spawned child never grants abandonment proof");}
                 // Timeout never kills the waiting child; it exits naturally.
                 if mode=="timeout" { assert!(child.try_wait().unwrap().is_none()); }
                 assert!(child.wait().unwrap().success());
@@ -245,9 +271,16 @@ fn validate_canonical_layout(candidate:&Path,current:&Path,installed:&Path)->Res
 
 fn validate_nonce(nonce:&str)->Result<(),String>{if nonce.len()!=32||!nonce.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)){return Err("Invalid installer transaction nonce".into());}Ok(())}
 
-pub fn launch_verified_sibling(installer:&Path,nonce:&str)->Result<LaunchedInstaller,String> {
+pub fn launch_verified_sibling(installer:&Path,nonce:&str)->Result<LaunchedInstaller,LaunchFailure> {
     #[cfg(windows)] { native::launch(installer,nonce) }
-    #[cfg(not(windows))] { let _=(installer,nonce); Err("Installer handoff requires Windows".into()) }
+    #[cfg(not(windows))] { let _=installer; Err(LaunchFailure::before_spawn(nonce,"Installer handoff requires Windows".into())) }
+}
+
+#[cfg(all(test,windows))]
+pub(crate) fn fixture_spawn_failure(root:&Path,nonce:&str)->LaunchFailure {
+    assert!(root.starts_with(std::env::temp_dir()));
+    let mut command=Command::new(root.join("missing-generated-installer.exe"));
+    match spawn_installer(&mut command,nonce) {Err(failure)=>failure,Ok(_)=>panic!("fixture missing executable unexpectedly existed")}
 }
 
 #[cfg(test)] mod tests {

@@ -49,6 +49,9 @@ pub struct Binding {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum State {
     Prepared,
+    // A native never-spawned proof terminalizes this attempt, without granting
+    // installer success, health, or permission to remove recovery artifacts.
+    Abandoned,
     HandoffCommitted,
     InstallationSucceeded,
     RestartHealthy,
@@ -146,6 +149,7 @@ fn validate(receipt: &Receipt) -> Result<(), String> {
     validate_binding(&receipt.binding)?;
     let min = match receipt.state {
         State::Prepared => 0,
+        State::Abandoned => 1,
         State::HandoffCommitted => 1,
         State::InstallationSucceeded => 2,
         State::RestartHealthy => 3,

@@ -42,11 +42,14 @@ function pe(bytes){
 
 /** Publish the installer/manifest only. Never install, run, or modify settings. */
 export async function publishInstaller(project,artifact,metadata,io=fs){
+  if(Object.hasOwn(metadata,'updaterProtocol')&&metadata.updaterProtocol!==3)throw Error('Invalid updater protocol: this build requires protocol 3');
   let label;
   try{label=displayVersion(metadata.version);}catch{throw Error('Invalid installer output name');}
   const name=`Nearly_${label}_x64-setup.exe`;
   const binary=await io.readFile(artifact);pe(binary);
-  const info={...metadata,displayVersion:label,builtAt:new Date().toISOString(),bytes:binary.length,sha256:hash(binary),signed:false};
+  // Trusted-build input to the offline signer, not independent native trust or
+  // proof that the actual NSIS staging path has completed qualification.
+  const info={...metadata,updaterProtocol:3,displayVersion:label,builtAt:new Date().toISOString(),bytes:binary.length,sha256:hash(binary),signed:false};
   const output=path.join(project,'build'),stage=path.join(output,'.installer-staging-'+randomUUID());
   const backup=path.join(output,'previous','installer-'+new Date().toISOString().replaceAll(':','-')+'-'+randomUUID());
   await io.mkdir(stage,{recursive:true});

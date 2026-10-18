@@ -91,6 +91,7 @@ Thumbs.db
 !/docs/native-drag-manual-qa.md
 !/docs/native-lifecycle-manual-qa.md
 !/docs/startup-updates.md
+!/docs/actions-signing.md
 /scripts/*
 !/scripts/build-windows.mjs
 !/scripts/sftp-fixture.mjs
