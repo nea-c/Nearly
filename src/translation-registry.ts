@@ -1,3 +1,5 @@
+import {fileOperationTranslations} from "./translations-file-operations.js";
+import {sideBookmarkTranslations,sideBookmarkErrors} from './translations-side-bookmarks.js';
 import {tabDragTranslations} from "./translations-tab-drag.js";
 import {syncActionTranslations} from "./translations-sync-actions.js";
 import {themeTranslations} from "./translations-themes.js";
@@ -29,5 +31,5 @@ function merge(parts:Record<string,string>[]):Record<string,string>{
   }
   return merged;
 }
-export const catalog=merge([shared,appTranslations,explorerTranslations,archiveTranslations,retainedTranslations,themeTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);
-export const ownedMessages=merge([sharedMessages,appErrorTranslations,explorerErrorTranslations,retainedTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);
+export const catalog=merge([sideBookmarkTranslations,fileOperationTranslations,shared,appTranslations,explorerTranslations,archiveTranslations,retainedTranslations,themeTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);
+export const ownedMessages=merge([sideBookmarkErrors,sharedMessages,appErrorTranslations,explorerErrorTranslations,retainedTranslations,tabContextTranslations,tabDragTranslations,syncActionTranslations]);

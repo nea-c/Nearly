@@ -1,0 +1,2 @@
+import base from './playwright.modal-tree.config';
+export default {...base,testMatch:['modal-tree.spec.ts','tree-loading-silent.spec.ts','tree-selection-v3.spec.ts','post-r1-tree-layout.spec.ts','bookmark-tree-refinement.spec.ts','bookmark-hover.spec.ts','bookmark-more.spec.ts','side-bookmark-folders.spec.ts','browse-restore.spec.ts','input-policy.spec.ts'],outputDir:'test-results/modal-tree-regression'};

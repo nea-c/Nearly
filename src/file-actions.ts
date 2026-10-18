@@ -1,3 +1,4 @@
+import { operationFeedback, operationBusy } from "./operation-feedback.js";
 import {
   archiveEligibility,
   archiveDefaultName,
@@ -23,6 +24,7 @@ export interface ActionHost {
   syncRoots: string[];
   selected(side: Side): void;
   valid(): boolean;
+  operationValid(): boolean;
   changed(
     side: Side,
     passphrase: string,
@@ -31,6 +33,11 @@ export interface ActionHost {
       paths: string[];
       parent?: string;
       created?: boolean;
+      affectedDirectories: readonly string[];
+      removedDirectories?: readonly string[];
+      affectedSubtrees?: readonly string[];
+      uncertain?: boolean;
+      partial?: boolean;
     },
   ): Promise<void>;
 }
@@ -225,7 +232,7 @@ function paste(snapshot: Snapshot) {
   );
 }
 function showMenu(state: Snapshot, x: number, y: number) {
-  if (operation) return;
+  if (operation || operationBusy()) return;
   closeMenu();
   menuContext = contextKey(state.host);
   const active = state.items.length > 0,
@@ -275,6 +282,9 @@ function showMenu(state: Snapshot, x: number, y: number) {
       >
     </button>
     <div class="menu-rule"></div>
+    <button role="menuitem" data-file-action="duplicate" ${state.items.length !== 1 ? "disabled" : ""}>複製</button>
+    <button role="menuitem" data-file-action="move" ${!active || protectedRoot ? "disabled" : ""}>移動</button>
+    ${state.side === "remote" ? html`<button role="menuitem" disabled title="リモートZIPは利用できません。ローカルへダウンロードして操作してください。">ZIPに圧縮</button><div class="menu-explanation">リモートZIPは利用できません。ローカルへダウンロードして操作してください。</div>` : ""}
     ${archive.compress ? html`<button role="menuitem" data-file-action="compress">ZIPに圧縮</button>` : ""}${archive.extract ? html`<button role="menuitem" data-file-action="extract">ZIPを展開</button>` : ""}
     <button
       role="menuitem"
@@ -306,6 +316,8 @@ function showMenu(state: Snapshot, x: number, y: number) {
         else if (action === "copy" || action === "cut")
           remember(state, action === "cut");
         else if (action === "paste") paste(state);
+        else if (action === "duplicate") showOperation(state, "copy", "duplicate");
+        else if (action === "move") showOperation(state, "move", "move");
         else showOperation(state, "delete");
       }),
   );
@@ -332,8 +344,9 @@ function showMenu(state: Snapshot, x: number, y: number) {
 function showOperation(
   state: Snapshot,
   action: FileOperationRequest["action"],
+  prompt?: "duplicate" | "move",
 ) {
-  if (operation || !state.items.length) return;
+  if (operation || operationBusy() || !state.items.length) return;
   if (state.items.length > 500) {
     notice(() =>
       t("一度に操作できるのは500項目までです。対象を分けて選択してください"),
@@ -395,6 +408,8 @@ function showOperation(
               ごみ箱へ移動します。ごみ箱に対応しない場所では中止し、完全削除へ切り替えません。
             </p>`
     }${!remote && state.host.syncRoots.length ? html`<p class="warning">同期中です。ローカルの変更・コピー・移動はアップロードに反映される場合があります。ローカル削除も、実行中の同期で「ファイルを削除する」が有効ならリモートへ反映されます。</p>` : ""}${remote && !state.host.sessionId ? html`<label>秘密鍵のパスフレーズ（必要な場合のみ）<input name="operation-passphrase" type="password" autocomplete="off" /></label>` : ""}${!allowed ? html`<p class="mock-note">ブラウザプレビュー／リモートのモックでは実ファイル操作を行いません。</p>` : ""}
+    ${prompt ? html`<label>${prompt === "duplicate" ? t("複製の名前") : t("移動先の既存フォルダー")}<input name="operation-destination" autocomplete="off" value="${esc(prompt === "duplicate" ? state.items[0].name : state.destination)}" /></label>` : ""}
+    ${remote && action === "copy" ? html`<p class="subtle">リモートコピーはクライアント経由のSFTP転送です。</p>` : ""}
     <div class="operation-results" aria-live="polite"></div>
     <div class="actions">
       <button id="file-operation-cancel">キャンセル</button
@@ -441,6 +456,7 @@ function showOperation(
   };
   overlay.querySelector<HTMLElement>("input,button")?.focus();
   confirm.onclick = async () => {
+    if (stateRun.running) return;
     if (!state.host.valid()) {
       results.textContent = t(
         "表示先や接続先が変わりました。閉じてから対象を選び直してください",
@@ -448,6 +464,15 @@ function showOperation(
       confirm.disabled = true;
       return;
     }
+    let destination = state.destination, duplicateTarget: string | undefined;
+    try {
+      const input=overlay.querySelector<HTMLInputElement>("[name=operation-destination]");
+      if(prompt === "duplicate") duplicateTarget=createTargetPath(state.side, parentPath(state.side, state.items[0].path), input!.value);
+      if(prompt === "move") {
+        destination=input!.value;
+        if ((remote ? !destination.startsWith("/") : !/^[A-Za-z]:[\\/]/.test(destination)) || destination.split(/[\\/]/).some(p=>p === "." || p === "..") || /[\x00-\x1f]/.test(destination)) throw Error(t("移動先には既存の絶対フォルダーパスを指定してください。"));
+      }
+    } catch(error) { results.textContent=tError(error); return; }
     stateRun.running = true;
     cancel.disabled = true;
     confirm.disabled = true;
@@ -460,6 +485,9 @@ function showOperation(
       field.value = "";
       field.disabled = true;
     }
+    results.textContent=t("処理中です。");
+    const feedback=operationFeedback(label, results, cancel);
+    overlay.remove();
     const statuses = state.items.map((item) => ({
       item,
       status: "待機中",
@@ -480,7 +508,7 @@ function showOperation(
     let refreshError = "";
     try {
       for (const status of statuses) {
-        if (stateRun.cancelled) {
+        if (stateRun.cancelled || !state.host.operationValid()) {
           status.status = "未実行";
           draw();
           continue;
@@ -489,9 +517,12 @@ function showOperation(
         stateRun.current = crypto.randomUUID();
         draw();
         try {
-          cancel.disabled = true;
           await invoke("prepare_file_operation", { id: stateRun.current });
           cancel.disabled = false;
+          if(stateRun.cancelled || !state.host.operationValid()) {
+            await invoke("cancel_file_operation", {id: stateRun.current, abandon:true});
+            throw Error(t("接続が変わったか、中止が要求されました。"));
+          }
           const outcome = await invoke("run_file_operation", {
             request: {
               id: stateRun.current,
@@ -501,7 +532,7 @@ function showOperation(
               destination:
                 action === "delete"
                   ? undefined
-                  : childPath(state.side, state.destination, status.item.name),
+                  : duplicateTarget ?? childPath(state.side, destination, status.item.name),
               profile: remote ? state.profile : undefined,
               sessionId: remote ? state.host.sessionId : undefined,
               passphrase,
@@ -522,12 +553,17 @@ function showOperation(
         clipboard.items = clipboard.items.filter((i) => !moved.has(i.path));
         if (!clipboard.items.length) clipboard = undefined;
       }
-      if (state.host.valid())
-        await state.host
+      await state.host
           .changed(state.side, passphrase, {
             action,
+            affectedDirectories: Object.freeze([...new Set([...state.items.map(i=>parentPath(state.side,i.path)), ...(action === "delete" ? [] : [duplicateTarget ? parentPath(state.side,duplicateTarget) : destination])])]),
+            removedDirectories: Object.freeze(action === "delete" || action === "move"
+              ? statuses.filter(s=>s.item.dir && (s.status === "完了" || s.status === "失敗")).map(s=>s.item.path)
+              : []),
+            uncertain: statuses.some(s=>s.status === "失敗"),
+            partial: statuses.some(s=>s.status === "完了") && statuses.some(s=>s.status !== "完了"),
             paths: statuses
-              .filter((s) => s.status === "完了")
+              .filter((s) => s.status === "完了" || s.status === "失敗")
               .map((s) => s.item.path),
           })
           .catch((error) => {
@@ -536,15 +572,18 @@ function showOperation(
     } finally {
       passphrase = "";
       stateRun.running = false;
+      if(operation === stateRun) operation=undefined;
+      feedback.finish(!stateRun.cancelled && !refreshError && statuses.every(s => s.status === "完了"));
       cancel.disabled = false;
       cancel.textContent = t("閉じる");
-      cancel.onclick = close;
+      cancel.onclick = () => { feedback.remove(); };
       draw();
       if (refreshError) {
         const p = document.createElement("p");
         p.textContent = refreshError;
         results.append(p);
       }
+      if(statuses.some(s=>s.status === "失敗")) { const warning=document.createElement("p");warning.textContent=t("結果が不明な項目があります。再実行前に対象と保存先を確認してください。");results.append(warning); }
       if (stateRun.cancelled) {
         const p = document.createElement("p");
         p.className = "warning";
@@ -604,12 +643,12 @@ export function createTargetPath(
   return childPath(side, parent, name);
 }
 function showCreation(state: Snapshot, action: "createfile" | "mkdir") {
-  if (operation) return;
+  if (operation || operationBusy()) return;
   closeMenu();
   const remote = state.side === "remote",
     allowed = native && (!remote || state.profile?.mode === "sftp");
   const overlay = document.createElement("div");
-  overlay.className = "overlay";
+  overlay.className = "overlay operation-overlay";
   const label = () =>
     t(action === "mkdir" ? "新しいフォルダー" : "新しいファイル");
   const endpoint =
@@ -730,13 +769,18 @@ function showCreation(state: Snapshot, action: "createfile" | "mkdir") {
     cancel.disabled = true;
     run.running = true;
     run.current = crypto.randomUUID();
+    results.textContent=t("処理中です。");
+    const feedback=operationFeedback(label(), results, cancel);
+    overlay.remove();
     let dispatched = false,
-      created = false;
+      created = false, refreshFailed = false;
     try {
       await invoke("prepare_file_operation", { id: run.current });
       cancel.disabled = false;
-      if (!state.host.valid())
-        await invoke("cancel_file_operation", { id: run.current });
+      if (run.cancelled || !state.host.operationValid()) {
+        await invoke("cancel_file_operation", { id: run.current, abandon:true });
+        throw Error(t("接続が変わったか、中止が要求されました。"));
+      }
       dispatched = true;
       await invoke("run_file_operation", {
         request: {
@@ -757,22 +801,28 @@ function showCreation(state: Snapshot, action: "createfile" | "mkdir") {
       results.textContent = tError(e);
     } finally {
       run.current = undefined;
-      if (dispatched && state.host.valid())
+      if (dispatched)
         try {
           await state.host.changed(state.side, passphrase, {
             action,
             paths: [target],
             parent: state.createParent,
+            affectedDirectories: Object.freeze([state.createParent]),
+            uncertain: !created,
             created,
           });
         } catch (e) {
+          refreshFailed = true;
           results.textContent += " " + t("一覧の再読込に失敗: ") + tError(e);
         }
       passphrase = "";
       run.running = false;
+      if(operation === run) operation=undefined;
+      feedback.finish(created && !run.cancelled && !refreshFailed);
       cancel.disabled = false;
       cancel.textContent = t("閉じる");
-      cancel.onclick = close;
+      cancel.onclick = () => { feedback.remove(); };
+      if (!created && dispatched) results.textContent += " " + t("結果が不明な項目があります。再実行前に対象と保存先を確認してください。");
       if (run.cancelled)
         results.textContent +=
           " " +
@@ -783,6 +833,10 @@ function showCreation(state: Snapshot, action: "createfile" | "mkdir") {
   };
 }
 
+function parentPath(side: Side, source: string): string {
+ if(side === "remote") return source.slice(0,source.lastIndexOf("/")) || "/";
+ return archiveParent(source) ?? source;
+}
 function archiveParent(source: string): string | undefined {
   const trimmed = source.replace(/[\\/]$/, ""),
     split = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
@@ -793,7 +847,7 @@ function archiveAllowed(state: Snapshot) {
   const allowed = archiveEligibility(
     state.side,
     state.items.map((item) => ({ ...item, size: 0 })),
-    native && state.profile?.mode === "sftp",
+    native,
   );
   if (!state.items[0] || !archiveParent(state.items[0].path))
     return { compress: false, extract: false };
@@ -805,7 +859,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
   const item = state.items[0],
     parent = archiveParent(item.path)!;
   const overlay = document.createElement("div");
-  overlay.className = "overlay";
+  overlay.className = "overlay operation-overlay";
   const label = t(action === "compress" ? "ZIPに圧縮" : "ZIPを展開");
   overlay.innerHTML = html`<section
     class="dialog operation-dialog archive-dialog"
@@ -815,7 +869,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
   >
     <h2 id="archive-title">${esc(label)}</h2>
     <p class="operation-endpoint">ローカル</p>
-    <div class="target"><small>対象</small><code>${esc(item.path)}</code></div>
+    <div class="target"><small>対象</small><code>${esc(state.items.map(item=>item.path).join("\n"))}</code></div>
     <div class="target">
       <small>保存先のフォルダー</small><code>${esc(parent)}</code>
     </div>
@@ -912,14 +966,19 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
     cancel.disabled = true;
     confirm.disabled = true;
     field.disabled = true;
+    results.textContent=t("処理中です。");
+    const feedback=operationFeedback(label, results, cancel);
+    overlay.remove();
     let dispatched = false,
       created = false,
-      finalPath = target;
+      finalPath = target, refreshFailed = false;
     try {
       await invoke("prepare_file_operation", { id: run.current });
       cancel.disabled = false;
-      if (!state.host.valid())
-        await invoke("cancel_file_operation", { id: run.current });
+      if (run.cancelled || !state.host.operationValid()) {
+        await invoke("cancel_file_operation", { id: run.current, abandon:true });
+        throw Error(t("接続が変わったか、中止が要求されました。"));
+      }
       dispatched = true;
       const outcome = await invoke("run_local_archive", {
         request: {
@@ -927,6 +986,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
           action,
           side: "local",
           source: item.path,
+          sources: action === "compress" ? state.items.map(i=>i.path) : undefined,
           destination: target,
         },
       });
@@ -937,21 +997,26 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
       results.textContent = formatArchiveError(error);
     } finally {
       run.current = undefined;
-      if (dispatched && state.host.valid())
+      if (dispatched)
         try {
           await state.host.changed("local", "", {
             action: action === "compress" ? "createfile" : "mkdir",
             paths: [finalPath],
             parent,
+            affectedDirectories: Object.freeze([parent]),
+            uncertain: !created,
             created,
           });
         } catch (e) {
+          refreshFailed = true;
           results.textContent += " " + t("一覧の再読込に失敗: ") + tError(e);
         }
       run.running = false;
+      if(operation === run) operation=undefined;
+      feedback.finish(created && !run.cancelled && !refreshFailed);
       cancel.disabled = false;
       cancel.textContent = t("閉じる");
-      cancel.onclick = close;
+      cancel.onclick = () => { feedback.remove(); };
       if (run.cancelled)
         results.textContent +=
           " " +
@@ -1038,7 +1103,7 @@ export function bindFileActions(host: ActionHost) {
         );
       };
       button.addEventListener("keydown", (e) => {
-        if (operation) return;
+        if (operation || operationBusy()) return;
         const control = e.ctrlKey || e.metaKey,
           key = e.key.toLowerCase(),
           side = button.dataset.treeSelect as Side,

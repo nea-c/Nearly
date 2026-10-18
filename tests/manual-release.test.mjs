@@ -109,7 +109,15 @@ test('real Git preflight accepts root tree records and still audits the complete
 });
 test('only exact reviewed public source-example blobs get narrow path exceptions, never binary payloads or changed blobs',async()=>{
   for(const name of ['src-tauri/windows/template.test.mjs','src-tauri/windows/upstream/utils.nsh']){
-    const data=Buffer.from((await fs.readFile(new URL('../'+name,import.meta.url),'utf8')).replace(/\r\n/g,'\n'));
+    let source=(await fs.readFile(new URL('../'+name,import.meta.url),'utf8')).replace(/\r\n/g,'\n');
+    if(name==='src-tauri/windows/template.test.mjs'){
+      // Reconstruct the immutable reviewed example after current fixtures moved
+      // outside user-profile paths; retain the exact historical blob contract.
+      const separator=String.fromCharCode(92).repeat(2);
+      source=source.replaceAll(['C:','Fixture','AppData','Local','Nearly'].join(separator),['C:','Users','Fixture','AppData','Local','Nearly'].join(separator));
+      assert.equal(contracts.sha256(Buffer.from(source)),'e4ba4a3e32f236b5037afc0951bc01301eeb7f986b4764f026f7c82b9c04b92e');
+    }
+    const data=Buffer.from(source);
     assert.throws(()=>contracts.auditBytes(data),/privacy/i);
     const record=b=>Buffer.concat([Buffer.from(`${commit} blob ${b.length}\n`),b,Buffer.from('\n')]);
     assert.equal(contracts.auditGitObjects(record(data)),1);

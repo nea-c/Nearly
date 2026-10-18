@@ -176,7 +176,7 @@ test(
 async function personalSettingsFixture(root) {
   const output = path.join(root, "build");
   await fs.mkdir(output, { recursive: true });
-  const names = ["settings.json", "settings.backup.json"];
+  const names = ["settings", "history", "bookmarks", "sync-profiles", "connections"].flatMap(name=>[name+".json",name+".backup.json"]);
   const originals = new Map();
   for (const name of names) {
     const file = path.join(output, name);

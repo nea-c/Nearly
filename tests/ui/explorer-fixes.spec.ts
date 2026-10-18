@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from '@playwright/test';
 
 test.beforeEach(async ({ page }) => {
@@ -10,6 +11,7 @@ test.beforeEach(async ({ page }) => {
       if(cmd==='default_folder') return 'C:\\root';
       if(cmd==='list_drives') return [{path:'C:\\',name:'C:'},{path:'D:\\',name:'D:'}];
       if(cmd==='connect_session') return {path:'/',entries};
+      if(cmd==='list_local'&&args.path==='C:\\')return [{name:'root',dir:true,size:0},...entries.slice(1)];
       if(cmd==='list_local'||cmd==='list_remote') return args.path.endsWith('empty')?[]:entries;
     }}};
   });
@@ -25,6 +27,7 @@ test('absolute drive roots open through path Enter and PC tree; drive-relative i
     await expect(page.locator('[data-pane=local]')).toHaveAttribute('aria-busy','false');
     await expect(page.locator('[data-up=local]')).toBeDisabled();
     await expect(page.locator('[data-list=local] [data-entry]')).toHaveCount(51);
+    await expandTreePath(page,'local','@pc');
     const button=page.locator('[data-tree-select=local]').filter({hasText:drive+':' }).first();
     await button.click();
     await expect(page.locator('#local-path')).toHaveValue(drive+':\\');
@@ -39,6 +42,7 @@ test('absolute drive roots open through path Enter and PC tree; drive-relative i
 for(const side of ['local','remote']) test(`${side} empty folder can repeatedly collapse and expand without re-fetch`,async({page})=>{
   const path=side==='local'?'C:\\root\\empty':'/empty';
   const toggle=page.locator(`[data-tree-toggle=${side}]`).filter({has:page.locator('svg')}).and(page.locator(`[data-tree-path="${path.replaceAll('\\','\\\\')}"]`));
+  await expandTreePath(page,side,side==='local'?'C:\\root':'/');
   // Expand the lazy child, then exercise the now-known empty state.
   await toggle.click();
   await expect(toggle).toBeEnabled();

@@ -75,22 +75,22 @@ for(const theme of ['light','dark'])test(`deep menus stay inside narrow ${theme}
   await expect(menu(page,'top')).toHaveCount(0);await expect(menu(page,'left')).toHaveCount(0);
 });
 
-test('ellipsis uses the same root actions as blank-bar context with registration and history reachable',async({page})=>{
+test('keyboard and blank-bar context keep registration and history reachable without tools',async({page})=>{
   await fixture(page);
   await expect(page.locator('#bookmark-add,#pair-history')).toHaveCount(0);
-  await expect(page.locator('#bookmark-more')).toBeVisible();
-  await expect(page.locator('#bookmark-more')).toHaveAttribute('aria-haspopup','menu');
-  await page.locator('#bookmark-more').click();await expect(page.locator('#bookmark-tree-context')).toBeVisible();
-  await page.locator('#bookmark-more').click();await expect(page.locator('#bookmark-tree-context')).toHaveCount(0);
-  await page.locator('#bookmark-more').click();
+  await expect(page.locator('#bookmark-tools')).toHaveCount(0);
+  await expect(page.locator('.bookmark-bar')).toHaveAttribute('aria-haspopup','menu');
+  await page.locator('.bookmark-bar').click({button:'right',position:{x:2,y:2}});await expect(page.locator('#bookmark-tree-context')).toBeVisible();
+  await page.keyboard.press('Escape');await expect(page.locator('#bookmark-tree-context')).toHaveCount(0);
+  await page.locator('.bookmark-bar').click({button:'right',position:{x:2,y:2}});
   const actions=await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.map(e=>[e.getAttribute('data-bookmark-action'),e.textContent.trim()]));
   expect(actions.map(a=>a[0])).toEqual(['register','create','history']);
   await page.keyboard.press('Escape');
-  const strip=page.locator('.bookmark-items'),b=await strip.boundingBox();
+  const strip=page.locator('.bookmark-bar .bookmark-items'),b=await strip.boundingBox();
   await strip.click({button:'right',position:{x:b.width-3,y:b.height/2}});
   expect(await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.map(e=>[e.getAttribute('data-bookmark-action'),e.textContent.trim()]))).toEqual(actions);
   await page.locator('[data-bookmark-action=register]').click();await expect(page.locator('#bookmark-form')).toBeVisible();await page.locator('#bookmark-close').click();
-  await page.locator('#bookmark-more').click();await page.locator('[data-bookmark-action=history]').click();await expect(page.locator('.pair-history-list')).toBeVisible();
+  await page.locator('.bookmark-bar').click({button:'right',position:{x:2,y:2}});await page.locator('[data-bookmark-action=history]').click();await expect(page.locator('.pair-history-list')).toBeVisible();
 });
 
 test('leaving a folder row for padding before hover delay cannot open that stale child',async({page})=>{
@@ -115,3 +115,5 @@ test('keyboard navigation cancels a pending mouse hover without overriding the c
   await expect(page.locator('[data-bookmark-group=right]')).toBeFocused();
   await page.keyboard.press('ArrowRight');await expect(menu(page,'right')).toBeVisible();
 });
+
+

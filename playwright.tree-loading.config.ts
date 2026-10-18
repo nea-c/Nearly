@@ -1,0 +1,2 @@
+import {defineConfig} from '@playwright/test';
+export default defineConfig({testDir:'./tests/ui',testMatch:['tree-loading-silent.spec.ts','tree-selection-v3.spec.ts','post-r1-tree-layout.spec.ts'],outputDir:'test-results/tree-loading',workers:1,timeout:30000,use:{baseURL:'http://127.0.0.1:1477',channel:'msedge',viewport:{width:1280,height:920}},webServer:{command:'node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1477 --strictPort',url:'http://127.0.0.1:1477',reuseExistingServer:false,env:{NEARLY_ENABLE_MOCK:'1'}},reporter:'list'});

@@ -22,6 +22,11 @@ impl Fixture {
         )
         .unwrap();
         fs::write(root.join("sentinel.txt"), b"unrelated sentinel").unwrap();
+        for name in crate::split_settings::NAMES {
+            for path in [root.join(name),root.join(name).with_extension("backup.json")] {
+                fs::write(&path,format!("generated preserved storage sentinel {}",path.file_name().unwrap().to_string_lossy())).unwrap();
+            }
+        }
         Self { root }
     }
     fn context(&self) -> NativeContext {
@@ -65,6 +70,11 @@ impl Fixture {
         windows_impl::fixture_record(context, binding).unwrap()
     }
     fn sentinels_unchanged(&self) {
+        for name in crate::split_settings::NAMES {
+            for path in [self.root.join(name),self.root.join(name).with_extension("backup.json")] {
+                assert_eq!(fs::read(&path).unwrap(),format!("generated preserved storage sentinel {}",path.file_name().unwrap().to_string_lossy()).as_bytes());
+            }
+        }
         assert_eq!(
             fs::read(self.root.join("Nearly_r1.0_x64-setup.exe")).unwrap(),
             b"manual setup sentinel"
@@ -445,12 +455,12 @@ fn authenticated_later_update_reuses_only_own_cleaned_record_and_retains_backups
 
 #[test]
 fn real_native_lock_exhaustion_retains_exact_installer_backup_and_settings(){
- let fixture=Fixture::new();let context=fixture.context();let record=fixture.record(&context);let path=fixture.root.join(&record.receipt.binding.installer.basename);let backup=fixture.root.join(&record.old_image.basename);let settings=fixture.root.join("settings.json");fs::write(&settings,b"settings sentinel").unwrap();
+ let fixture=Fixture::new();let context=fixture.context();let record=fixture.record(&context);let path=fixture.root.join(&record.receipt.binding.installer.basename);let backup=fixture.root.join(&record.old_image.basename);let settings=fixture.root.join("settings.json");let settings_before=fs::read(&settings).unwrap();
  let(mut store,mut life,mut authority)=pending(&context,record);let locked=fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();let mut files=NativeFiles::new(&context);
  assert_eq!(life.cleanup(0,&mut authority,&mut store,&mut files),Ok(engine::Outcome::Deferred{until_ms:100}));
  assert_eq!(life.cleanup(100,&mut authority,&mut store,&mut files),Ok(engine::Outcome::Deferred{until_ms:300}));
  assert_eq!(life.cleanup(300,&mut authority,&mut store,&mut files),Ok(engine::Outcome::RetryExhausted));
- assert_eq!(life.receipt().attempts,3);assert!(path.exists());assert_eq!(fs::read(backup).unwrap(),b"original fixture Nearly image");assert_eq!(fs::read(settings).unwrap(),b"settings sentinel");drop(locked);fixture.sentinels_unchanged();
+ assert_eq!(life.receipt().attempts,3);assert!(path.exists());assert_eq!(fs::read(backup).unwrap(),b"original fixture Nearly image");assert_eq!(fs::read(settings).unwrap(),settings_before);drop(locked);fixture.sentinels_unchanged();
 }
 #[test]
 fn authenticated_signature_never_substitutes_for_the_running_image(){

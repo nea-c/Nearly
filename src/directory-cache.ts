@@ -9,6 +9,16 @@ export class DirectoryCache<T> {
     this.epoch++;
     this.values.clear(); this.pending.clear(); this.count = 0;
   }
+  invalidatePath(path: string) {
+    // Remove pending identity too so an older response cannot repopulate this key.
+    const old=this.values.get(path);if(old)this.count-=old.entries.length;
+    this.values.delete(path);this.pending.delete(path);
+  }
+  /** Evict matching saved and pending keys without disturbing unrelated reads. */
+  invalidateMatching(matches: (path: string) => boolean) {
+    for (const path of new Set([...this.values.keys(), ...this.pending.keys()]))
+      if (matches(path)) this.invalidatePath(path);
+  }
   seed(path: string, entries: T[]) {
     const old = this.values.get(path);
     if (old) { this.count -= old.entries.length; this.values.delete(path); }
@@ -34,7 +44,7 @@ export class DirectoryCache<T> {
     this.pending.set(path, request);
     try {
       const entries = await request;
-      if (epoch === this.epoch && current()) this.seed(path, entries);
+      if (epoch === this.epoch && this.pending.get(path) === request && current()) this.seed(path, entries);
       return [...entries];
     } finally {
       if (this.pending.get(path) === request) this.pending.delete(path);

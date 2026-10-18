@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from "@playwright/test";
 async function go(page, side, path) {
   const input = page.locator("#" + side + "-path");
@@ -171,6 +172,7 @@ test("failed and stale reads never commit path or history; refresh ignores draft
   await expect(page.locator("#remote-path")).toHaveValue("/fast");
   await page.locator("[data-back=remote]").click();
   await expect(page.locator("#remote-path")).toHaveValue("/a");
+  await expandTreePath(page,'remote','/');
   await page.evaluate(() => (window.revision = 1));
   await page.locator("#remote-path").fill("/uncommitted");
   const before = await page.evaluate(() => window.reads.length);

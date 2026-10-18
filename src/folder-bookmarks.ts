@@ -1,3 +1,4 @@
+import {overflowIcon} from './bookmark-overflow.js';
 import { t, html, tError } from "./i18n.js";
 import {
   connectionKey,
@@ -24,6 +25,7 @@ const esc = (value: unknown) =>
 const pairText = (pair: Pair) => `${pair.local} ↔ ${pair.remote}`;
 let overlay: HTMLElement | undefined;
 let owner = "";
+let overlayReturn:HTMLElement|undefined;
 let mutationPending = false;
 let stripScroll = 0;
 export function closeBookmarks() {
@@ -40,6 +42,7 @@ document.addEventListener("keydown", (event) => {
   if (overlay && event.key === "Escape") {
     event.preventDefault();
     closeBookmarks();
+    if(overlayReturn?.isConnected)overlayReturn.focus();
   }
 });
 export function bookmarkBar(store: Store, w: Workspace) {
@@ -49,7 +52,7 @@ export function bookmarkBar(store: Store, w: Workspace) {
     store.folderBookmarks,
     connectionKey(w.connection!),
   );
-  return html`<nav class="bookmark-bar" aria-label="この接続先のフォルダ組み合わせ"><div class="bookmark-items">${items || html`<span class="bookmark-empty">フォルダの組み合わせを登録</span>`}</div>${store.bookmarkTreeWarning ? html`<span class="bookmark-tree-warning" title="${esc(t(store.bookmarkTreeWarning))}" role="status">分類を確認</span>` : ""}<button type="button" id="bookmark-more" aria-expanded="false" aria-label="ブックマークメニュー" aria-haspopup="menu" title="ブックマークメニュー"><svg class="bookmark-more-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg></button></nav>`;
+  return html`<nav id="paired-bookmarks" class="bookmark-bar" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-label="この接続先のフォルダ組み合わせ"><div class="bookmark-items">${items || html`<span class="bookmark-empty">フォルダの組み合わせを登録</span>`}</div>${store.bookmarkTreeWarning ? html`<span class="bookmark-tree-warning" title="${esc(t(store.bookmarkTreeWarning))}" role="status">分類を確認</span>` : ""}<button type="button" id="bookmark-more" data-bookmark-overflow hidden aria-expanded="false" aria-label="ブックマークメニュー" aria-haspopup="menu" title="ブックマークメニュー">${overflowIcon}</button></nav>`;
 }
 export function bindBookmarks(
   store: Store,
@@ -67,6 +70,7 @@ export function bindBookmarks(
   const profile = w.connection,
     key = connectionKey(profile);
   const ownerKey = JSON.stringify([w.id, key]);
+  const owned=()=>store.workspaces.includes(w)&&w.connection===profile&&connectionKey(profile)===key;
   if (owner && owner !== ownerKey) closeBookmarks();
   const strip = document.querySelector<HTMLElement>(".bookmark-items");
   if (strip) {
@@ -79,6 +83,10 @@ export function bindBookmarks(
     bookmark?: FolderBookmark,
     parentId?: string | null,
   ) => {
+    if(!owned())return;
+    const focused=document.activeElement as HTMLElement;
+    const focusReturn=focused?.isConnected&&focused!==document.body?focused:document.querySelector<HTMLElement>('.bookmark-bar');
+    overlayReturn=focusReturn??undefined;
     closeBookmarkTree();
     closeBookmarks();
     owner = ownerKey;
@@ -90,13 +98,13 @@ export function bindBookmarks(
     document.body.append(overlay);
     const view = overlay;
     const closeOwned = () => {
-      if (overlay === view) closeBookmarks();
+      if (overlay === view) {closeBookmarks();if(owned()&&focusReturn?.isConnected)focusReturn.focus();}
     };
     const root = overlay.firstElementChild as HTMLElement;
     const frame = (title: string, content: string) => {
       root.innerHTML = html`<header class="bookmark-dialog-heading"><h2 id="bookmark-title">${title}</h2><button id="bookmark-close" aria-label="閉じる">×</button></header>${content}<p class="form-error" role="alert"></p>`;
       root.querySelector<HTMLElement>("#bookmark-close")!.onclick =
-        closeBookmarks;
+        closeOwned;
     };
     const error = (e: unknown) => {
       root.querySelector<HTMLElement>(".form-error")!.textContent = tError(e);
@@ -106,7 +114,7 @@ export function bindBookmarks(
         existing ? t("ブックマークを編集") : t("フォルダの組み合わせを登録"),
         html`<form id="bookmark-form"><label>名前<input id="bookmark-name" name="name" maxlength="100" required value="${esc(existing?.name ?? "")}" placeholder="例：Webサイト"></label><div class="bookmark-paths"><span>ローカル</span><code title="${esc(pair.local)}">${esc(pair.local)}</code><span>リモート</span><code title="${esc(pair.remote)}">${esc(pair.remote)}</code></div><p class="subtle">この接続先の閲覧位置として保存します。同期先は変更しません。</p><div class="actions">${existing ? html`<button type="button" id="bookmark-delete">削除</button>` : ""}<button type="button" id="bookmark-cancel">戻る</button><button id="bookmark-save" class="primary">保存</button></div></form>`,
       );
-      root.querySelector<HTMLElement>("#bookmark-cancel")!.onclick = history;
+      root.querySelector<HTMLElement>("#bookmark-cancel")!.onclick = closeOwned;
       const form = root.querySelector<HTMLFormElement>("form")!;
       form.onsubmit = async (event) => {
         event.preventDefault();
@@ -135,8 +143,11 @@ export function bindBookmarks(
           });
           // Repaint only after persistence has settled and mutations are available again.
           mutationPending = false;
+          // A newer paired dialog in this same owner survives render, but its bar
+          // must still reflect acknowledged data. Foreign owners never repaint.
+          const repaint=owner===ownerKey&&owned();
           closeOwned();
-          render();
+          if(repaint)render();
         } catch (e) {
           error(e);
         } finally {
@@ -165,8 +176,9 @@ export function bindBookmarks(
               deleteBookmarkMetadata(candidate, key, existing!.id),
             );
             mutationPending = false;
+            const repaint=owner===ownerKey&&owned();
             closeOwned();
-            render();
+            if(repaint)render();
           } catch (e) {
             error(e);
           } finally {
@@ -272,7 +284,7 @@ export function bindBookmarks(
         } finally {
           mutationPending = false;
         }
-        render();
+        if(bar.isConnected&&owned())render();
       },
     });
 }

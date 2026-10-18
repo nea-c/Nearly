@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import {test,expect} from '@playwright/test';
 test.afterEach(async({page},info)=>{if(info.status!==info.expectedStatus)await info.attach('refresh-fixture-failure',{body:JSON.stringify(await page.evaluate(()=>({boots:sessionStorage.getItem('refresh-boot'),watch:window.refreshFixture?.watch,calls:window.refreshFixture?.calls.slice(-60),connected:!document.querySelector('#connect-form')})).catch(()=>null),null,2),contentType:'application/json'});});
 async function boot(page){
@@ -5,7 +6,7 @@ async function boot(page){
   sessionStorage.setItem('refresh-boot',String(Number(sessionStorage.getItem('refresh-boot')??0)+1));
   const entries=()=>[{name:'folder',dir:true,size:0},...Array.from({length:70},(_,i)=>({name:`file${String(i).padStart(2,'0')}.txt`,dir:false,size:i+1}))];
   const profile={id:'refresh',name:'Refresh fixture',host:'fixture.invalid',port:22,user:'fixture',auth:'key',mode:'sftp',keyFile:'generated.ppk',hostKey:'SHA256:fixture'};
-  window.refreshFixture={calls:[],local:{'C:\\root':entries(),'C:\\root\\folder':[{name:'new-path.txt',dir:false,size:1}],'C:\\':[]},remote:{'/':entries(),'/folder':[]},watch:undefined,holdLocal:false,releaseLocal:undefined,journal:{revision:0,records:[],truncated:false},sent:0};
+  window.refreshFixture={calls:[],local:{'C:\\root':entries(),'C:\\root\\folder':[{name:'new-path.txt',dir:false,size:1}],'C:\\':[{name:'root',dir:true,size:0}]},remote:{'/':entries(),'/folder':[]},watch:undefined,holdLocal:false,releaseLocal:undefined,journal:{revision:0,records:[],truncated:false},sent:0};
   window.__TAURI__={core:{invoke:async(cmd,args={})=>{
    const f=window.refreshFixture;f.calls.push({cmd,args});
    if(cmd==='load_settings')return{version:1,settingsRevision:0,language:'en',profiles:[profile],history:{}};
@@ -55,7 +56,8 @@ test('external local changes refresh create edit delete rename without explicit 
 test('quiet watcher polling does no scans and a burst preserves DOM selection focus scroll and tree expansion',async({page})=>{
  await boot(page);await expect.poll(()=>page.evaluate(()=>!!window.refreshFixture.watch)).toBe(true);
  await page.waitForTimeout(1200);const initial=await countReads(page);await page.waitForTimeout(1800);expect(await countReads(page)).toBe(initial);
- await treeToggle(page,'C:\\root\\folder').click();
+ await expandTreePath(page,'local','C:\\root');
+  await treeToggle(page,'C:\\root\\folder').click();
  await row(page,'file30.txt').scrollIntoViewIfNeeded();await row(page,'file30.txt').click();await row(page,'file30.txt').focus();
  const captured=await page.evaluate(()=>{
   window.refreshNodes={app:document.querySelector('#app'),pane:document.querySelector('[data-pane=local]'),list:document.querySelector('[data-list=local]'),path:document.querySelector('#local-path')};
@@ -137,7 +139,8 @@ test('watcher failure reports once without scans and pagehide releases its exact
 
 test('a committed directory parent refreshes an expanded remote tree without navigating the list',async({page})=>{
  await boot(page);await startFixtureSync(page);
- await page.locator('[data-tree-toggle=remote][data-tree-path="/folder"]').click();
+ await expandTreePath(page,'remote','/');
+  await page.locator('[data-tree-toggle=remote][data-tree-path="/folder"]').click();
  await expect(page.locator('[data-tree-select=remote][data-tree-path="/folder"]')).toBeAttached();
  await page.waitForTimeout(250);
  await page.evaluate(()=>{window.refreshTreeRoot=document.querySelector('[data-pane=remote]');window.refreshTreeList=document.querySelector('[data-list=remote]');window.refreshFixture.remote['/folder']=[{name:'new-child',dir:true,size:0}];window.refreshFixture.journal={revision:1,records:[{revision:1,path:'/folder'}],truncated:false};});
@@ -148,7 +151,8 @@ test('a committed directory parent refreshes an expanded remote tree without nav
 
 test('automatic patch restores the exact focused parent row or tree control kind',async({page})=>{
  await boot(page);await expect.poll(()=>page.evaluate(()=>!!window.refreshFixture.watch)).toBe(true);await page.waitForTimeout(1000);
- const controls=[page.locator('[data-parent-row=local]'),treeToggle(page,'C:\\root\\folder'),page.locator(`[data-tree-select=local][data-tree-path=${JSON.stringify('C:\\root\\folder')}]`)];
+ await expandTreePath(page,'local','C:\\root');
+  const controls=[page.locator('[data-parent-row=local]'),treeToggle(page,'C:\\root\\folder'),page.locator(`[data-tree-select=local][data-tree-path=${JSON.stringify('C:\\root\\folder')}]`)];
  for(let index=0;index<controls.length;index++){
   await controls[index].focus();
   await page.evaluate(index=>{window.refreshFixture.local['C:\\root'].push({name:`focus-refresh-${index}.txt`,dir:false,size:1});window.refreshFixture.watch.revision++;},index);

@@ -205,24 +205,8 @@ test("right menu is visibility only, metadata remote-only and name mandatory eve
       '[data-list="remote"] [data-name="file10.txt"] [data-cell="owner"]',
     ),
   ).toHaveText("1001:1001");
-  await page.evaluate(() => {
-    const pane = document.querySelector('[data-list="local"]'),
-      from = pane.querySelector('[data-column-sort="name"]'),
-      to = pane.querySelector('th[data-column="size"]'),
-      bounds = to.getBoundingClientRect(),
-      dataTransfer = new DataTransfer();
-    from.dispatchEvent(
-      new DragEvent("dragstart", { bubbles: true, dataTransfer }),
-    );
-    to.dispatchEvent(
-      new DragEvent("drop", {
-        bubbles: true,
-        cancelable: true,
-        dataTransfer,
-        clientX: bounds.right - 2,
-      }),
-    );
-  });
+  const from=await header(page,'local','name').boundingBox(),to=await page.locator('[data-list="local"] th[data-column="size"]').boundingBox();
+  await page.mouse.move(from.x+10,from.y+from.height/2);await page.mouse.down();await page.mouse.move(to.x+to.width-3,to.y+to.height/2,{steps:8});await page.mouse.up();
   await expect(page.locator('[data-list="local"] th').first()).toHaveAttribute(
     "data-column",
     "size",

@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, beforeRename, posixRename = true} = {}) {
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -143,7 +143,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     // VERSION-frame adapter is test-only; the real client never depends on it.
     const channelData = client._protocol.channelData.bind(client._protocol);
     client._protocol.channelData = (channel, data) => {
-      if (data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
+      if (posixRename && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
         const version = Buffer.concat([
           data,
           sshString("posix-rename@openssh.com"),
@@ -287,8 +287,12 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               stream.status(id, FAILURE);
             }
           });
-          stream.on("WRITE", (id, h, offset, data) => {
+          stream.on("WRITE", async (id, h, offset, data) => {
             writeRequests++;
+            const entry=handles.get(h.toString("hex"));
+            const target=entry?.p ? '/'+path.relative(remote,entry.p).split(path.sep).join('/') : '';
+            const injected=await beforeWrite?.(target,offset,data);
+            if (typeof injected==='number') {stream.status(id,injected);return;}
             try {
               fs.writeSync(
                 handles.get(h.toString("hex")).fd,
@@ -348,6 +352,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           });
           stream.on("RENAME", (id, a, b) => {
             try {
+              beforeRename?.(a,b,false);
               if (fs.existsSync(local(b))) throw Object.assign(Error("destination exists"), {code:"EEXIST"});
               fs.renameSync(local(a), local(b));
               status(id);
@@ -393,6 +398,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
                 target = read();
               if (offset !== data.length)
                 throw Error("Malformed extension payload");
+              beforeRename?.(source,target,true);
               fs.renameSync(local(source), local(target));
               status(id);
             } catch (e) {

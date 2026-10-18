@@ -27,3 +27,12 @@ test('stale owner generation cannot seed a later navigation cache',async()=>{
   await Promise.resolve();current=false;release(['old']);await stale;
   assert.deepEqual(await cache.read('/old',async()=>['fresh']),['fresh']);
 });
+
+test('subtree invalidation evicts only removed directory descendants and pending replies',async()=>{
+ const cache=new DirectoryCache();cache.seed('/folder',['old']);cache.seed('/folder/child',['child']);cache.seed('/folder-other',['keep']);let finish;const pending=cache.read('/folder/pending',()=>new Promise(r=>finish=r));await Promise.resolve();cache.invalidateMatching(p=>p==='/folder'||p.startsWith('/folder/'));finish(['late']);await pending;
+ assert.deepEqual(await cache.read('/folder',async()=>['fresh']),['fresh']);assert.deepEqual(await cache.read('/folder/child',async()=>['fresh child']),['fresh child']);assert.deepEqual(await cache.read('/folder/pending',async()=>['fresh pending']),['fresh pending']);assert.deepEqual(await cache.read('/folder-other',async()=>['wrong']),['keep']);
+});
+test('removed subtree drops obsolete children while preserving expansion and unrelated tree tokens',async()=>{
+ const {FolderTree}=await import('../.test-build/tree.js');const tree=new FolderTree('remote','/');tree.record('/',[{name:'folder',dir:true},{name:'other',dir:true}]);tree.record('/folder',[{name:'child',dir:true}]);tree.record('/folder/child',[{name:'old',dir:true}]);tree.node('/folder').expanded=true;tree.node('/folder/child').expanded=true;const stale=tree.begin('/folder/child'),unrelated=tree.begin('/other');tree.invalidateSubtree('/folder',true);
+ for(const p of ['/folder','/folder/child']){assert.equal(tree.peek(p).loaded,false);assert.deepEqual(tree.peek(p).children,[]);assert.equal(tree.peek(p).expanded,true);}assert.equal(tree.current('/folder/child',stale),false);assert.equal(tree.current('/other',unrelated),true);
+});

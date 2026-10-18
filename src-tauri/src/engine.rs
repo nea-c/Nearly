@@ -971,19 +971,22 @@ impl Engine {
     }
 
     pub fn prepare_operation(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
-        self.operation_token(id, false, false)
+        self.operation_token(id, false, false, false)
     }
     pub fn claim_operation(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
-        self.operation_token(id, true, false)
+        self.operation_token(id, true, false, false)
     }
-    pub fn claim_archive_operation(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
-        self.operation_token(id, true, true)
+    pub fn claim_prepared_upload(&self,id:&str)->Result<Arc<AtomicBool>,String>{
+        self.operation_token(id,true,true,true)
+    }    pub fn claim_archive_operation(&self, id: &str) -> Result<Arc<AtomicBool>, String> {
+        self.operation_token(id, true, true, false)
     }
     fn operation_token(
         &self,
         id: &str,
         claim: bool,
         archive: bool,
+        prepared: bool,
     ) -> Result<Arc<AtomicBool>, String> {
         if id.is_empty()
             || id.len() > 64
@@ -1013,6 +1016,7 @@ impl Engine {
             op.archive = archive;
             return Ok(op.stop.clone());
         }
+        if prepared {return Err("Upload operation must be prepared first".into());}
         if ops.len() >= 8 {
             return Err(
                 "Application closing, duplicate operation, or at most eight concurrent operations"
@@ -1083,9 +1087,12 @@ impl Engine {
             endpoints,
             destructive_local,
             None,
+            false,
         )
     }
-    pub fn reserve_archive_operation(
+    pub fn reserve_upload_operation(&self,id:&str,local:Vec<PathBuf>,remote:Vec<String>,identity:String,endpoints:Vec<std::net::SocketAddr>)->Result<(),String>{
+        self.reserve_operation_inner(id,local,remote,identity,endpoints,false,None,true)
+    }    pub fn reserve_archive_operation(
         &self,
         id: &str,
         source: PathBuf,
@@ -1100,7 +1107,12 @@ impl Engine {
             vec![],
             false,
             Some(parent),
+            false,
         )
+    }
+    pub fn reserve_archive_sources(&self,id:&str,mut sources:Vec<PathBuf>,target:PathBuf,parent:PathBuf)->Result<(),String>{
+        sources.push(target);sources.push(parent.clone());
+        self.reserve_operation_inner(id,sources,vec![],String::new(),vec![],false,Some(parent),false)
     }
     fn check_local_operations(&self, root: &Path) -> Result<(), String> {
         let ops = self
@@ -1125,6 +1137,7 @@ impl Engine {
         endpoints: Vec<std::net::SocketAddr>,
         destructive_local: bool,
         archive_parent: Option<PathBuf>,
+        upload: bool,
     ) -> Result<(), String> {
         let mut epoch = self
             .mutation_gate
@@ -1150,6 +1163,9 @@ impl Engine {
                 {
                     return Err("Archive staging overlaps a sync root; stop sync before creating archives here".into());
                 }
+            }
+            if upload && local.iter().any(|source| crate::file_ops::local_contains(source,&job.local) || crate::file_ops::local_contains(&job.local,source)) {
+                return Err("Stop overlapping local sync before uploading its sources".into());
             }
             if destructive_local
                 && local
@@ -2052,7 +2068,7 @@ mod tests {
         let future = Instant::now() + Duration::from_secs(10);
         assert_eq!(future.elapsed(), Duration::ZERO);
     }
-    fn reserved_job(local: PathBuf, remote: &str) -> Job {
+    pub(super) fn reserved_job(local: PathBuf, remote: &str) -> Job {
         Job {
             local,
             remote: remote.into(),
@@ -3254,4 +3270,9 @@ mod stop_summary_tests {
  #[test] fn native_activity_is_not_frontend_or_settings_data(){let status=Status::new();assert_eq!(status.activity.phase(),N::Scanning);let json=serde_json::to_value(status).unwrap();assert!(json.get("activity").is_none());}
  #[test] fn prepared_start_failure_and_cancel_are_truthful(){let e=Engine::default();assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.prepare("one".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.record_start_failure("one");e.discard_prepared_start("one");assert_eq!(e.taskbar_state().unwrap(),T::Error);e.prepare("two".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.stop("two").unwrap();e.record_start_failure("two");e.discard_prepared_start("two");assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.record_start_failure("unknown");assert_eq!(e.taskbar_state().unwrap(),T::Idle);}
  #[test] fn historical_failure_can_recover_but_scan_and_cancel_never_complete(){let mut s=Status::new();s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Scanning);s.activity.scan_finished();s.failure("transient",false);s.activity.settle(1,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::CaughtUp);assert_eq!(s.error_count,1);s.activity.settle(0,true,false,true,false);assert_eq!(s.activity.phase(),N::Stopping);}
+}
+#[cfg(test)] mod upload_guard_tests {
+ use super::*;
+ #[test] fn upload_requires_preparation_preserves_early_cancel_and_shutdown(){let e=Engine::default();assert!(e.claim_prepared_upload("upload").is_err());e.prepare_operation("upload").unwrap();e.cancel_operation("upload").unwrap();let stop=e.claim_prepared_upload("upload").unwrap();assert!(stop.load(Ordering::SeqCst));assert!(e.claim_prepared_upload("upload").is_err());e.finish_operation("upload");e.prepare_operation("fresh").unwrap();let stop=e.claim_prepared_upload("fresh").unwrap();e.try_begin_close().unwrap();assert!(stop.load(Ordering::SeqCst));}
+ #[test] fn upload_reservation_rejects_local_and_remote_sync_overlap(){let e=Engine::default();let root=PathBuf::from("C:\\generated\\upload");let job=super::tests::reserved_job(root.clone(),"/target");e.jobs.lock().unwrap().insert("sync".into(),job);e.prepare_operation("upload").unwrap();e.claim_prepared_upload("upload").unwrap();assert!(e.reserve_upload_operation("upload",vec![root.join("item")],vec![],String::new(),vec![]).is_err());assert!(e.reserve_upload_operation("upload",vec![],vec!["/target/child".into()],"host-key".into(),vec![]).is_err());assert!(e.reserve_upload_operation("upload",vec![],vec!["/target/child".into()],"alias".into(),vec!["127.0.0.1:2222".parse().unwrap()]).is_err());}
 }

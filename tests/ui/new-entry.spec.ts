@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from "@playwright/test";
 async function setup(page, language = "en") {
   await page.addInitScript(
@@ -37,6 +38,7 @@ async function setup(page, language = "en") {
             if (cmd === "default_folder") return "C:\\fixture";
             if (cmd === "list_drives") return [{ path: "C:\\", name: "C:" }];
             if (cmd === "connect_session") return { path: "/", entries };
+            if (cmd === "list_local" && args.path === "C:\\") return [{name:"fixture",dir:true,size:0}];
             if (cmd === "list_local" || cmd === "list_remote")
               return [
                 ...entries,
@@ -148,7 +150,8 @@ test("invalid name cannot dispatch; prepare acknowledgment gates cancel", async 
   await page.locator("[name=create-name]").fill("safe.txt");
   await page.evaluate(() => (window.pendingPrepare = true));
   await page.locator("#create-entry-confirm").click();
-  await expect(page.locator("#create-entry-cancel")).toBeDisabled();
+  await expect(page.locator(".create-entry-dialog")).toHaveCount(0);
+  await expect(page.locator("#create-entry-cancel")).toBeEnabled();
   await page.evaluate(() => window.releasePrepare());
   await expect(page.locator(".operation-results")).toHaveText("Created.");
   expect(await operations(page)).toHaveLength(1);
@@ -157,6 +160,7 @@ test("tree create targets clicked directory without navigating either pane", asy
   page,
 }) => {
   await setup(page);
+  await expandTreePath(page,'local','C:\\fixture');
   const node = page
     .locator("[data-tree-select=local]")
     .filter({ hasText: "existing-folder" })

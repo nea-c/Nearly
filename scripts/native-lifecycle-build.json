@@ -1,5 +1,5 @@
 {
-  "identifier": "local.syncfiles.native.lifecycleqa",
+  "identifier": "local.syncfiles.native.refinementqa",
   "build": {
     "beforeBuildCommand": null
   }

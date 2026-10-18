@@ -73,7 +73,7 @@ test('dark neutral surfaces keep readable text contrast',async({page})=>{
  await page.screenshot({path:'test-results/gray-host-key-dark.png'});
  await page.locator('#cancel').click();await page.locator('#connect-form .primary').click();await expect(page.locator('#prepare')).toBeVisible();
  await page.locator('#settings-toggle').click();
- const chrome=await palette(page,['.titlebar','.pane > header','.folder-tree','.tree-caption','[data-list=local]','[data-list=remote]','th','#settings-popup','#theme-select']);
+ const chrome=await palette(page,['.titlebar','.pane > header','.folder-tree','.folder-tree .tree-label','[data-list=local]','[data-list=remote]','th','#settings-popup','#theme-select']);
  console.log('DARK_WORKSPACE_PALETTE',JSON.stringify(chrome));
  await test.info().attach('workspace-palette',{body:JSON.stringify(chrome,null,2),contentType:'application/json'});
  for(const sample of chrome){expect(sample.spread,JSON.stringify(sample)).toBeLessThanOrEqual(8);expect(sample.contrast,JSON.stringify(sample)).toBeGreaterThanOrEqual(4.5);}

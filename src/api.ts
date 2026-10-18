@@ -11,6 +11,7 @@ export interface HostKeyCandidate {
   expiresInSeconds: number;
 }
 export interface ArchiveRequest {
+  sources?: string[];
   id: string;
   action: "compress" | "extract";
   source: string;
@@ -68,7 +69,17 @@ export interface WindowRegistration {
 }
 export interface StartupUpdateReport {state:string;latestVersion:string|null;canInstall:boolean;errorCode?:string|null}
 export interface UpdateRestartReport {phase:string;reason?:string;revision:number}
+export interface UploadRequest { id: string; sessionId: string; sources: string[]; remote: string; recursive: boolean; interactive?: boolean }
+export interface TransferPrompt {token:string;source:string;destination:string;sourceDirectory:boolean;targetDirectory:boolean;canOverwrite:boolean}
+export interface UploadOutcome { status: "completed" | "partial" | "cancelled"; completed: number; bytes: number; transferredBytes?: number; skipped?: number; message: string }
+export type NativeFileDrop = {type: "enter" | "over" | "drop" | "leave"; ownOutbound?: boolean; paths?: string[]; position?: {x:number;y:number}};
+export interface RemoteDragOutcome extends UploadOutcome { internalPosition?: {x:number;y:number} | null }
 interface Commands {
+  file_transfer_prompt: {args:{id:string};result:TransferPrompt|null};
+  choose_file_transfer: {args:{id:string;decision:{token:string;action:'overwrite'|'skip'|'keepboth'|'cancel';applyAll:boolean}};result:void};
+  run_upload: {args: {request: UploadRequest}; result: UploadOutcome};
+  run_download: {args:{request:{id:string;sessionId:string;sources:string[];local:string}};result:UploadOutcome};
+  run_remote_drag: {args:{request:{id:string;sessionId:string;sources:string[]}};result:RemoteDragOutcome};
   update_restart_status: { args: undefined; result: UpdateRestartReport };
   ack_update_restart_ready: { args: undefined; result: void };
   check_startup_update: { args: undefined; result: StartupUpdateReport };
@@ -123,7 +134,7 @@ interface Commands {
     args: { request: FileOperationRequest };
     result: { completed: number; message: string };
   };
-  cancel_file_operation: { args: { id: string }; result: void };
+  cancel_file_operation: { args: { id: string; abandon?: boolean }; result: void };
   load_settings: { args: undefined; result: Settings };
   save_settings: { args: { data: Settings }; result: number };
   list_local: { args: { path: string }; result: Entry[] };
@@ -182,6 +193,7 @@ export interface FileOperationRequest {
 declare global {
   interface Window {
     __TAURI__?: {
+      webview?: { getCurrentWebview(): { onDragDropEvent(handler: (event: {payload: NativeFileDrop}) => void): Promise<() => void> } };
       core: { invoke<T>(cmd: string, args?: unknown): Promise<T> };
       event?: {
         listen<T>(

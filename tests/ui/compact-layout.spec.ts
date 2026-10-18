@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from "@playwright/test";
 
 test("empty tabs show inline connection only and settings remain globally accessible", async ({
@@ -71,12 +72,14 @@ test("independent tree widths persist on release, cancel safely and retain horiz
       () => JSON.parse(localStorage.getItem("syncfiles-v1")).localTreeRatio,
     ),
   ).toBe(saved.localTreeRatio);
+  await expandTreePath(page,'local','C:\\');
   await page
     .locator("#local-path")
     .fill(
       "C:\\Projects\\a-long-directory-name-that-needs-horizontal-scrolling",
     );
   await page.locator("#local-path").press("Enter");
+  await expandTreePath(page,'local','C:\\Projects');
   const tree = page.locator("[data-tree=local]");
   await tree.hover();
   await page.mouse.wheel(500, 0);
@@ -257,6 +260,7 @@ test("IME Enter and a cross-pane late response preserve an uncommitted path draf
     "aria-busy",
     "false",
   );
+  await expandTreePath(page,'remote','/');
   await page
     .locator('[data-tree-toggle=remote][data-tree-path="/slow"]')
     .click();

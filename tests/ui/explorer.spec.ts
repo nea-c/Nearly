@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { editSelectedProfile, addRootProfile } from "./connection-context";
 import { test, expect } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
@@ -57,6 +58,7 @@ test.beforeEach(async ({ page }) => {
             await new Promise((resolve) => {
               window.releaseStop = resolve;
             });
+          if (cmd === "list_local" && args.path === "C:\\") return [entry("root", true)];
           if (cmd === "list_local")
             return args.path === "C:\\root"
               ? [
@@ -171,6 +173,8 @@ async function authorize(page) {
 test("trees load lazily, collapse from cache, and never move the other pane", async ({
   page,
 }) => {
+  await expandTreePath(page,'local','C:\\root');
+  await expandTreePath(page,'remote','/');
   const local = page.locator("[data-tree=local]");
   await expect(local.locator("[data-tree-select]")).toHaveCount(5);
   await expect(
@@ -214,6 +218,7 @@ test("trees load lazily, collapse from cache, and never move the other pane", as
 test("late tree replies stay with their immutable connection tab", async ({
   page,
 }) => {
+  await expandTreePath(page,'remote','/');
   await page
     .locator('[data-tree-toggle=remote][data-tree-path="/slow"]')
     .click();
@@ -264,6 +269,7 @@ test("file selection supports Ctrl, Shift, marquee, keyboard and directory reset
       .locator("[data-path=local] input")
       .evaluate((el) => el.selectionEnd - el.selectionStart),
   ).toBe(7);
+  await expandTreePath(page,'local','C:\\root');
   await page
     .locator("[data-tree=local]")
     .getByRole("button", { name: "alpha", exact: true })

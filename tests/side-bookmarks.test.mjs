@@ -1,0 +1,88 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { Store, connectionKey } from '../.test-build/core.js';
+import {applyPersistentSettings} from '../.test-build/shared-settings.js';
+const profile = {id:'a',name:'A',mode:'sftp',host:'example.test',port:22,user:'u',auth:'key',keyFile:'',hostKey:''};
+test('side folders preserve IDs, promote children and retain independent persistent recent paths',()=>{
+  const store=new Store({version:1,profiles:[profile]});
+  assert.equal(typeof store.createSideBookmarkGroup,'function');
+  const pairBefore=structuredClone([store.folderBookmarks,store.bookmarkTree,store.folderPairHistory]);
+  store.saveSideBookmark('local',{id:'old',name:'Old',path:'C:\\old'});
+  const group=store.createSideBookmarkGroup('local','Work');
+  store.moveSideBookmarkNode('local','old',group);
+  assert.equal(store.localBookmarkTree.nodes.find(n=>n.id==='old').parentId,group);
+  store.renameSideBookmarkNode('local','old','Renamed');
+  store.ungroupSideBookmarkFolder('local',group);
+  assert.equal(store.localBookmarkTree.nodes.find(n=>n.id==='old').parentId,null);
+  store.rememberSideFolder('local','c:/old',undefined,10);
+  store.rememberSideFolder('local','C:\\OLD',undefined,20);
+  store.rememberSideFolder('remote','/web',profile,30);
+  store.rememberSideFolder('remote','/web',{...profile,host:'other.test'},40);
+  assert.equal(store.localFolderHistory.length,1);
+  assert.equal(store.localFolderHistory[0].openedAt,20);
+  assert.equal(store.remoteFolderHistory.length,2);
+  const reload=new Store(JSON.parse(JSON.stringify(store.serialize())));
+  assert.equal(reload.localBookmarks[0].id,'old');
+  assert.equal(reload.localBookmarks[0].name,'Renamed');
+  assert.deepEqual(reload.localBookmarkTree,store.localBookmarkTree);
+  assert.deepEqual(reload.remoteFolderHistory,store.remoteFolderHistory);
+  assert.deepEqual([store.folderBookmarks,store.bookmarkTree,store.folderPairHistory],pairBefore);
+});
+test('side groups reject cycles and remote scope changes; history bounds and timestamps validate',()=>{
+  const store=new Store({version:1,profiles:[profile]});
+  assert.equal(typeof store.createSideBookmarkGroup,'function');
+  const a=store.createSideBookmarkGroup('remote','A',null,profile);
+  const b=store.createSideBookmarkGroup('remote','B',a,profile);
+  assert.throws(()=>store.moveSideBookmarkNode('remote',a,b,null,profile));
+  assert.throws(()=>store.renameSideBookmarkNode('remote',a,'X',{...profile,host:'other.test'}));
+  for(let i=0;i<205;i++)store.rememberSideFolder('local',`C:\\folder-${i}`,undefined,i);
+  assert.equal(store.localFolderHistory.length,200);
+  assert.throws(()=>new Store({version:1,localFolderHistory:[{path:'C:\\x',openedAt:-1}]}));
+  assert.throws(()=>new Store({version:1,localBookmarkTree:{version:1,nodes:[{id:'bad',kind:'group',name:'Bad',parentId:null,connectionKey:connectionKey(profile)}]}}));
+});
+test('side bookmarks persist stable records separately from paired data and normalize duplicates', () => {
+  const store = new Store({version:1,profiles:[profile]});
+  assert.equal(typeof store.saveSideBookmark,'function','side bookmark model missing');
+  const before = structuredClone({pairs:store.folderBookmarks,tree:store.bookmarkTree,history:store.folderPairHistory});
+  const a = store.saveSideBookmark('local',{name:' Work ',path:'c:/work//',id:'local-a'});
+  assert.deepEqual(a,{id:'local-a',name:'Work',path:'c:\\work'});
+  assert.throws(()=>store.saveSideBookmark('local',{name:'Other',path:'C:\\WORK'}));
+  assert.throws(()=>store.saveSideBookmark('local',{name:'Work',path:'C:\\other'}));
+  const b=store.saveSideBookmark('remote',{name:'Web',path:'/Web//',id:'remote-a'},profile);
+  store.saveSideBookmark('remote',{name:'Other',path:'/web'},profile);
+  store.saveSideBookmark('remote',{name:'Web',path:'/Web'},{...profile,host:'other.test'});
+  assert.equal(b.connectionKey,connectionKey(profile));
+  assert.throws(()=>store.saveSideBookmark('remote',{id:b.id,name:'Moved',path:'/x'},{...profile,host:'other.test'}));
+  const reload=new Store(JSON.parse(JSON.stringify(store.serialize())));
+  assert.deepEqual(reload.localBookmarks,store.localBookmarks);
+  assert.deepEqual(reload.remoteBookmarks,store.remoteBookmarks);
+  assert.deepEqual({pairs:store.folderBookmarks,tree:store.bookmarkTree,history:store.folderPairHistory},before);
+  store.removeSideBookmark('local',a.id); assert.equal(store.localBookmarks.length,0);
+});
+test('shared-window adoption reloads side records without replacing live workspace/navigation resources',()=>{
+  const store=new Store({version:1,profiles:[profile]});const w=store.createWorkspace(profile.id,'C:\\root');
+  const navigation=w.navigation;const sibling=new Store(store.serialize());sibling.saveSideBookmark('local',{id:'shared',name:'Shared',path:'C:\\shared'});
+  sibling.saveSideBookmark('remote',{id:'remote',name:'Remote',path:'/remote'},profile);
+  applyPersistentSettings(store,sibling.serialize());
+  assert.equal(store.workspaces.find(x=>x===w),w);assert.equal(w.navigation,navigation);
+  assert.deepEqual(store.localBookmarks,sibling.localBookmarks);assert.deepEqual(store.remoteBookmarks,sibling.remoteBookmarks);
+});
+test('side text limits use UTF-16 units consistently for Japanese and emoji',()=>{
+  const store=new Store({version:1});
+  store.saveSideBookmark('local',{id:'emoji',name:'😀'.repeat(50),path:'C:\\'+'😀'.repeat(2046)});
+  store.saveSideBookmark('local',{id:'ja',name:'日'.repeat(100),path:'D:\\'+'日'.repeat(4093)});
+  assert.throws(()=>store.saveSideBookmark('local',{id:'emoji',name:'😀'.repeat(51),path:'C:\\a'}));
+  assert.throws(()=>store.saveSideBookmark('local',{id:'emoji',name:'Emoji',path:'C:\\'+'😀'.repeat(2047)}));
+  assert.throws(()=>store.saveSideBookmark('local',{id:'ja',name:'JP',path:'D:\\'+'日'.repeat(4094)}));
+});
+test('side bookmark settings reject unknown fields, invalid paths, duplicate identities and bounded text',()=>{
+  assert.equal(typeof new Store({version:1}).saveSideBookmark,'function','side bookmark validation missing');
+  const item={id:'a',name:'A',path:'C:\\a'};
+  for(const bad of [{...item,path:'../a'},{...item,extra:true},{...item,name:'x'.repeat(101)},{...item,id:'x'.repeat(129)}])
+    assert.throws(()=>new Store({version:1,localBookmarks:[bad]}));
+  assert.throws(()=>new Store({version:1,localBookmarks:[item,{...item,id:'b',path:'c:/A/'}]}));
+  assert.deepEqual(new Store({version:1}).serialize().localBookmarks,[]);
+  assert.deepEqual(new Store({version:1}).serialize().remoteBookmarks,[]);
+  assert.throws(()=>new Store({version:1,localBookmarks:null}));
+  assert.throws(()=>new Store({version:1,remoteBookmarks:null}));
+});

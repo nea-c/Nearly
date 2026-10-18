@@ -1,6 +1,6 @@
-//! The only on-disk settings format. No legacy readers or automatic migration.
+//! Validated in-memory aggregate and settings API. Disk layout lives in split_settings.
 use super::*;
-use std::io::{Read, Write};
+
 
 const MAX_BYTES: usize = 16_000_000;
 const MAX_REVISION: u64 = 9_007_199_254_740_991;
@@ -8,6 +8,8 @@ const MAX_REVISION: u64 = 9_007_199_254_740_991;
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Document {
+    #[serde(skip)]
+    storage: split_settings::Snapshot,
     schema_version: u32,
     pub(crate) revision: u64,
     connections: Connections,
@@ -29,6 +31,18 @@ struct Connections {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Explorer {
+    #[serde(default)]
+    local_bookmarks: Vec<side_bookmarks::LocalBookmark>,
+    #[serde(default)]
+    remote_bookmarks: Vec<side_bookmarks::RemoteBookmark>,
+    #[serde(default)]
+    local_bookmark_tree: Option<side_bookmarks::Tree>,
+    #[serde(default)]
+    remote_bookmark_tree: Option<side_bookmarks::Tree>,
+    #[serde(default)]
+    local_folder_history: Vec<side_bookmarks::History>,
+    #[serde(default)]
+    remote_folder_history: Vec<side_bookmarks::History>,
     folder_bookmarks: Vec<explorer_preferences::FolderBookmark>,
     folder_pair_history: Vec<explorer_preferences::FolderPairHistory>,
     pane_columns: Columns,
@@ -79,7 +93,7 @@ impl Column {
 
 // Validate duplicate keys before typed decoding. This prevents HashMap and enum
 // decoders from silently replacing earlier values, including trust and schema.
-struct UniqueJson;
+pub(crate) struct UniqueJson;
 impl<'de> Deserialize<'de> for UniqueJson {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Visitor;
@@ -147,33 +161,11 @@ impl Document {
         doc.validate()?;
         Ok(doc)
     }
-    pub(crate) fn read(path: &Path) -> Result<Self, String> {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if path
-                    .with_extension("backup.json")
-                    .try_exists()
-                    .map_err(|_| "Settings backup status unavailable")?
-                {
-                    return Err("Settings primary is missing but its backup exists; restore it explicitly before opening or saving".into());
-                }
-                return Self::from_settings(
-                    &Settings {
-                        version: 1,
-                        ..Default::default()
-                    },
-                    host_pins::PinLedger::default(),
-                    0,
-                );
-            }
-            Err(_) => return Err("Settings unavailable; no defaults were loaded or saved".into()),
-        };
-        let mut bytes = Vec::new();
-        file.take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Settings read failed; no defaults were loaded")?;
-        Self::parse(&bytes)
+    pub(crate) fn read(path: &Path) -> Result<Self,String> {
+        match split_settings::read(path)? {
+            Some((value,storage))=>{let mut doc=Self::parse(&serde_json::to_vec(&value).map_err(|_|"Aggregate unavailable")?)?;doc.storage=storage;Ok(doc)},
+            None=>Self::from_settings(&Settings{version:1,..Default::default()},host_pins::PinLedger::default(),0),
+        }
     }
     fn validate(&self) -> Result<(), String> {
         if let Some(size)=self.appearance.window_size{size.validate()?;}
@@ -196,6 +188,7 @@ impl Document {
     ) -> Result<Self, String> {
         validate_settings(data)?;
         let doc = Self {
+            storage: split_settings::Snapshot::default(),
             schema_version: 1,
             revision,
             connections: Connections {
@@ -214,9 +207,16 @@ impl Document {
                 local_pane_ratio: data.local_pane_ratio,
                 local_tree_ratio: data.local_tree_ratio,
                 remote_tree_ratio: data.remote_tree_ratio,
+                local_tree_width: data.local_tree_width,
+                remote_tree_width: data.remote_tree_width,
                 window_size: None,
             },
             explorer: Explorer {
+                local_bookmarks: data.local_bookmarks.clone(),
+                remote_bookmarks: data.remote_bookmarks.clone(),
+                local_bookmark_tree:Some(side_bookmarks::complete_tree(&data.local_bookmark_tree.clone().unwrap_or_else(||side_bookmarks::flat(&data.local_bookmarks,&data.remote_bookmarks,false)),&data.local_bookmarks,&data.remote_bookmarks,false)?),
+                remote_bookmark_tree:Some(side_bookmarks::complete_tree(&data.remote_bookmark_tree.clone().unwrap_or_else(||side_bookmarks::flat(&data.local_bookmarks,&data.remote_bookmarks,true)),&data.local_bookmarks,&data.remote_bookmarks,true)?),
+                local_folder_history:data.local_folder_history.clone(),remote_folder_history:data.remote_folder_history.clone(),
                 folder_bookmarks: data.folder_bookmarks.clone(),
                 folder_pair_history: data.folder_pair_history.clone(),
                 pane_columns: Columns {
@@ -259,11 +259,18 @@ impl Document {
             local_pane_ratio: self.appearance.local_pane_ratio,
             local_tree_ratio: self.appearance.local_tree_ratio,
             remote_tree_ratio: self.appearance.remote_tree_ratio,
+            local_tree_width: self.appearance.local_tree_width,
+            remote_tree_width: self.appearance.remote_tree_width,
             exclusions: self.sync.exclusions.clone(),
             sync_options: self.sync.sync_options.clone(),
             sync_presets: self.sync.sync_presets.clone(),
             retained_syncs: self.sync.retained_syncs.clone(),
             folder_bookmarks: self.explorer.folder_bookmarks.clone(),
+            local_bookmarks: self.explorer.local_bookmarks.clone(),
+            remote_bookmarks: self.explorer.remote_bookmarks.clone(),
+            local_bookmark_tree:Some(self.explorer.local_bookmark_tree.clone().unwrap_or_else(||side_bookmarks::flat(&self.explorer.local_bookmarks,&self.explorer.remote_bookmarks,false))),
+            remote_bookmark_tree:Some(self.explorer.remote_bookmark_tree.clone().unwrap_or_else(||side_bookmarks::flat(&self.explorer.local_bookmarks,&self.explorer.remote_bookmarks,true))),
+            local_folder_history:self.explorer.local_folder_history.clone(),remote_folder_history:self.explorer.remote_folder_history.clone(),
             folder_pair_history: self.explorer.folder_pair_history.clone(),
             pane_columns: explorer_preferences::PaneColumns {
                 local: self
@@ -284,55 +291,9 @@ impl Document {
         }
     }
     pub(crate) fn window_size(&self)->Option<window_size::SavedSize>{self.appearance.window_size}
-    fn write(&self, path: &Path) -> Result<(), String> {
+    fn write(&self,path:&Path)->Result<(),String>{
         self.validate()?;
-        let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Settings serialization failed")?;
-        if bytes.len() > MAX_BYTES {
-            return Err("Unified settings exceed 16 MB".into());
-        }
-        let staged = Staged::new(path, &bytes)?;
-        // Back up the exact authoritative primary and flush it before replacing
-        // either file. An unavailable/invalid primary never reaches this point.
-        if self.revision > 1 {
-            let old = std::fs::read(path).map_err(|e| {
-                settings_location::write_error(path, "バックアップ前の読み取り", &e)
-            })?;
-            Document::parse(&old)?;
-            let backup = path.with_extension("backup.json");
-            let backup_stage = Staged::new(&backup, &old)?;
-            std::fs::rename(&backup_stage.0, &backup).map_err(|e| {
-                settings_location::write_error(&backup, "バックアップの置き換え", &e)
-            })?;
-        }
-        std::fs::rename(&staged.0, path)
-            .map_err(|e| settings_location::write_error(path, "保存", &e))?;
-        Ok(())
-    }
-}
-struct Staged(PathBuf);
-impl Staged {
-    fn new(path: &Path, bytes: &[u8]) -> Result<Self, String> {
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tmp = path.with_extension(format!(
-            "{}.{}.tmp",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| settings_location::write_error(path, "一時保存ファイルの作成", &e))?;
-        let staged = Self(tmp);
-        f.write_all(bytes)
-            .and_then(|_| f.sync_all())
-            .map_err(|e| settings_location::write_error(path, "保存データの書き込み", &e))?;
-        Ok(staged)
-    }
-}
-impl Drop for Staged {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        split_settings::write(path,&serde_json::to_value(self).map_err(|_|"Settings serialization failed")?,&self.storage)
     }
 }
 
@@ -425,8 +386,11 @@ fn save_impl(
     if data.bookmark_tree.is_none() && current.revision != 0 {
         data.bookmark_tree = Some(current.explorer.bookmark_tree);
     }
+    if data.local_bookmark_tree.is_none() && current.revision != 0 {data.local_bookmark_tree=current.explorer.local_bookmark_tree;}
+    if data.remote_bookmark_tree.is_none() && current.revision != 0 {data.remote_bookmark_tree=current.explorer.remote_bookmark_tree;}
     let mut next=Document::from_settings(&data, trust, revision)?;
     next.appearance.window_size=current.appearance.window_size;
+    next.storage=current.storage;
     next.write(path)?;
     Ok(revision)
 }
@@ -446,15 +410,81 @@ pub(crate) fn guard_pin(path: &Path, profile: &sftp::Profile) -> Result<(), Stri
 mod tests {
     use super::*;
     #[test]
+    fn valid_aggregate_control_cannot_masquerade_as_a_corruption_fixture(){
+        let f=Fixture::new();let p=f.path();save_reload(&p,&settings());let good=value(&p);
+        let result=std::panic::catch_unwind(||assert_refused_unchanged(&p,&serde_json::to_vec(&good).unwrap()));
+        assert!(result.is_err(),"A valid aggregate must fail the negative-test helper rather than count as rejected corruption");
+    }
+    #[test]
+    fn corruption_fixture_reaches_authoritative_trust_validation_after_disk_manifest(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.profiles.push(profile());save_reload(&p,&data);
+        let mut bad=value(&p);bad["trust"]["pins"]=serde_json::json!({});
+        assert_refused_unchanged(&p,&serde_json::to_vec(&bad).unwrap());
+        let root:serde_json::Value=serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();assert_eq!(root["kind"],"settings");
+        let (aggregate,_)=split_settings::read(&p).expect("Disk envelopes and hashes must be valid").unwrap();
+        let error=Document::parse(&serde_json::to_vec(&aggregate).unwrap()).err().expect("Intended semantic failure required");assert!(error.contains("authoritative trust"),"{error}");
+    }
+    fn prepare_external_split_fixture(source:&Path,output:&Path)->Result<(),String>{
+        if !output.is_dir()||std::fs::read_dir(output).map_err(|_|"Prepared output unavailable")?.next().is_some(){return Err("Prepared output must already exist and be empty".into());}
+        let metadata=std::fs::symlink_metadata(source).map_err(|_|"Staged source unavailable")?;
+        if !metadata.is_file()||metadata.file_type().is_symlink()||metadata.len()>16_000_000{return Err("Invalid staged source".into());}
+        let mut doc=Document::parse(&std::fs::read(source).map_err(|_|"Staged source read failed")?)?;
+        doc.revision=1;
+        doc.write(&output.join("settings.json"))?;
+        let roundtrip=Document::read(&output.join("settings.json"))?;
+        if serde_json::to_value(&doc).map_err(|_|"Source unavailable")?!=serde_json::to_value(roundtrip).map_err(|_|"Prepared result unavailable")?{return Err("Prepared roundtrip differs".into());}
+        Ok(())
+    }
+    #[test]
+    #[ignore="External one-time preparation only; never part of production executable or normal startup"]
+    fn external_split_fixture(){
+        let source=std::env::var_os("NEARLY_VALIDATE_SETTINGS_FIXTURE").expect("Exact staged source required");
+        let output=std::env::var_os("NEARLY_PREPARE_SPLIT_FIXTURE").expect("Exact empty prepared output required");
+        prepare_external_split_fixture(Path::new(&source),Path::new(&output)).expect("External preparation refused");
+        println!("Prepared and natively validated five-file fixture; no live settings modified");
+    }
+    #[test]
+    fn external_conversion_preserves_identity_trust_and_requires_empty_output(){
+        let f=Fixture::new();let p=f.path();let mut data=settings();data.profiles.push(profile());
+        let loaded=save_reload(&p,&data);let before=value(&p);let input=f.0.join("generated-legacy-snapshot.json");
+        let input_bytes=serde_json::to_vec(&before).unwrap();std::fs::write(&input,&input_bytes).unwrap();
+        let output=f.0.join("prepared-five");std::fs::create_dir(&output).unwrap();
+        prepare_external_split_fixture(&input,&output).unwrap();
+        let converted=Document::read(&output.join("settings.json")).unwrap();
+        assert_eq!(serde_json::to_value(converted.settings()).unwrap(),serde_json::to_value(loaded).unwrap());
+        assert_eq!(serde_json::to_value(converted).unwrap(),before);
+        assert_eq!(std::fs::read(&input).unwrap(),input_bytes);assert!(prepare_external_split_fixture(&input,&output).is_err());
+        let mut bad=before.clone();bad["connections"]["profiles"][0]["hostKey"]="".into();
+        std::fs::write(&input,serde_json::to_vec(&bad).unwrap()).unwrap();
+        let rejected=f.0.join("rejected-five");std::fs::create_dir(&rejected).unwrap();
+        assert!(prepare_external_split_fixture(&input,&rejected).is_err());assert_eq!(std::fs::read_dir(&rejected).unwrap().count(),0);
+    }
+    #[test]
+    fn split_storage_five_files_and_history_is_separate() {
+        let f=Fixture::new(); let p=f.path();
+        assert_eq!(Document::read(&p).unwrap().revision,0);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),0);
+        let mut data=settings();data.history.insert("generated-history".into(),"C:\\generated".into());
+        let saved=save_reload(&p,&data);
+        for name in ["settings.json","history.json","bookmarks.json","sync-profiles.json","connections.json"] {assert!(f.0.join(name).is_file(),"Missing {name}");}
+        let root:serde_json::Value=serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert_eq!(root["kind"],"settings");assert!(root.get("connections").is_none());
+        let history:serde_json::Value=serde_json::from_slice(&std::fs::read(f.0.join("history.json")).unwrap()).unwrap();
+        assert_eq!(history["folderMappings"]["generated-history"],"C:\\generated");
+        let old=std::fs::read(f.0.join("connections.json")).unwrap();
+        let mut next=saved;next.theme=Theme::Mint;save_reload(&p,&next);
+        assert_eq!(std::fs::read(f.0.join("connections.json")).unwrap(),old);
+    }
+    #[test]
     fn native_window_size_defaults_without_writing_and_regular_saves_preserve_latest_size(){
         let f=Fixture::new();let p=f.path();let initial=save_reload(&p,&settings());let before=value(&p);
         assert!(Document::read(&p).unwrap().window_size().is_none());assert!(before["appearance"].get("windowSize").is_none());
         let old_bytes=std::fs::read(&p).unwrap();let _=Document::read(&p).unwrap();assert_eq!(std::fs::read(&p).unwrap(),old_bytes);
-        let size=window_size::SavedSize{width:1060.5,height:740.,maximized:true};
+        let size=window_size::SavedSize{width:1060.5,height:740.,maximized:true,placement:Some(window_size::Placement{x:-1600,y:70})};
         assert_eq!(save_window_size(&p,size).unwrap(),Some(initial.settings_revision+1));
         let after=value(&p);for section in ["connections","explorer","browse","sync","trust"]{assert_eq!(after[section],before[section]);}
         for field in ["theme","language","compactExplorer","localPaneRatio","localTreeRatio","remoteTreeRatio"]{assert_eq!(after["appearance"][field],before["appearance"][field]);}
-        assert_eq!(after["appearance"]["windowSize"],serde_json::json!({"width":1060.5,"height":740.,"maximized":true}));
+        assert_eq!(after["appearance"]["windowSize"],serde_json::json!({"width":1060.5,"height":740.,"maximized":true,"placement":{"x":-1600,"y":70}}));
         assert!(save(&p,&initial).unwrap_err().contains("revision conflict"));
         let mut current=Document::read(&p).unwrap().settings();current.theme=Theme::Mint;let final_settings=save_reload(&p,&current);
         assert!(matches!(final_settings.theme,Theme::Mint));assert_eq!(Document::read(&p).unwrap().window_size(),Some(size));
@@ -464,17 +494,17 @@ mod tests {
     #[test]
     fn native_size_write_failure_and_invalid_preferences_leave_existing_settings_unchanged(){
         let f=Fixture::new();let p=f.path();save_reload(&p,&settings());let bytes=std::fs::read(&p).unwrap();
-        for size in [window_size::SavedSize{width:0.,height:700.,maximized:false},window_size::SavedSize{width:900.,height:f64::NAN,maximized:false}] {
+        for size in [window_size::SavedSize{width:0.,height:700.,maximized:false,placement:None},window_size::SavedSize{width:900.,height:f64::NAN,maximized:false,placement:None}] {
             assert!(save_window_size(&p,size).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
         }
         std::fs::create_dir(p.with_extension("backup.json")).unwrap();
-        assert!(save_window_size(&p,window_size::SavedSize{width:900.,height:700.,maximized:false}).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
+        assert!(save_window_size(&p,window_size::SavedSize{width:900.,height:700.,maximized:false,placement:None}).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);
     }
     #[test]
     fn native_size_transaction_preserves_ordinary_client_baselines_and_concurrent_edits(){
         let f=Fixture::new();let p=f.path();let initial=save_reload(&p,&settings());
         let mut clients=settings_clients::SettingsClients::default();let initial_value=serde_json::to_value(&initial).unwrap();clients.remember_loaded("main",initial_value.clone()).unwrap();
-        let size=window_size::SavedSize{width:1000.,height:700.,maximized:false};save_window_size(&p,size).unwrap();
+        let size=window_size::SavedSize{width:1000.,height:700.,maximized:false,placement:None};save_window_size(&p,size).unwrap();
         let mut proposed=initial_value;proposed["language"]="en".into();
         let latest=Document::read(&p).unwrap().settings();
         let merged=clients.prepare_save("main",&proposed,&serde_json::to_value(&latest).unwrap()).unwrap();
@@ -500,7 +530,7 @@ mod tests {
         let revision=persist_window_size_transaction(&state,&p,false,||Ok(settings_lock)).unwrap();
         assert_eq!(worker.join().unwrap().unwrap(),None,"The late worker must reread the now-clean session");
         let final_doc=Document::read(&p).unwrap();assert_eq!(Some(final_doc.revision),revision);
-        assert_eq!(final_doc.window_size(),Some(window_size::SavedSize{width:1100.,height:800.,maximized:false}));
+        assert_eq!(final_doc.window_size(),Some(window_size::SavedSize{width:1100.,height:800.,maximized:false,placement:None}));
         assert!(!state.window_size.lock().unwrap().is_dirty());
     }
     #[test]
@@ -533,7 +563,7 @@ mod tests {
     fn retained_syncs_missing_in_old_document_load_without_writes() {
         let f=Fixture::new();let p=f.path();save_reload(&p,&settings());
         let mut old=value(&p);old["sync"].as_object_mut().unwrap().remove("retainedSyncs");
-        let bytes=serde_json::to_vec(&old).unwrap();std::fs::write(&p,&bytes).unwrap();
+        split_settings::seed_fixture(&p,&old);let bytes=std::fs::read(&p).unwrap();
         let loaded=Document::read(&p).unwrap().settings();assert!(loaded.retained_syncs.is_empty());
         assert_eq!(std::fs::read(&p).unwrap(),bytes);
         assert!(!p.with_extension("backup.json").exists());
@@ -582,12 +612,12 @@ mod tests {
         assert!(prune_owned_retained_syncs(&p,&[]).unwrap().revision.is_none());
         assert!(prune_owned_retained_syncs(&p,&["absent".into()]).unwrap().revision.is_none());assert!(!p.exists());assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),0);
         let mut data=settings();data.retained_syncs=vec![retained(),owned_retained("foreign","other-tab")];save_reload(&p,&data);let bytes=std::fs::read(&p).unwrap();
-        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap().revision.is_none());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),1);
+        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).unwrap().revision.is_none());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),5);
     }
     #[test]
     fn closing_window_cleanup_write_failure_preserves_primary(){
         let f=Fixture::new();let p=f.path();let mut data=settings();data.retained_syncs=vec![owned_retained("own","own-tab")];save_reload(&p,&data);let bytes=std::fs::read(&p).unwrap();std::fs::create_dir(p.with_extension("backup.json")).unwrap();
-        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),2);
+        assert!(prune_owned_retained_syncs(&p,&["own-tab".into()]).is_err());assert_eq!(std::fs::read(&p).unwrap(),bytes);assert_eq!(std::fs::read_dir(&f.0).unwrap().count(),6);
     }
     #[test]
     fn closing_window_rollback_preserves_concurrent_foreign_updates_and_exact_own_context(){
@@ -692,14 +722,19 @@ mod tests {
         Document::read(path).unwrap().settings()
     }
     fn value(path: &Path) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        serde_json::to_value(Document::read(path).unwrap()).unwrap()
     }
     fn assert_refused_unchanged(path: &Path, bytes: &[u8]) {
-        std::fs::write(path, bytes).unwrap();
+        assert!(Document::parse(bytes).is_err(),"A valid aggregate is not a negative fixture");
+        let value=serde_json::from_slice::<serde_json::Value>(bytes).ok();
+        if serde_json::from_slice::<UniqueJson>(bytes).is_ok()&&value.as_ref().is_some_and(serde_json::Value::is_object){
+            split_settings::seed_fixture(path,value.as_ref().unwrap());
+        }else{std::fs::write(path, bytes).unwrap();}
+        let snapshot:Vec<_>=split_settings::NAMES.iter().map(|name|{let p=path.with_file_name(name);let bytes=std::fs::read(&p).ok();(p,bytes)}).collect();
         assert!(Document::read(path).is_err());
         assert!(save(path, &settings()).is_err());
         assert!(guard_pin(path, &profile()).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        for (p,before) in snapshot{assert_eq!(std::fs::read(p).ok(),before,"Rejected reads/saves must retain every primary byte");}
     }
     #[test]
     fn last_selected_profile_roundtrips_by_id_and_old_documents_remain_readable() {
@@ -728,7 +763,7 @@ mod tests {
         let mut edited=saved.clone();edited.sync_presets[0].delete_removed=true;edited.sync_presets[0].recursive=false;
         let edited=save_reload(&p,&edited);assert!(edited.sync_presets[0].delete_removed);assert!(!edited.sync_presets[0].recursive);
         assert!(save(&p,&saved).is_err());assert_eq!(value(&p)["revision"],edited.settings_revision);
-        let before=std::fs::read(&p).unwrap();let mut old=value(&p);old["sync"]["syncPresets"][0].as_object_mut().unwrap().remove("deleteRemoved");old["sync"]["syncPresets"][0].as_object_mut().unwrap().remove("recursive");std::fs::write(&p,serde_json::to_vec(&old).unwrap()).unwrap();
+        let before=std::fs::read(&p).unwrap();let mut old=value(&p);old["sync"]["syncPresets"][0].as_object_mut().unwrap().remove("deleteRemoved");old["sync"]["syncPresets"][0].as_object_mut().unwrap().remove("recursive");split_settings::seed_fixture(&p,&old);
         let bytes=std::fs::read(&p).unwrap();let loaded=Document::read(&p).unwrap().settings();assert!(!loaded.sync_presets[0].delete_removed);assert!(loaded.sync_presets[0].recursive);assert_eq!(bytes,std::fs::read(&p).unwrap());
         assert!(!before.is_empty());
         assert!(serde_json::from_value::<SyncPreset>(serde_json::json!({"id":"bad","name":"Bad","deleteRemoved":null})).is_err());
@@ -741,13 +776,13 @@ mod tests {
         presets.push(serde_json::from_value(serde_json::json!({"id":"extra","name":"Extra"})).unwrap());assert!(validate_sync_preferences(&HashMap::new(),&HashMap::new(),&presets).is_err());
     }
     #[test]
-    fn unified_only_writes_one_authoritative_document() {
+    fn split_store_writes_five_authoritative_documents() {
         let f = Fixture::new();
         let p = f.path();
         let data = save_reload(&p, &settings());
         assert_eq!(data.settings_revision, 1);
         assert_eq!(value(&p)["schemaVersion"], 1);
-        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 5);
         assert!(value(&p).get("version").is_none());
     }
     #[test]
@@ -764,7 +799,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("compactExplorer");
-        std::fs::write(&p, serde_json::to_vec(&old).unwrap()).unwrap();
+        split_settings::seed_fixture(&p,&old);
         let bytes = std::fs::read(&p).unwrap();
         let dto = serde_json::to_value(Document::read(&p).unwrap().settings()).unwrap();
         assert_eq!(dto["language"], "ja");
@@ -825,10 +860,10 @@ mod tests {
             let mut bad = valid.clone();
             bad["appearance"][key] = invalid;
             let bytes = serde_json::to_vec(&bad).unwrap();
-            std::fs::write(&p, &bytes).unwrap();
-            assert!(Document::read(&p).is_err());
+            assert_refused_unchanged(&p,&bytes);
+            let disk_bytes=std::fs::read(&p).unwrap();
             assert!(save(&p, &loaded).is_err());
-            assert_eq!(std::fs::read(&p).unwrap(), bytes);
+            assert_eq!(std::fs::read(&p).unwrap(), disk_bytes);
         }
     }
     #[test]
@@ -873,7 +908,7 @@ mod tests {
             Theme::System
         ));
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
-        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 5);
         // The frontend supplies its one-time OS resolution as an explicit value.
         saved.theme = Theme::Dark;
         let explicit = save_reload(&p, &saved);
@@ -910,7 +945,7 @@ mod tests {
         assert_refused_unchanged(&f.path(), br#"{"version":1,"profiles":[],"history":{}}"#);
     }
     #[test]
-    fn sections_round_trip_and_only_primary_plus_backup_exist() {
+    fn sections_round_trip_and_only_five_primaries_plus_changed_backups_exist() {
         let f = Fixture::new();
         let p = f.path();
         let mut data = settings();
@@ -992,7 +1027,85 @@ mod tests {
             std::fs::read(p.with_extension("backup.json")).unwrap(),
             before
         );
-        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 6);
+    }
+    #[test]
+    fn side_bookmarks_default_empty_and_round_trip_with_duplicate_validation() {
+        let f=Fixture::new();let p=f.path();let data=settings();
+        let loaded=save_reload(&p,&data);
+        let mut dto=serde_json::to_value(&loaded).unwrap();
+        assert_eq!(dto["localBookmarks"],serde_json::json!([]));
+        dto["localBookmarks"]=serde_json::json!([{"id":"l","name":"Local","path":"C:\\generated"}]);
+        dto["remoteBookmarks"]=serde_json::json!([{"id":"r","name":"Remote","path":"/generated","connectionKey":"[\"p\",\"sftp\",\"example.invalid\",22,\"u\",\"\"]"}]);
+        let changed:Settings=serde_json::from_value(dto.clone()).unwrap();
+        let again=save_reload(&p,&changed);
+        let round=serde_json::to_value(&again).unwrap();
+        assert_eq!(round["localBookmarks"],dto["localBookmarks"]);
+        assert_eq!(round["remoteBookmarks"],dto["remoteBookmarks"]);
+        dto["localBookmarks"].as_array_mut().unwrap().push(serde_json::json!({"id":"x","name":"Other","path":"c:/GENERATED/"}));
+        let duplicate:Settings=serde_json::from_value(dto).unwrap();
+        assert!(validate_settings(&duplicate).is_err());
+        let mut old=value(&p);for field in ["localBookmarks","remoteBookmarks","localBookmarkTree","remoteBookmarkTree"]{old["explorer"].as_object_mut().unwrap().remove(field);}
+        let old=Document::parse(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(old.settings()).unwrap()["localBookmarks"],serde_json::json!([]));
+    }
+    #[test]
+    fn side_folders_and_history_round_trip_in_existing_five_documents(){
+        let f=Fixture::new();let p=f.path();let loaded=save_reload(&p,&settings());
+        let mut dto=serde_json::to_value(loaded).unwrap();
+        dto["localBookmarks"]=serde_json::json!([{"id":"leaf","name":"Leaf","path":"C:\\leaf"}]);
+        dto["localBookmarkTree"]=serde_json::json!({"version":1,"nodes":[{"id":"group","kind":"group","name":"Work","parentId":null},{"id":"leaf","kind":"bookmark","bookmarkId":"leaf","parentId":"group"}]});
+        dto["localFolderHistory"]=serde_json::json!([{"path":"C:\\leaf","openedAt":10}]);
+        let changed:Settings=serde_json::from_value(dto.clone()).unwrap();let loaded=save_reload(&p,&changed);let again=serde_json::to_value(loaded).unwrap();
+        assert_eq!(again["localBookmarkTree"],dto["localBookmarkTree"]);assert_eq!(again["localFolderHistory"],dto["localFolderHistory"]);
+        let bookmarks:serde_json::Value=serde_json::from_slice(&std::fs::read(f.0.join("bookmarks.json")).unwrap()).unwrap();assert_eq!(bookmarks["localTree"],dto["localBookmarkTree"]);
+        let history:serde_json::Value=serde_json::from_slice(&std::fs::read(f.0.join("history.json")).unwrap()).unwrap();assert_eq!(history["localFolderHistory"],dto["localFolderHistory"]);
+    }
+    #[test]
+    fn side_bookmark_concurrent_acknowledgements_reload_and_failed_write_preserve_disk() {
+        let f=Fixture::new();let p=f.path();let base=save_reload(&p,&settings());
+        let base=serde_json::to_value(&base).unwrap();let mut clients=settings_clients::SettingsClients::default();
+        for label in ["a","b"]{clients.remember_loaded(label,base.clone()).unwrap();}
+        let paired_before=value(&p)["explorer"]["folderBookmarks"].clone();
+        for(label,id)in [("a","one"),("b","two")]{
+            let mut proposed=base.clone();proposed["localBookmarks"]=serde_json::json!([{"id":id,"name":id,"path":format!("C:\\{id}")}]);
+            let disk=serde_json::to_value(Document::read(&p).unwrap().settings()).unwrap();
+            let merged=clients.prepare_save(label,&proposed,&disk).unwrap();
+            let data:Settings=serde_json::from_value(merged).unwrap();let revision=save(&p,&data).unwrap();
+            clients.remember_saved(label,proposed,revision).unwrap();
+        }
+        let fresh=serde_json::to_value(Document::read(&p).unwrap().settings()).unwrap();
+        assert_eq!(fresh["localBookmarks"].as_array().unwrap().len(),2);
+        assert_eq!(value(&p)["explorer"]["folderBookmarks"],paired_before);
+        clients.remember_loaded("a",fresh.clone()).unwrap();
+        let mut bad=fresh.clone();bad["localBookmarks"][0]["name"]=serde_json::json!("Not committed");
+        let merged=clients.prepare_save("a",&bad,&fresh).unwrap();let data:Settings=serde_json::from_value(merged).unwrap();
+        let before=std::fs::read(&p).unwrap();std::fs::remove_file(p.with_extension("backup.json")).unwrap();std::fs::create_dir(p.with_extension("backup.json")).unwrap();
+        assert!(save(&p,&data).is_err());assert_eq!(std::fs::read(&p).unwrap(),before);
+        let reread=serde_json::to_value(Document::read(&p).unwrap().settings()).unwrap();assert_eq!(reread,fresh);
+        // No failed acknowledgement: a corrected request still uses the same loaded baseline.
+        assert!(clients.prepare_save("a",&bad,&reread).is_ok());
+    }
+
+    #[test]
+    fn tree_pixel_widths_round_trip_validate_and_keep_legacy_documents_readable() {
+        let base = settings();
+        let mut value = serde_json::to_value(&base).unwrap();
+        value["localTreeWidth"] = serde_json::json!(330.5);
+        value["remoteTreeWidth"] = serde_json::json!(240.0);
+        let data: Settings = serde_json::from_value(value.clone()).expect("optional tree pixel preferences must decode");
+        let doc = Document::from_settings(&data, host_pins::PinLedger::default(), 1).unwrap();
+        let encoded = serde_json::to_value(&doc).unwrap();
+        assert_eq!(encoded["appearance"]["localTreeWidth"], 330.5);
+        assert_eq!(serde_json::to_value(doc.settings()).unwrap()["remoteTreeWidth"], 240.0);
+        let mut legacy = encoded.clone();
+        legacy["appearance"].as_object_mut().unwrap().remove("localTreeWidth");
+        legacy["appearance"].as_object_mut().unwrap().remove("remoteTreeWidth");
+        assert!(Document::parse(&serde_json::to_vec(&legacy).unwrap()).is_ok());
+        for invalid in [0.0, 99.0, 4097.0, -1.0] {
+            let mut invalid_doc = encoded.clone(); invalid_doc["appearance"]["localTreeWidth"] = serde_json::json!(invalid);
+            assert!(Document::parse(&serde_json::to_vec(&invalid_doc).unwrap()).is_err());
+        }
     }
     #[test]
     fn future_missing_unknown_corrupt_and_duplicate_fields_fail_closed() {
@@ -1125,7 +1238,7 @@ mod tests {
         data.theme = Theme::Dark;
         assert!(save(&p, &data).is_err());
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
-        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 6);
     }
     #[test]
     fn reads_and_known_pin_guards_do_not_write_or_increment_revision() {
@@ -1140,7 +1253,7 @@ mod tests {
             guard_pin(&p, &profile()).unwrap();
         }
         assert_eq!(std::fs::read(&p).unwrap(), bytes);
-        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 5);
     }
     #[test]
     fn profile_pin_missing_from_trust_or_conflicting_fails_closed() {

@@ -6,6 +6,8 @@ import {
 import type { RetainedSync, RetainedPendingState } from "./retained-sync.js";
 export type { RetainedSync, RetainedPendingState } from "./retained-sync.js";
 import type { Language } from "./i18n.js";
+import {validateSideBookmarks,type LocalBookmark,type RemoteBookmark,type BookmarkSide} from './side-bookmarks.js';
+import { validateSideBookmarkTree, validateSideHistory, sideBookmarkEditor, fromSideTree, LOCAL_BOOKMARK_SCOPE, type SideBookmarkTree, type SideFolderHistory } from './side-bookmarks.js';
 import {
   reorderedWorkspaces,
   retainedSyncsInWorkspaceOrder,
@@ -97,10 +99,18 @@ export interface Settings {
   localPaneRatio?: number;
   localTreeRatio?: number;
   remoteTreeRatio?: number;
+  localTreeWidth?: number;
+  remoteTreeWidth?: number;
   exclusions?: Record<string, string>;
   syncOptions?: Record<string, SyncOptions>;
   syncPresets?: SyncPreset[];
   folderBookmarks?: FolderBookmark[];
+  localBookmarks?: LocalBookmark[];
+  remoteBookmarks?: RemoteBookmark[];
+  localBookmarkTree?: SideBookmarkTree;
+  remoteBookmarkTree?: SideBookmarkTree;
+  localFolderHistory?: SideFolderHistory[];
+  remoteFolderHistory?: SideFolderHistory[];
   folderPairHistory?: FolderPairHistoryEntry[];
   paneColumns?: PaneColumns;
   connectionTree?: ConnectionTree;
@@ -278,6 +288,12 @@ export class Store {
   connectionTreeChanged = false;
   connectionTreeWarning = "";
   folderBookmarks: FolderBookmark[] = [];
+  localBookmarks: LocalBookmark[] = [];
+  remoteBookmarks: RemoteBookmark[] = [];
+  localBookmarkTree: SideBookmarkTree = {version:1,nodes:[]};
+  remoteBookmarkTree: SideBookmarkTree = {version:1,nodes:[]};
+  localFolderHistory: SideFolderHistory[] = [];
+  remoteFolderHistory: SideFolderHistory[] = [];
   folderPairHistory: FolderPairHistoryEntry[] = [];
   paneColumns: PaneColumns = defaultPaneColumns();
   theme: ThemePreference;
@@ -286,6 +302,8 @@ export class Store {
   localPaneRatio = 0.5;
   localTreeRatio = 0.28;
   remoteTreeRatio = 0.28;
+  localTreeWidth?: number;
+  remoteTreeWidth?: number;
   exclusions: Record<string, string> = {};
   syncOptions: Record<string, SyncOptions> = {};
   syncPresets: SyncPreset[] = [];
@@ -554,6 +572,12 @@ export class Store {
       )
         throw Error("Duplicate folder bookmark");
     }
+    this.localBookmarks=validateSideBookmarks(data.localBookmarks===undefined?[]:data.localBookmarks, 'local') as LocalBookmark[];
+    this.remoteBookmarks=validateSideBookmarks(data.remoteBookmarks===undefined?[]:data.remoteBookmarks, 'remote') as RemoteBookmark[];
+    this.localBookmarkTree=validateSideBookmarkTree(data.localBookmarkTree,this.localBookmarks,'local');
+    this.remoteBookmarkTree=validateSideBookmarkTree(data.remoteBookmarkTree,this.remoteBookmarks,'remote');
+    this.localFolderHistory=validateSideHistory(data.localFolderHistory,'local');
+    this.remoteFolderHistory=validateSideHistory(data.remoteFolderHistory,'remote');
     if (data.folderPairHistory !== undefined) {
       this.folderPairHistory = validateCollection(
         data.folderPairHistory,
@@ -575,6 +599,11 @@ export class Store {
         )
       )
         this.warnPreference("保存された列幅の一部を既定値に戻しました。");
+    }
+    for (const key of ["localTreeWidth", "remoteTreeWidth"] as const) {
+      const value = data[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 4096)
+        this[key] = value;
     }
     for (const key of ["localTreeRatio", "remoteTreeRatio"] as const) {
       const value = data[key];
@@ -917,6 +946,47 @@ export class Store {
     this.bookmarkTree = tree;
     this.bookmarkTreeChanged = true;
   }
+  saveSideBookmark(side:BookmarkSide,input:{id?:string;name:string;path:string},profile?:Profile){
+    const records=side==='local'?this.localBookmarks:this.remoteBookmarks;
+    const existing=input.id?records.find(b=>b.id===input.id):undefined;
+    if(side==='remote'&&!profile)throw Error('Remote bookmark requires a connection');
+    const key=side==='remote'?connectionKey(profile!):undefined;
+    if(existing&&side==='remote'&&(existing as RemoteBookmark).connectionKey!==key)throw Error('A bookmark cannot change its connection identity');
+    const saved={id:input.id??crypto.randomUUID(),name:input.name,path:input.path,...(key?{connectionKey:key}:{})};
+    const next=validateSideBookmarks(existing?records.map(b=>b.id===saved.id?saved:b):[...records,saved],side);
+    const tree=validateSideBookmarkTree(side==='local'?this.localBookmarkTree:this.remoteBookmarkTree,next,side);
+    if(side==='local'){this.localBookmarks=next;this.localBookmarkTree=tree;}else {this.remoteBookmarks=next as RemoteBookmark[];this.remoteBookmarkTree=tree;}
+    return next.find(b=>b.id===saved.id)!;
+  }
+  removeSideBookmark(side:BookmarkSide,id:string,key?:string){
+    const records=side==='local'?this.localBookmarks:this.remoteBookmarks;
+    if(!records.some(b=>b.id===id&&(side==='local'||(b as RemoteBookmark).connectionKey===key)))return;
+    const tree=side==='local'?this.localBookmarkTree:this.remoteBookmarkTree;
+    tree.nodes=tree.nodes.filter(n=>n.id!==id);
+    if(side==='local')this.localBookmarks=this.localBookmarks.filter(b=>b.id!==id);
+    else this.remoteBookmarks=this.remoteBookmarks.filter(b=>b.id!==id||b.connectionKey!==key);
+  }
+  private editSideBookmarkTree<T>(side:BookmarkSide,profile:Profile|undefined,action:(e:BookmarkTreeEditor,key:string)=>T):T{
+    if(side==='remote'&&!profile)throw Error('Remote bookmark requires a connection');
+    const editor=sideBookmarkEditor(side==='local'?this.localBookmarkTree:this.remoteBookmarkTree,side==='local'?this.localBookmarks:this.remoteBookmarks,side);
+    const result=action(editor,side==='local'?LOCAL_BOOKMARK_SCOPE:connectionKey(profile!));editor.finish();
+    const tree=fromSideTree(editor.tree,side);
+    const names=new Map(editor.bookmarks.map(b=>[b.id,b.name]));
+    const records=validateSideBookmarks((side==='local'?this.localBookmarks:this.remoteBookmarks).map(b=>({...b,name:names.get(b.id)!})),side);
+    if(side==='local'){this.localBookmarkTree=tree;this.localBookmarks=records;}else{this.remoteBookmarkTree=tree;this.remoteBookmarks=records as RemoteBookmark[];}
+    return result;
+  }
+  createSideBookmarkGroup(side:BookmarkSide,name:string,parentId:string|null=null,profile?:Profile){return this.editSideBookmarkTree(side,profile,(e,key)=>e.create(key,name,parentId));}
+  renameSideBookmarkNode(side:BookmarkSide,id:string,name:string,profile?:Profile){this.editSideBookmarkTree(side,profile,(e,key)=>e.rename(key,id,name));}
+  moveSideBookmarkNode(side:BookmarkSide,id:string,parentId:string|null,beforeId:string|null=null,profile?:Profile){this.editSideBookmarkTree(side,profile,(e,key)=>e.move(key,id,parentId,beforeId));}
+  ungroupSideBookmarkFolder(side:BookmarkSide,id:string,profile?:Profile){this.editSideBookmarkTree(side,profile,(e,key)=>e.ungroup(key,id));}
+  rememberSideFolder(side:BookmarkSide,path:string,profile?:Profile,openedAt=Date.now()){
+    if(side==='remote'&&!profile)return;
+    const entry=validateSideHistory([{path,openedAt,...(side==='remote'?{connectionKey:connectionKey(profile!)}:{})}],side)[0];
+    const records=side==='local'?this.localFolderHistory:this.remoteFolderHistory;
+    const next=[entry,...records.filter(p=>p.connectionKey!==entry.connectionKey||(side==='local'?p.path.toLowerCase()!==entry.path.toLowerCase():p.path!==entry.path))].slice(0,200);
+    if(side==='local')this.localFolderHistory=next;else this.remoteFolderHistory=next;
+  }
   private editBookmarkTree<T>(action: (editor: BookmarkTreeEditor) => T): T {
     const editor = new BookmarkTreeEditor(
       this.bookmarkTree,
@@ -1127,6 +1197,11 @@ export class Store {
   }
   serialize(): Settings {
     const panes = this.finitePaneColumns();
+    for (const key of ["localTreeWidth", "remoteTreeWidth"] as const) {
+      const value = this[key];
+      if (value !== undefined && (!Number.isFinite(value) || value < 100 || value > 4096))
+        this[key] = undefined;
+    }
     return {
       version: 1,
       retainedSyncs: retainedSyncsInWorkspaceOrder(
@@ -1144,10 +1219,18 @@ export class Store {
       localPaneRatio: this.localPaneRatio,
       localTreeRatio: this.localTreeRatio,
       remoteTreeRatio: this.remoteTreeRatio,
+      localTreeWidth: this.localTreeWidth,
+      remoteTreeWidth: this.remoteTreeWidth,
       exclusions: this.exclusions,
       syncOptions: this.syncOptions,
       syncPresets: this.syncPresets,
       folderBookmarks: this.folderBookmarks,
+      localBookmarks:this.localBookmarks,
+      remoteBookmarks:this.remoteBookmarks,
+      localBookmarkTree:this.localBookmarkTree,
+      remoteBookmarkTree:this.remoteBookmarkTree,
+      localFolderHistory:this.localFolderHistory,
+      remoteFolderHistory:this.remoteFolderHistory,
       folderPairHistory: this.folderPairHistory,
       paneColumns: panes,
       connectionTree: this.connectionTree,

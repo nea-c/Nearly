@@ -1,6 +1,10 @@
+import { bookmarkItemIcon } from './bookmark-item.js';
+import { popupBarrier } from './popup-barrier.js';
 import { t, text, html, tError } from "./i18n.js";
 import type { FolderBookmark } from "./explorer-preferences.js";
 import { bindPointerReorder, cancelPointerReorder } from "./pointer-reorder.js";
+import {bindBookmarkOverflow,menuKeys,focusBookmarkMenu} from './bookmark-overflow.js';
+import {bindBookmarkTooltip,closeBookmarkTooltip} from './bookmark-tooltip.js';
 
 export type BookmarkNode = {
   id: string;
@@ -31,6 +35,9 @@ type Options = {
   open: (bookmark: FolderBookmark) => void;
   register: (parentId: string | null) => void;
   history: () => void;
+  side?: 'local' | 'remote';
+  edit?: (bookmark: FolderBookmark, opener: HTMLElement) => void;
+  remove?: (bookmark: FolderBookmark, opener: HTMLElement) => void;
   report: (error: unknown) => void;
 };
 const esc = (s: unknown) =>
@@ -42,7 +49,20 @@ const esc = (s: unknown) =>
       ]!,
   );
 let popup: HTMLElement | undefined;
+let releaseBarrier: (() => void) | undefined;
+let contextUnderlay: HTMLElement | undefined;
+export function bookmarkContextOpen() { return !!releaseBarrier; }
 let popupOwner = "";
+let restoreOverflow:(()=>void)|undefined;
+let popupAnchor:HTMLElement|undefined;
+let popupAnchorOwner="";
+let popupReturnRoot: HTMLElement | undefined;
+function closeBookmarkTreeAndFocus(){
+  const anchor=popupAnchor,owned=!!popupOwner&&popupAnchorOwner===popupOwner;
+  closeBookmarkTree();
+  if(owned&&anchor?.isConnected&&!anchor.closest('[hidden]')&&!anchor.matches(':disabled'))anchor.focus();
+  else if(owned&&popupReturnRoot?.isConnected)popupReturnRoot.focus({preventScroll:true});
+}
 let menuTimer: ReturnType<typeof setTimeout> | undefined;
 const cancelMenuTimer = () => {
   clearTimeout(menuTimer);
@@ -62,32 +82,38 @@ export function cancelBookmarkTreeDrag() {
   clearIndicators();
 }
 export function closeBookmarkTree() {
+  releaseBarrier?.(); releaseBarrier = undefined;
+  contextUnderlay?.remove(); contextUnderlay = undefined;
+  closeBookmarkTooltip();restoreOverflow?.();restoreOverflow=undefined;
   cancelMenuTimer();
   popup?.remove();
   popup = undefined;
   popupOwner = "";
+  document.querySelectorAll(".bookmark-bar,.side-bookmark-bar").forEach(bar=>bar.setAttribute("aria-expanded","false"));
   document
     .querySelectorAll("[data-bookmark-group][aria-expanded=true]")
     .forEach((e) => e.setAttribute("aria-expanded", "false"));
   document
     .querySelector("#bookmark-more")
     ?.setAttribute("aria-expanded", "false");
+
 }
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") cancelBookmarkTreeDrag();
   if (event.key === "Escape" && popup && !popup.dataset.busy) {
     event.preventDefault();
-    closeBookmarkTree();
+    closeBookmarkTreeAndFocus();
   }
 });
 window.addEventListener("blur", cancelBookmarkTreeDrag);
 document.addEventListener("pointerdown", (event) => {
   if (
     popup &&
+    !releaseBarrier &&
     !popup.matches(".bookmark-tree-overlay") &&
     event.target instanceof Element &&
     !event.target.closest(
-      ".bookmark-menu-stack,#bookmark-tree-context,[data-bookmark-tree-node],#bookmark-more",
+      ".bookmark-menu-stack,#bookmark-tree-context,#side-bookmark-context,[data-bookmark-tree-node],[data-bookmark-overflow]",
     )
   )
     closeBookmarkTree();
@@ -98,6 +124,7 @@ export function bookmarkTreeButtons(
   bookmarks: FolderBookmark[],
   key: string,
   parentId: string | null = null,
+  side?: 'local' | 'remote',
 ) {
   return nodes
     .filter((n) => n.connectionKey === key && n.parentId === parentId)
@@ -106,9 +133,8 @@ export function bookmarkTreeButtons(
         (b) => b.id === n.bookmarkId && b.connectionKey === key,
       );
       if (n.kind === "bookmark" && !b) return "";
-      const title =
-        n.kind === "group" ? n.name : `${b!.name}: ${b!.local} → ${b!.remote}`;
-      return `<button type="button" class="bookmark-tree-item" draggable="false" data-bookmark-tree-node="${esc(n.id)}" ${n.kind === "group" ? `data-bookmark-group="${esc(n.id)}" aria-haspopup="menu" aria-expanded="false"` : `data-bookmark-open="${esc(b!.id)}"`} title="${esc(title)}">${n.kind === "group" ? '<span class="folder-glyph" aria-hidden="true"></span>' : '<svg class="bookmark-item-icon" data-bookmark-icon width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M4 2.5h8v11l-4-2.8-4 2.8z"/></svg>'}<span class="bookmark-label">${esc(n.kind === "group" ? n.name : b!.name)}</span>${n.kind === "group" ? '<span class="bookmark-arrow" aria-hidden="true">▾</span>' : ""}</button>`;
+      const description=n.kind==='group'?[n.name]:side?[b!.name,t(side==='local'?'ローカル':'リモート'),side==='local'?b!.local:b!.remote]:[b!.name,t('ローカル'),b!.local,t('リモート'),b!.remote];
+      return `<button type="button" class="bookmark-tree-item" ${side ? `id="${side}-bookmark-${esc(n.id)}" ${n.kind==='bookmark'?`data-side-open="${esc(n.id)}"`:''}` : ''} draggable="false" data-bookmark-tree-node="${esc(n.id)}" ${n.kind === "group" ? `data-bookmark-group="${esc(n.id)}" aria-haspopup="menu" aria-expanded="false"` : `data-bookmark-open="${esc(b!.id)}"`} data-bookmark-description="${esc(JSON.stringify(description))}">${n.kind === "group" ? '<span class="folder-glyph" aria-hidden="true"></span>' : bookmarkItemIcon}<span class="bookmark-label">${esc(n.kind === "group" ? n.name : b!.name)}</span>${n.kind === "group" ? '<span class="bookmark-arrow" aria-hidden="true">▾</span>' : ""}</button>`;
     })
     .join("");
 }
@@ -192,7 +218,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
     const deletingGroup = mode === "delete" && node(id!)?.kind === "group";
     const title =
       mode === "create"
-        ? t("整理フォルダーを作成")
+        ? t("フォルダを追加")
         : mode === "rename"
           ? t("名前を変更")
           : deletingGroup
@@ -218,33 +244,46 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
     };
     view.querySelector<HTMLElement>("input,button")?.focus();
   };
-  const context = (id: string | undefined, x: number, y: number) => {
-    closeBookmarkTree();
+  const context = (id: string | undefined, x: number, y: number, opener?:HTMLElement) => {
+    const previous=opener&&popupOwner===options.owner&&popup?.contains(opener)?popupAnchor:opener;
+    const returnTo=previous?.matches('button')?previous:root;
+    // Keep the actual overflow/cascade target visible while its context is open.
+    if (opener && popup?.contains(opener) && !releaseBarrier) {
+      contextUnderlay = popup; popup = undefined; cancelMenuTimer(); closeBookmarkTooltip();
+    } else closeBookmarkTree();
+    popupAnchor=returnTo;popupAnchorOwner=options.owner;
+    popupReturnRoot=root;
+    if(returnTo===root)root.setAttribute("aria-expanded","true");
     const view = document.createElement("section");
-    view.id = "bookmark-tree-context";
+    view.id = options.side ? "side-bookmark-context" : "bookmark-tree-context";
     view.className = "bookmark-tree-menu";
+    view.style.zIndex = '1002';
     view.setAttribute("role", "menu");
     popup = view;
     popupOwner = options.owner;
     const n = id ? node(id) : undefined;
     const register =
-      html`<button data-bookmark-action="register" role="menuitem">＋ 登録</button>`;
+      html`<button data-bookmark-action="register" role="menuitem">${t("ブックマークを追加")}</button>`;
     const create =
-      html`<button data-bookmark-action="create" role="menuitem">+フォルダ</button>`;
+      html`<button data-bookmark-action="create" role="menuitem">${t("フォルダを追加")}</button>`;
     const history =
       html`<button data-bookmark-action="history" role="menuitem">履歴</button>`;
     view.innerHTML =
       register +
       create +
       history +
+      (n?.kind==='bookmark'&&options.edit ? html`<button data-bookmark-action="edit" role="menuitem">編集</button>`:'')+
       (n
         ? html`<button data-bookmark-action="rename" role="menuitem">名前を変更</button><button data-bookmark-action="delete" role="menuitem">削除</button>`
         : "");
     document.body.append(view);
+    releaseBarrier = popupBarrier(view, closeBookmarkTreeAndFocus, 1001, id ? opener : undefined);
     place(view, x, y);
+    menuKeys(view,closeBookmarkTreeAndFocus);
     view
       .querySelectorAll<HTMLButtonElement>("[data-bookmark-action]")
       .forEach((button) => {
+        if(options.side)button.dataset.sideAction=button.dataset.bookmarkAction==='register'?'add':button.dataset.bookmarkAction;
         button.disabled =
           button.dataset.bookmarkAction !== "history" && options.busy();
         button.onclick = () => {
@@ -256,6 +295,8 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
               n?.kind === "group" ? n.id : (n?.parentId ?? null),
             );
           else if (action === "history") options.history();
+          else if(action==='edit'&&id){const b=bookmark(id);if(b)options.edit?.(b,returnTo);}
+          else if(action==='delete'&&id&&n?.kind==='bookmark'&&options.remove){const b=bookmark(id);if(b)options.remove(b,returnTo);}
           else dialog(action as "create" | "rename" | "delete", id);
         };
       });
@@ -309,7 +350,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
         return;
       event.preventDefault();
       event.stopPropagation();
-      context(parentId ?? undefined, event.clientX, event.clientY);
+      context(parentId ?? undefined, event.clientX, event.clientY,container);
     };
   };
   const bind = (container: HTMLElement, vertical = false, depth = 0) => {
@@ -317,7 +358,10 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
       .querySelectorAll<HTMLButtonElement>("[data-bookmark-tree-node]")
       .forEach((button) => {
         const id = button.dataset.bookmarkTreeNode!;
+        if(!button.dataset.tooltipBound){bindBookmarkTooltip(button);button.dataset.tooltipBound='true';}
         button.disabled = options.busy();
+        button.onpointerenter=null;
+        if(!vertical)button.removeAttribute('role');
         if (vertical) {
           button.setAttribute("role", "menuitem");
           const arrow = button.querySelector(".bookmark-arrow");
@@ -361,6 +405,9 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
             }, 140);
           };
         button.onkeydown = (event) => {
+          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            event.preventDefault();event.stopPropagation();const box=button.getBoundingClientRect();context(id,box.left,box.bottom,button);return;
+          }
           if (
             ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
               event.key,
@@ -399,7 +446,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
         button.oncontextmenu = (event) => {
           event.preventDefault();
           event.stopPropagation();
-          context(id, event.clientX, event.clientY);
+          context(id, event.clientX, event.clientY,button);
         };
       });
     type Drop = {
@@ -434,7 +481,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
           const target = node(targetId);
           if (!target || targetId === id) return;
           const bounds = targetButton.getBoundingClientRect();
-          const inMenu = !!targetButton.closest("[data-bookmark-folder-menu]");
+          const inMenu = !!targetButton.closest("[data-bookmark-folder-menu],#bookmark-overflow-menu");
           const ratio = inMenu
             ? (point.y - bounds.top) / bounds.height
             : (point.x - bounds.left) / bounds.width;
@@ -466,7 +513,9 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
                   : null,
           };
         }
-        const menu = hit?.closest<HTMLElement>("[data-bookmark-folder-menu]");
+        const folderMenu = hit?.closest<HTMLElement>("[data-bookmark-folder-menu]");
+        const overflowMenu = hit?.closest<HTMLElement>("#bookmark-overflow-menu");
+        const menu = folderMenu ?? overflowMenu;
         const blank =
           menu && popupOwner === options.owner && popup?.contains(menu)
             ? menu
@@ -474,7 +523,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
               ? (root.querySelector<HTMLElement>(".bookmark-items") ?? root)
               : undefined;
         if (!blank) return;
-        const parentId = menu?.dataset.bookmarkFolderMenu ?? null;
+        const parentId = folderMenu?.dataset.bookmarkFolderMenu ?? null;
         if (!canDrop(parentId)) return;
         blank.dataset.bookmarkDrop = "inside";
         return { id, parentId, beforeId: null };
@@ -492,7 +541,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
           root.querySelector<HTMLElement>(".bookmark-items"),
           ...Array.from(
             popup?.querySelectorAll<HTMLElement>(
-              "[data-bookmark-folder-menu]",
+              "[data-bookmark-folder-menu],#bookmark-overflow-menu",
             ) ?? [],
           ),
         ].filter((el): el is HTMLElement => !!el),
@@ -503,6 +552,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
     depth: number,
     focus: boolean,
   ) => {
+    closeBookmarkTooltip();
     const id = anchor.dataset.bookmarkTreeNode!;
     if (options.busy() || node(id)?.kind !== "group") return;
     if (
@@ -523,6 +573,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
       popupOwner !== options.owner
     )
       return;
+    if(depth===0){popupAnchor=anchor;popupAnchorOwner=options.owner;}
     if (menus[depth]?.id === id && menus[depth].view.isConnected) {
       if (focus)
         menus[depth].view.querySelector<HTMLButtonElement>("button")?.focus();
@@ -536,7 +587,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
     view.setAttribute("role", "menu");
     view.setAttribute("aria-label", name(id));
     view.innerHTML =
-      bookmarkTreeButtons(nodes, options.bookmarks, options.key, id) ||
+      bookmarkTreeButtons(nodes, options.bookmarks, options.key, id, options.side) ||
       html`<p class="subtle bookmark-menu-empty">空の整理フォルダ</p>`;
     popup.append(view);
     view.onpointerenter = cancelMenuTimer;
@@ -567,21 +618,22 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
   const strip = root.querySelector<HTMLElement>(".bookmark-items") ?? root;
   bindBlank(root, null);
   bindBlank(strip, null);
-  const more = root.querySelector<HTMLButtonElement>("#bookmark-more");
-  if (more)
-    more.onclick = () => {
-      if (
-        popup?.id === "bookmark-tree-context" &&
-        popupOwner === options.owner
-      ) {
-        closeBookmarkTree();
-        return;
-      }
-      const bounds = more.getBoundingClientRect();
-      context(undefined, bounds.right - 240, bounds.bottom + 3);
-      if (popup?.id === "bookmark-tree-context")
-        more.setAttribute("aria-expanded", "true");
-    };
+  root.onkeydown = event => {
+    if (event.defaultPrevented || (event.target instanceof Element && event.target.closest("[data-bookmark-tree-node]"))) return;
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      event.preventDefault();event.stopPropagation();const box=root.getBoundingClientRect();context(undefined,box.left,box.bottom,root);
+    }
+  };
+  bindBookmarkOverflow(root,(items,keyboard)=>{
+    closeBookmarkTree();const overflow=root.querySelector<HTMLButtonElement>('[data-bookmark-overflow]')!;
+    popup=document.createElement('div');popup.className='bookmark-menu-stack';popupOwner=options.owner;popupAnchor=overflow;popupAnchorOwner=options.owner;
+    const view=document.createElement('section');view.className='bookmark-tree-menu'+(options.side?' side-bookmark-menu':'');view.id='bookmark-overflow-menu';view.setAttribute('role','menu');
+    items.forEach(item=>{item.hidden=false;view.append(item);});popup.append(view);document.body.append(popup);
+    restoreOverflow=()=>{items.forEach(item=>{item.hidden=true;item.removeAttribute('role');strip.append(item);});overflow.setAttribute('aria-expanded','false');bind(root);};
+    menus.length=0;menus.push({view,anchor:overflow,id:'@overflow'});bind(view,true,1);bindBlank(view,null);
+    const box=overflow.getBoundingClientRect();place(view,box.right-240,box.bottom+3);overflow.setAttribute('aria-expanded','true');
+    menuKeys(view,closeBookmarkTreeAndFocus);focusBookmarkMenu(view,keyboard);
+  },closeBookmarkTree);
   strip.onwheel = (event) => {
     if (strip.scrollWidth <= strip.clientWidth || event.ctrlKey) return;
     event.preventDefault();

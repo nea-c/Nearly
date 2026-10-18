@@ -17,12 +17,12 @@ test.beforeEach(async ({ page }) => {
     }}};
   });
   await page.goto('/'); await page.locator('#connect-form .primary').click();
-  await expect(page.locator('#bookmark-more')).toBeVisible();
+  await expect(page.locator('.bookmark-bar')).toBeVisible();await expect(page.locator('#bookmark-tools')).toHaveCount(0);
 });
 
 async function context(page,id?) {
   if(id)await page.locator(`[data-bookmark-tree-node="${id}"]`).first().click({button:'right'});
-  else { const strip=page.locator('.bookmark-items'), box=await strip.boundingBox(); await strip.click({button:'right',position:{x:box!.width-2,y:2}}); }
+  else { const strip=page.locator('.bookmark-bar .bookmark-items'), box=await strip.boundingBox(); await strip.click({button:'right',position:{x:box!.width-2,y:2}}); }
   await expect(page.locator('#bookmark-tree-context')).toBeVisible();
 }
 async function create(page,name,parent?) {
@@ -158,7 +158,7 @@ test('Nearly actual bookmark drag moves into a folder then blank bar, with no br
   await page.locator('[data-bookmark-tree-node="two"]').dragTo(page.locator(`[data-bookmark-tree-node="${group}"]`));
   await expect.poll(async()=> (await saved(page)).bookmarkTree.nodes.find(n=>n.id==='two').parentId).toBe(group);
   await page.waitForTimeout(350);await page.locator(`[data-bookmark-group="${group}"]`).click();
-  const strip=page.locator('.bookmark-items'), box=await strip.boundingBox();
+  const strip=page.locator('.bookmark-bar .bookmark-items'), box=await strip.boundingBox();
   await page.locator('[data-bookmark-tree-node="two"]').dragTo(strip,{targetPosition:{x:box!.width-8,y:box!.height/2}});
   await expect.poll(async()=> (await saved(page)).bookmarkTree.nodes.find(n=>n.id==='two').parentId).toBe(null);
   await expect(page.locator('#local-path')).toHaveValue('C:\\root');
@@ -176,3 +176,4 @@ test('Nearly bookmark drag click guard does not block a different bookmark',asyn
   await expect(page.locator('#local-path')).toHaveValue('C:\\root\\two');
   await expect(page.locator('#remote-path')).toHaveValue('/two');
 });
+

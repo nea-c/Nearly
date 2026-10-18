@@ -42,9 +42,9 @@ test('patches, prereleases, ambiguous aliases and incompatible Windows values fa
   for (const value of ['v1.0.0','1.0.0','r1.0.0','r01.0','r1.00','r1.0-beta','r1.0+build','r1.0\n','r65536.0']) assert.throws(() => internalVersion(value));
 });
 test('the repository metadata and frontend label match the authoritative milestone', async () => {
-  assert.equal(await checkVersions(), '1.0.0');
+  assert.equal(await checkVersions(), '2.0.0');
   const frontend = await fs.readFile(path.join(projectRoot,'src/version.ts'),'utf8');
-  assert.match(frontend, /return "r1\.0"/);
+  assert.match(frontend, /return "r2\.0"/);
 });
 test('sync detects every metadata drift and preserves unrelated package/lock data', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'nearly-version-'));
@@ -54,10 +54,11 @@ test('sync detects every metadata drift and preserves unrelated package/lock dat
     await fs.copyFile(path.join(projectRoot,'version.json'), path.join(root,'version.json'));
     const files = await versionFiles();
     for (const [name, content] of files) await fs.writeFile(path.join(root,name),content);
-    assert.equal(await checkVersions(root),'1.0.0');
+    const currentVersion = await readVersion();
+    assert.equal(await checkVersions(root),currentVersion);
     await fs.writeFile(path.join(root,'version.json'),'{"version":"9.9.0"}');
     const changed = await versionFiles(root);
-    await fs.writeFile(path.join(root,'version.json'),'{"version":"1.0.0"}');
+    await fs.writeFile(path.join(root,'version.json'),JSON.stringify({version:currentVersion}));
     for (const [name, original] of files) {
       const drift = changed.get(name);
       await fs.writeFile(path.join(root,name),drift);

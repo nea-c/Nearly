@@ -28,4 +28,4 @@ Model and browser tests use synthetic fixtures. Browser tests use installed Micr
 
 ## Settings
 
-The default settings.json and settings.backup.json live beside the running executable. A write failure does not redirect settings elsewhere. SYNCFILES_CONFIG_DIR is an explicit override for isolated development/test fixtures; do not set it for normal use. Profiles and paths are personal data and must not be committed. Passwords, passphrases and private key contents must not be saved in application settings or logs.
+The five primaries settings.json, history.json, bookmarks.json, sync-profiles.json and connections.json, plus their per-file *.backup.json recovery copies, live beside the running executable. See [storage format](storage-format.md) for manifest consistency, interrupted-save recovery and explicit external conversion. A write failure does not redirect settings elsewhere. SYNCFILES_CONFIG_DIR is an explicit override for isolated development/test fixtures; do not set it for normal use. Profiles and paths are personal data and must not be committed. Passwords, passphrases and private key contents must not be saved in application settings or logs.

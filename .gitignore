@@ -112,7 +112,20 @@ Thumbs.db
 
 !/docs/r2-refinement.md
 !/docs/window-size.md
+!/docs/post-r1.md
 !/docs/synchronization.md
 !/docs/github-release.md
+!/docs/storage-format.md
+!/docs/transfer-copy.md
 !/scripts/sync-difference-test.mjs
 !/scripts/ppk-fixtures.mjs
+!/scripts/upload-test.mjs
+
+# Generic generated-fixture and guarded maintenance sources used by public tests.
+!/scripts/storage-fixture.mjs
+!/scripts/storage-once.mjs
+!/scripts/storage-writers.ps1
+!/scripts/native-ui-refinement.mjs
+!/scripts/native-download-qa.mjs
+!/scripts/native-storage-qa.mjs
+!/scripts/native-explorer-download.ps1

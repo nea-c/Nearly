@@ -117,14 +117,11 @@ async function saveBookmark(page, name) {
   await expect(page.locator("#bookmark-form")).toHaveCount(0);
 }
 async function reorderColumn(page, side, source, target) {
-  await page.evaluate(({side,source,target}) => {
-    const pane=document.querySelector(`[data-list="${side}"]`);
-    const from=pane.querySelector(`[data-column-sort="${source}"]`), to=pane.querySelector(`th[data-column="${target}"]`);
-    const transfer=new DataTransfer(), bounds=to.getBoundingClientRect();
-    from.dispatchEvent(new DragEvent("dragstart",{bubbles:true,dataTransfer:transfer}));
-    to.dispatchEvent(new DragEvent("dragover",{bubbles:true,cancelable:true,dataTransfer:transfer,clientX:bounds.left+2}));
-    to.dispatchEvent(new DragEvent("drop",{bubbles:true,cancelable:true,dataTransfer:transfer,clientX:bounds.left+2}));
-  },{side,source,target});
+  const from=await page.locator(`[data-list="${side}"] [data-column-sort="${source}"]`).boundingBox();
+  const to=await page.locator(`[data-list="${side}"] th[data-column="${target}"]`).boundingBox();
+  expect(from).toBeTruthy();expect(to).toBeTruthy();
+  await page.mouse.move(from.x+10,from.y+from.height/2);await page.mouse.down();
+  await page.mouse.move(to.x+10,to.y+to.height/2,{steps:10});await page.mouse.up();
 }
 
 test("bookmarks persist, dedupe and open both panes without changing an active sync root", async ({
@@ -525,12 +522,16 @@ test("a pending bookmark save blocks a second candidate until the first commits"
   await page.locator("#bookmark-save").click();
   await expect(page.locator("#bookmark-overlay .form-error")).not.toBeEmpty();
   expect(await page.evaluate(() => window.calls.filter(c => c.cmd === "save_settings").length)).toBe(saveCount);
+  await page.locator('#bookmark-name').focus();
+  await page.evaluate(()=>{window.replacementName=document.querySelector('#bookmark-name');window.replacementName.setSelectionRange(1,4);window.replacementDialog=document.querySelector('#bookmark-overlay');});
   await page.evaluate(() => {
     window.holdSave = false;
     window.resolveSave();
   });
   await expect(page.locator("[data-bookmark-open]")).toHaveText("First updated");
   await expect(page.locator("#bookmark-name")).toHaveValue("Second");
+  await expect(page.locator('#bookmark-name')).toBeFocused();
+  expect(await page.evaluate(()=>({sameField:window.replacementName===document.querySelector('#bookmark-name'),sameDialog:window.replacementDialog===document.querySelector('#bookmark-overlay'),start:window.replacementName.selectionStart,end:window.replacementName.selectionEnd}))).toEqual({sameField:true,sameDialog:true,start:1,end:4});
   await page.locator("#bookmark-save").click();
   await expect(page.locator("[data-bookmark-open]")).toHaveText(["First updated", "Second"]);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem("fixture-settings")).folderBookmarks.map(b => b.name))).toEqual(["First updated", "Second"]);

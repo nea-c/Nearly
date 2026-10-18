@@ -88,7 +88,7 @@ for (const theme of ["light", "dark", "midnight", "forest", "mint"])
       return [
         "body",
         ".pane > header h2",
-        ".tree-caption",
+        ".folder-tree .tree-label",
         "th",
         ".file-menu button:not(:disabled)",
         ".menu-context",

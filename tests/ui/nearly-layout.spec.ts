@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from '@playwright/test';
 test.beforeEach(async({page})=>{
   await page.addInitScript(()=>{
@@ -8,7 +9,8 @@ test.beforeEach(async({page})=>{
       if(cmd==='list_drives')return [{name:'C:',path:'C:\\'},{name:'D:',path:'D:\\'}];
       const entries=[{name:'alpha',dir:true,size:0},{name:'hidden-folder',dir:true,size:0,hidden:true},{name:'A long document name.txt',dir:false,size:2048,modifiedAt:1720000000}];
       if(cmd==='connect_session')return {path:'/',entries};
-      if(cmd==='list_local'||cmd==='list_remote') {if(args.path.includes('missing'))throw Error('Folder cannot be read');return args.path.endsWith('alpha')?[]:entries;}
+      if(cmd==='list_local'&&args.path==='C:\\')return [{name:'root',dir:true,size:0}];
+       if(cmd==='list_local'||cmd==='list_remote') {if(args.path.includes('missing'))throw Error('Folder cannot be read');return args.path.endsWith('alpha')?[]:entries;}
     }}};
   });
   await page.goto('/');await page.locator('#connect-form .primary').click();
@@ -16,6 +18,7 @@ test.beforeEach(async({page})=>{
 });
 test('folder labels and full rows browse and open context menus while only chevrons expand',async({page})=>{
   for(const side of ['local','remote']){
+     await expandTreePath(page,side,side==='local'?'C:\\root':'/');
     const path=side==='local'?'C:\\root\\alpha':'/alpha';
     const row=page.locator(`[data-tree-row=${side}]`).filter({has:page.locator(`[data-tree-select=${side}]`)}).filter({hasText:'alpha'});
     const item=row.locator('..');

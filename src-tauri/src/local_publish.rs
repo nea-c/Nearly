@@ -144,6 +144,27 @@ impl OwnedStage {
         })
     }
     pub fn publish(&mut self, target: &Path, budget: &Budget) -> Result<(), ArchiveError> {
+        self.publish_inner(target, budget, false)
+    }
+    /// Only regular files may be replaced; caller owns explicit consent and target revalidation.
+    pub fn publish_replacing(&mut self, target: &Path, budget: &Budget) -> Result<(), ArchiveError> {
+        self.publish_replacing_checked(target, budget, |source, original| {
+            if file_security(source)? != file_security(original)? || (source.metadata()?.file_attributes() ^ original.metadata()?.file_attributes()) & 0x4000 != 0 {
+                return Err(ArchiveError::new("security_mismatch"));
+            }
+            Ok(())
+        })
+    }
+    fn publish_replacing_checked(&mut self, target: &Path, budget: &Budget, check: impl FnOnce(&File, &File) -> Result<(), ArchiveError>) -> Result<(), ArchiveError> {
+        if !self.handle.metadata()?.is_file() || !ordinary(&fs::symlink_metadata(target)?) || !fs::symlink_metadata(target)?.is_file() {
+            return Err(ArchiveError::new("unsafe_entry"));
+        }
+        let original = OpenOptions::new().access_mode(0x20080).share_mode(5).custom_flags(0x02200000).open(target)?;
+        if !ordinary(&original.metadata()?) || !original.metadata()?.is_file() { return Err(ArchiveError::new("unsafe_entry")); }
+        check(&self.handle, &original)?;
+        self.publish_inner(target, budget, true)
+    }
+    fn publish_inner(&mut self, target: &Path, budget: &Budget, replace: bool) -> Result<(), ArchiveError> {
         budget.check()?;
         if self.committed || identity(&self.handle)? != self.original {
             return Err(ArchiveError::new("unsafe_entry"));
@@ -153,7 +174,7 @@ impl OwnedStage {
             use windows::Win32::{
                 Foundation::HANDLE,
                 Storage::FileSystem::{
-                    FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+                    FileRenameInfo, FileRenameInfoEx, SetFileInformationByHandle, FILE_RENAME_INFO,
                 },
             };
             let wide: Vec<u16> = target.as_os_str().encode_wide().collect();
@@ -169,7 +190,10 @@ impl OwnedStage {
             let mut storage = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
             let ptr = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
             unsafe {
-                (*ptr).Anonymous.ReplaceIfExists = false;
+                // REPLACE_IF_EXISTS | POSIX_SEMANTICS permits retaining a delete-shared
+                // metadata handle to the original. Do not ignore read-only attributes.
+                if replace { (*ptr).Anonymous.Flags = 0x3; }
+                else { (*ptr).Anonymous.ReplaceIfExists = false; }
                 (*ptr).RootDirectory = HANDLE::default();
                 (*ptr).FileNameLength = length as u32;
                 std::ptr::copy_nonoverlapping(
@@ -179,7 +203,7 @@ impl OwnedStage {
                 );
                 SetFileInformationByHandle(
                     HANDLE(self.handle.as_raw_handle()),
-                    FileRenameInfo,
+                    if replace { FileRenameInfoEx } else { FileRenameInfo },
                     ptr.cast(),
                     size as u32,
                 )
@@ -206,6 +230,27 @@ impl OwnedStage {
         error.committed = self.committed;
         error
     }
+    /// Delete only the still-owned uncommitted regular-file handle, never a reopened pathname.
+    pub fn discard_file(&mut self) -> Result<(), ArchiveError> {
+        if self.committed || identity(&self.handle)? != self.original || !self.handle.metadata()?.is_file() { return Err(ArchiveError::new("unsafe_entry")); }
+        #[cfg(windows)] {
+            use windows::Win32::{Foundation::HANDLE,Storage::FileSystem::{SetFileInformationByHandle,FileDispositionInfo,FILE_DISPOSITION_INFO}};
+            let info=FILE_DISPOSITION_INFO{DeleteFile:true.into()};
+            unsafe {SetFileInformationByHandle(HANDLE(self.handle.as_raw_handle()),FileDispositionInfo,(&info as *const FILE_DISPOSITION_INFO).cast(),std::mem::size_of_val(&info) as u32)}.map_err(|_|ArchiveError::new("io_error"))?;
+            Ok(())
+        }
+        #[cfg(not(windows))] {Err(ArchiveError::new("unsupported_platform"))}
+    }
+}
+/// Read-only comparison: replacement never changes ACLs or encryption to make publication work.
+fn file_security(file:&File)->Result<Vec<u8>,ArchiveError>{
+    use windows::Win32::{Foundation::HANDLE,Security::{GetKernelObjectSecurity,PSECURITY_DESCRIPTOR,OWNER_SECURITY_INFORMATION,GROUP_SECURITY_INFORMATION,DACL_SECURITY_INFORMATION}};
+    let information=(OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION).0;
+    let mut needed=0;let _=unsafe{GetKernelObjectSecurity(HANDLE(file.as_raw_handle()),information,None,0,&mut needed)};
+    if needed==0||needed>65536{return Err(ArchiveError::new("security_unavailable"));}
+    let mut storage=vec![0usize;(needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    unsafe{GetKernelObjectSecurity(HANDLE(file.as_raw_handle()),information,Some(PSECURITY_DESCRIPTOR(storage.as_mut_ptr().cast())),needed,&mut needed)}.map_err(|_|ArchiveError::new("security_unavailable"))?;
+    Ok(unsafe{std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(),needed as usize)}.to_vec())
 }
 #[cfg(test)]
 mod tests {
@@ -247,6 +292,27 @@ mod tests {
         drop(stage);
         drop(guard);
         fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn replacement_publishes_complete_stage_without_predeleting_existing_file() {
+        use std::io::Write;
+        let parent=temp();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let target=parent.join("target");fs::write(&target,b"old intact").unwrap();
+        let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"new complete").unwrap();stage.handle.sync_all().unwrap();
+        assert_eq!(fs::read(&target).unwrap(),b"old intact");stage.publish_replacing(&target,&budget).unwrap();assert_eq!(fs::read(&target).unwrap(),b"new complete");drop(stage);fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn security_validation_failure_keeps_both_original_and_complete_stage() {
+        use std::io::Write;
+        let parent=temp();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let target=parent.join("target");fs::write(&target,b"old intact").unwrap();let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"new complete").unwrap();
+        assert!(stage.publish_replacing_checked(&target,&budget,|_,_|Err(ArchiveError::new("security_mismatch"))).is_err());assert_eq!(fs::read(&target).unwrap(),b"old intact");assert_eq!(stage.handle.metadata().unwrap().len(),12);stage.discard_file().unwrap();drop(stage);fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn replacement_preserves_open_delete_shared_target_handle_until_atomic_publish() {
+        use std::io::Write;
+        let parent=temp();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let target=parent.join("target");fs::write(&target,b"old intact").unwrap();
+        let retained=OpenOptions::new().access_mode(0x80).share_mode(5).custom_flags(0x02200000).open(&target).unwrap();
+        let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"new complete").unwrap();stage.handle.sync_all().unwrap();
+        stage.publish_replacing(&target,&budget).unwrap();assert_eq!(fs::read(&target).unwrap(),b"new complete");assert_eq!(retained.metadata().unwrap().len(),10);drop(retained);drop(stage);fs::remove_dir_all(parent).unwrap();
     }
     #[test]
     fn same_delete_handle_publishes_file_and_directory_without_reopen() {

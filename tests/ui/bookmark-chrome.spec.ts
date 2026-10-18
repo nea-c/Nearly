@@ -23,7 +23,7 @@ async function fixture(page, theme='light') {
 }
 async function context(page,id?) {
   if(id)await page.locator(`[data-bookmark-tree-node=${id}]`).click({button:'right'});
-  else {const strip=page.locator('.bookmark-items'),b=await strip.boundingBox();await strip.click({button:'right',position:{x:b.width-3,y:b.height/2}});}
+  else {const strip=page.locator('.bookmark-bar .bookmark-items'),b=await strip.boundingBox();await strip.click({button:'right',position:{x:b.width-3,y:b.height/2}});}
   await expect(page.locator('#bookmark-tree-context')).toBeVisible();
 }
 async function contrast(locator) {
@@ -42,12 +42,12 @@ const snapshot=page=>page.evaluate(()=>{const data=JSON.parse(localStorage.getIt
 for(const mode of ['light','dark'])test(`bookmark context has ordered concise actions and red deletion in ${mode}`,async({page})=>{
   await fixture(page,mode);await context(page);
   expect(await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.map(e=>e.getAttribute('data-bookmark-action')))).toEqual(['register','create','history']);
-  await expect(page.locator('[data-bookmark-action=create]')).toHaveText('+フォルダ');
+  await expect(page.locator('[data-bookmark-action=create]')).toHaveText('フォルダを追加');
   await page.keyboard.press('Escape');
   for(const id of ['one','g']){
     await context(page,id);
     expect(await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.slice(0,3).map(e=>e.getAttribute('data-bookmark-action')))).toEqual(['register','create','history']);
-    await expect(page.locator('[data-bookmark-action=create]')).toHaveText('+フォルダ');
+    await expect(page.locator('[data-bookmark-action=create]')).toHaveText('フォルダを追加');
     await expect(page.locator('[data-bookmark-action=move],[data-bookmark-action=edit]')).toHaveCount(0);
     await expect(page.locator('[data-bookmark-action=rename]')).toBeVisible();
     const deletion=page.locator('[data-bookmark-action=delete]');

@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { test, expect } from '@playwright/test';
 import { writeFileSync } from 'node:fs';
 test('remote listing cache reuses tree and navigation reads and explicit refresh invalidates',async({page})=>{
@@ -15,6 +16,7 @@ test('remote listing cache reuses tree and navigation reads and explicit refresh
   });
   await page.goto('/');await page.locator('#connect-form .primary').click();
   await expect(page.locator('[data-pane=local]')).toHaveAttribute('aria-busy','false');
+  await expandTreePath(page,'remote','/');
   const start=Date.now();
   await page.locator('[data-tree-toggle=remote][data-tree-path="/a"]').click();
   await expect(page.locator('[data-tree-select=remote][data-tree-path="/a/child"]')).toBeVisible();

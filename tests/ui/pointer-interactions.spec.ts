@@ -1,3 +1,4 @@
+import { expandTreePath } from './tree-expansion';
 import { bookmarkRootAction } from './bookmark-context';
 import { test, expect, type Page, type Locator } from "@playwright/test";
 
@@ -23,7 +24,8 @@ async function fixture(page: Page, large = false) {
       if (cmd === 'list_drives') return [{ name: 'C:', path: 'C:\\' }];
       if (cmd === 'connect_session') return { path: remote, entries };
       if (cmd === 'list_remote' && args.path === '/delayed') return await new Promise(resolve => { window.pointerHeldResolve = () => resolve([{ name: 'completed.txt', dir: false, size: 1 }]); });
-      if (cmd === 'list_local' || cmd === 'list_remote') return entries;
+      if (large && (cmd === 'list_local' || cmd === 'list_remote')) { const sep=cmd==='list_local'?'\\':'/', target=cmd==='list_local'?local:remote, prefix=args.path.endsWith(sep)?args.path:args.path+sep; if(target.startsWith(prefix))return [{name:target.slice(prefix.length).split(sep)[0],dir:true,size:0}]; }
+       if (cmd === 'list_local' || cmd === 'list_remote') return entries;
     } } };
   }, { large });
   await page.goto('/');
@@ -102,6 +104,7 @@ for (const surface of ['list', 'tree']) test(`real wheel keeps ${surface} DOM an
   await fixture(page, true); await connect(page);
   await page.waitForTimeout(800); // finish bootstrap before measuring periodic idle updates.
   for (const side of ['local', 'remote']) {
+    if(surface==='tree')await expandTreePath(page,side,side==='local'?'C:\\one\\two\\three\\four\\five':'/one/two/three/four/five');
     const selector = `[data-${surface}=${side}]`, area = page.locator(selector);
     await expect.poll(() => area.evaluate(e => e.scrollHeight - e.clientHeight)).toBeGreaterThan(500);
     await area.evaluate(e => { window.pointerScrollNode = e; window.pointerScrollPositions = []; });

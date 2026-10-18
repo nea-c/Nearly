@@ -76,7 +76,9 @@ export function fileType(entry: Pick<Entry, "name" | "dir">): string {
     docx: "Word ドキュメント",
     xlsx: "Excel ワークシート",
   };
-  return types[extension] ? t(types[extension]) : text`${extension.toUpperCase()} ファイル`;
+  return types[extension]
+    ? t(types[extension])
+    : text`${extension.toUpperCase()} ファイル`;
 }
 export function modifiedText(entry: Entry): string {
   if (entry.modifiedAt === undefined || !Number.isFinite(entry.modifiedAt))
@@ -215,7 +217,7 @@ export function columnsHead(
   sort?: SortSpec,
 ) {
   const ids = visibleColumns(settings);
-  return `<colgroup>${ids.map((id) => `<col data-col="${id}">`).join("")}</colgroup><thead><tr>${ids.map((id) => html`<th data-column="${id}" scope="col" aria-sort="${sort?.column === id ? sort.direction : "none"}"><button class="column-heading" data-column-menu="${side}" data-column-sort="${id}" draggable="true" title="${esc(text`${t(columnLabels[id])}: クリックで並べ替え、ドラッグで列を移動、右クリックで表示設定`)}" aria-label="${esc(text`${side === "local" ? t("ローカル") : t("リモート")}の${t(columnLabels[id])}で並べ替え`)}">${t(columnLabels[id])}${sort?.column === id ? `<span data-sort-indicator aria-hidden="true"> ${sort.direction === "ascending" ? "▲" : "▼"}</span>` : ""}</button><span class="column-resize" data-column-resize="${side}:${id}" role="separator" aria-orientation="vertical" aria-label="${esc(text`${t(columnLabels[id])}の幅`)}" aria-valuemin="40" aria-valuemax="1200" aria-valuenow="${columnWidth(settings, id)}" tabindex="0"></span></th>`).join("")}</tr></thead>`;
+  return `<colgroup>${ids.map((id) => `<col data-col="${id}">`).join("")}</colgroup><thead><tr>${ids.map((id) => html`<th data-column="${id}" scope="col" aria-sort="${sort?.column === id ? sort.direction : "none"}"><button class="column-heading" data-column-menu="${side}" data-column-sort="${id}" draggable="false" title="${esc(text`${t(columnLabels[id])}: クリックで並べ替え、ドラッグで列を移動、右クリックで表示設定`)}" aria-label="${esc(text`${side === "local" ? t("ローカル") : t("リモート")}の${t(columnLabels[id])}で並べ替え`)}">${t(columnLabels[id])}${sort?.column === id ? `<span data-sort-indicator aria-hidden="true"> ${sort.direction === "ascending" ? "▲" : "▼"}</span>` : ""}</button><span class="column-resize" data-column-resize="${side}:${id}" role="separator" aria-orientation="vertical" aria-label="${esc(text`${t(columnLabels[id])}の幅`)}" aria-valuemin="40" aria-valuemax="1200" aria-valuenow="${columnWidth(settings, id)}" tabindex="0"></span></th>`).join("")}</tr></thead>`;
 }
 export function columnsWidth(settings: PaneColumnSettings) {
   return visibleColumns(settings).reduce(
@@ -311,7 +313,11 @@ export function bindColumns(
     menu.setAttribute("aria-label", t("列の表示と順序"));
     document.body.append(menu);
     const paint = () => {
-      menu!.innerHTML = html`<header><strong>列の表示</strong><button data-column-close aria-label="閉じる">×</button></header>${settings.order.map((id) => `<div class="column-option"><label><input type="checkbox" data-column-visible="${id}" ${id === "name" || !settings.hidden.includes(id) ? "checked" : ""} ${id === "name" ? "disabled" : ""}>${t(columnLabels[id])}${id === "name" ? t("（必須）") : ""}</label></div>`).join("")}`;
+      menu!.innerHTML = html`<header>
+          <strong>列の表示</strong
+          ><button data-column-close aria-label="閉じる">×</button>
+        </header>
+        ${settings.order.map((id) => `<div class="column-option"><label><input type="checkbox" data-column-visible="${id}" ${id === "name" || !settings.hidden.includes(id) ? "checked" : ""} ${id === "name" ? "disabled" : ""}>${t(columnLabels[id])}${id === "name" ? t("（必須）") : ""}</label></div>`).join("")}`;
       menu!.style.left = Math.max(8, Math.min(x, innerWidth - 286)) + "px";
       menu!.style.top = Math.max(8, Math.min(y, innerHeight - 240)) + "px";
       menu!.querySelector<HTMLElement>("[data-column-close]")!.onclick =
@@ -332,27 +338,16 @@ export function bindColumns(
     paint();
     menu.querySelector<HTMLElement>("[data-column-close]")!.focus();
   };
-  let drag: { side: Side; id: ColumnId } | undefined;
-  let reorderPending = false;
-  const finishDrag = () => {
-    if (!drag) return;
-    drag = undefined;
-    suppressClickUntil = performance.now() + 400;
-    setDragging(false);
-    if (reorderPending) {
-      reorderPending = false;
-      render();
-    }
-  };
+  let dragging = false;
   document
     .querySelectorAll<HTMLElement>("[data-column-sort]")
     .forEach((button) => {
-      const side = button.dataset.columnMenu as Side;
-      const id = button.dataset.columnSort as ColumnId;
+      const side = button.dataset.columnMenu as Side,
+        id = button.dataset.columnSort as ColumnId;
       const header = button.closest("th")!;
       button.onclick = (event) => {
         event.stopPropagation();
-        if (performance.now() < suppressClickUntil || drag) return;
+        if (dragging || performance.now() < suppressClickUntil) return;
         closeColumnMenu();
         sorting?.toggle(side, id);
       };
@@ -361,39 +356,67 @@ export function bindColumns(
         event.stopPropagation();
         open(side, event.clientX, event.clientY);
       };
-      button.ondragstart = (event) => {
-        closeColumnMenu();
-        drag = { side, id };
+      button.onpointerdown = (event) => {
+        if (event.button !== 0) return;
         event.stopPropagation();
-        event.dataTransfer?.setData(
-          "application/x-syncfiles-column",
-          `${side}:${id}`,
-        );
-        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-        setDragging(true, finishDrag);
-      };
-      button.ondragend = finishDrag;
-      header.ondragover = (event) => {
-        if (!drag || drag.side !== side || drag.id === id) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-      };
-      header.ondrop = (event) => {
-        if (!drag || drag.side !== side || drag.id === id) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const bounds = header.getBoundingClientRect();
-        const settings = store.paneColumns[side];
-        settings.order = reorderedColumns(
-          settings.order,
-          drag.id,
-          id,
-          event.clientX > bounds.left + bounds.width / 2,
-        );
-        reorderPending = true;
-        save();
-        finishDrag();
+        const origin = { x: event.clientX, y: event.clientY };
+        let active = true;
+        const finish = (commit: boolean, e?: PointerEvent) => {
+          if (!active) return;
+          active = false;
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          window.removeEventListener("pointercancel", cancel);
+          window.removeEventListener("blur", cancel);
+          window.removeEventListener("keydown", key);
+          if (!dragging) return;
+          dragging = false;
+          suppressClickUntil = performance.now() + 400;
+          setDragging(false);
+          if (commit && e) {
+            const target = document
+              .elementFromPoint(e.clientX, e.clientY)
+              ?.closest<HTMLElement>("th[data-column]");
+            if (target?.closest('[data-list="' + side + '"]')) {
+              const bounds = target.getBoundingClientRect();
+              store.paneColumns[side].order = reorderedColumns(
+                store.paneColumns[side].order,
+                id,
+                target.dataset.column as ColumnId,
+                e.clientX > bounds.left + bounds.width / 2,
+              );
+              save();
+              render();
+            }
+          }
+        };
+        const move = (e: PointerEvent) => {
+          if (e.pointerId !== event.pointerId) return;
+          if (
+            !dragging &&
+            Math.hypot(e.clientX - origin.x, e.clientY - origin.y) >= 5
+          ) {
+            dragging = true;
+            closeColumnMenu();
+            setDragging(true, () => finish(false));
+          }
+          if (dragging) e.preventDefault();
+        };
+        const up = (e: PointerEvent) => {
+          if (e.pointerId === event.pointerId) finish(true, e);
+        };
+        const cancel = () => finish(false),
+          key = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              finish(false);
+            }
+          };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+        window.addEventListener("pointercancel", cancel);
+        window.addEventListener("blur", cancel);
+        window.addEventListener("keydown", key);
       };
     });
   document

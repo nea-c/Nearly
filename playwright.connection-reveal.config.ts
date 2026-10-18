@@ -1,0 +1,2 @@
+import {defineConfig} from '@playwright/test';
+export default defineConfig({testDir:'./tests/ui',testMatch:['connection-reveal.spec.ts'],outputDir:'test-results/connection-reveal',workers:1,timeout:30000,use:{baseURL:'http://127.0.0.1:1483',channel:'msedge',viewport:{width:1280,height:760}},webServer:{command:'node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1483 --strictPort',url:'http://127.0.0.1:1483',reuseExistingServer:false,env:{NEARLY_ENABLE_MOCK:'1'}},reporter:'list'});

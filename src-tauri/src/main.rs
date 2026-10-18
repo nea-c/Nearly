@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod bookmark_tree;
+mod input_policy;
 mod browse_preferences;
 mod browse_transport;
 mod connection_tree;
@@ -11,7 +12,15 @@ mod taskbar_status;
 mod taskbar_adapter;
 mod exclusion;
 mod explorer_preferences;
+mod side_bookmarks;
 mod file_ops;
+mod upload;
+mod transfer_choices;
+mod transfer_io;
+#[cfg(windows)]
+mod virtual_files;
+#[cfg(windows)]
+mod native_download_drag;
 mod zip_preflight;
 mod local_publish;
 mod local_zip;
@@ -22,6 +31,7 @@ mod settings_location;
 mod settings_clients;
 mod sftp;
 mod unified_settings;
+mod split_settings;
 mod window_ownership;
 mod window_size;
 mod tab_drag;
@@ -45,6 +55,7 @@ use std::{
 use tauri::{Emitter, Manager};
 #[derive(Default)]
 struct AppState {
+    transfer_choices: Arc<transfer_choices::Broker>,
     local_watch: Arc<local_watch::LocalWatchRegistry>,
     local_watch_visibility: Arc<Mutex<()>>,
     engine: Arc<engine::Engine>,
@@ -112,6 +123,10 @@ struct Settings {
         deserialize_with = "deserialize_tree_ratio"
     )]
     remote_tree_ratio: f64,
+    #[serde(rename = "localTreeWidth", default, skip_serializing_if = "Option::is_none")]
+    local_tree_width: Option<f64>,
+    #[serde(rename = "remoteTreeWidth", default, skip_serializing_if = "Option::is_none")]
+    remote_tree_width: Option<f64>,
     #[serde(default)]
     exclusions: HashMap<String, String>,
     #[serde(rename = "syncOptions", default)]
@@ -122,6 +137,18 @@ struct Settings {
     retained_syncs: Vec<RetainedSync>,
     #[serde(rename = "folderBookmarks", default)]
     folder_bookmarks: Vec<explorer_preferences::FolderBookmark>,
+    #[serde(rename = "localBookmarks", default)]
+    local_bookmarks: Vec<side_bookmarks::LocalBookmark>,
+    #[serde(rename = "remoteBookmarks", default)]
+    remote_bookmarks: Vec<side_bookmarks::RemoteBookmark>,
+    #[serde(rename="localBookmarkTree",default,skip_serializing_if="Option::is_none")]
+    local_bookmark_tree: Option<side_bookmarks::Tree>,
+    #[serde(rename="remoteBookmarkTree",default,skip_serializing_if="Option::is_none")]
+    remote_bookmark_tree: Option<side_bookmarks::Tree>,
+    #[serde(rename="localFolderHistory",default)]
+    local_folder_history: Vec<side_bookmarks::History>,
+    #[serde(rename="remoteFolderHistory",default)]
+    remote_folder_history: Vec<side_bookmarks::History>,
     #[serde(rename = "folderPairHistory", default)]
     folder_pair_history: Vec<explorer_preferences::FolderPairHistory>,
     #[serde(rename = "paneColumns", default)]
@@ -211,11 +238,16 @@ impl Default for Settings {
             local_pane_ratio: default_pane_ratio(),
             local_tree_ratio: default_tree_ratio(),
             remote_tree_ratio: default_tree_ratio(),
+            local_tree_width: None,
+            remote_tree_width: None,
             exclusions: HashMap::new(),
             sync_options: HashMap::new(),
             sync_presets: vec![],
             retained_syncs: vec![],
             folder_bookmarks: vec![],
+            local_bookmarks: vec![],
+            remote_bookmarks: vec![],
+            local_bookmark_tree:None,remote_bookmark_tree:None,local_folder_history:vec![],remote_folder_history:vec![],
             folder_pair_history: vec![],
             pane_columns: Default::default(),
             connection_tree: None,
@@ -241,6 +273,10 @@ struct Appearance {
     local_pane_ratio: f64,
     local_tree_ratio: f64,
     remote_tree_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_tree_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_tree_width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_size: Option<window_size::SavedSize>,
 }
@@ -438,10 +474,12 @@ fn restore_main_window_size(app:&tauri::AppHandle){
         Ok(unified_settings::Document::read(&settings_path(app)?)?.window_size())
     })();
     let saved=match saved{Ok(saved)=>saved,Err(error)=>{eprintln!("Window size restore settings unavailable: {error}");None}};
+    if let Ok(mut session)=app.state::<AppState>().window_size.lock(){session.begin_restore();}
     match window_size::restore(&window,saved){
         Ok(restored)=>{if let Ok(mut session)=app.state::<AppState>().window_size.lock(){session.seed(restored);}},
         Err(error)=>{eprintln!("Window size restore unavailable: {error}");},
     }
+    if let Ok(mut session)=app.state::<AppState>().window_size.lock(){session.finish_restore();}
     // The generated main window starts hidden; even a corrupt preference never
     // prevents the ordinary renderer from presenting its settings-load error.
     if let Err(error)=window.show(){eprintln!("Main window display failed: {error}");}
@@ -471,7 +509,8 @@ fn observe_main_window_size(app:&tauri::AppHandle,label:&str){
     let Some(window)=app.get_webview_window("main") else{return};
     let Ok((width,height,maximized,minimized,fullscreen))=window_size::capture(&window) else{return};
     let state=app.state::<AppState>();
-    let start=state.window_size.lock().map(|mut session|session.observe(label,width,height,maximized,minimized,fullscreen)).unwrap_or(false);
+    let Ok(position)=window.outer_position() else{return};
+    let start=state.window_size.lock().map(|mut session|session.observe_placement(label,window_size::Placement{x:position.x,y:position.y},width,height,maximized,minimized,fullscreen)).unwrap_or(false);
     if !start{return}
     let app=app.clone();
     tauri::async_runtime::spawn(async move{
@@ -536,8 +575,18 @@ fn validate_settings(data: &Settings) -> Result<(), String> {
     validate_pane_ratio(data.local_pane_ratio)?;
     validate_tree_ratio(data.local_tree_ratio)?;
     validate_tree_ratio(data.remote_tree_ratio)?;
+    for width in [data.local_tree_width, data.remote_tree_width].into_iter().flatten() {
+        if !width.is_finite() || !(100.0..=4096.0).contains(&width) {
+            return Err("Invalid tree pixel width".into());
+        }
+    }
     validate_sync_preferences(&data.exclusions, &data.sync_options, &data.sync_presets)?;
     validate_retained_syncs(&data.retained_syncs)?;
+    side_bookmarks::validate(&data.local_bookmarks,&data.remote_bookmarks)?;
+    if let Some(tree)=&data.local_bookmark_tree{side_bookmarks::validate_tree(tree,&data.local_bookmarks,&data.remote_bookmarks,false)?;}
+    if let Some(tree)=&data.remote_bookmark_tree{side_bookmarks::validate_tree(tree,&data.local_bookmarks,&data.remote_bookmarks,true)?;}
+    side_bookmarks::validate_history(&data.local_folder_history,false)?;
+    side_bookmarks::validate_history(&data.remote_folder_history,true)?;
     explorer_preferences::validate(
         &data.folder_bookmarks,
         &data.folder_pair_history,
@@ -1332,6 +1381,66 @@ fn prepare_file_operation(window: tauri::WebviewWindow, state: tauri::State<'_, 
     window_ownership::Registry::scoped(&mut ownership.operations, window.label(), &id, true)?;
     match state.engine.prepare_operation(&id){Ok(_)=>Ok(()),Err(error)=>{if newly_registered{ownership.operations.remove(&id);}Err(error)}}
 }
+
+#[tauri::command]
+fn file_transfer_prompt(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,id:String)->Result<Option<transfer_choices::Prompt>,String>{
+ state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+ state.transfer_choices.pending(&id,window.label())
+}
+#[tauri::command]
+fn choose_file_transfer(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,id:String,decision:transfer_choices::Decision)->Result<(),String>{
+ state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+ state.transfer_choices.choose(&id,window.label(),decision)
+}
+
+fn claim_upload_dispatch(state:&AppState,label:&str,id:&str,session_id:&str)->Result<(NativeOperation,Arc<AtomicBool>),String>{
+    let operation=NativeOperation::claim(state,label,id,Some(session_id))?;
+    let stop=match state.engine.claim_prepared_upload(id){
+        Ok(stop)=>stop,
+        Err(error)=>{
+            // A rejected claim never owns a worker; release only its unclaimed
+            // preparation before NativeOperation drops the window ownership.
+            state.engine.discard_prepared_operation(id);
+            return Err(error);
+        }
+    };
+    Ok((operation,stop))
+}
+#[tauri::command]
+async fn run_upload(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:upload::UploadRequest)->Result<upload::UploadOutcome,String>{
+    let (operation,stop)=claim_upload_dispatch(&state,window.label(),&request.id,&request.session_id)?;
+    let engine=state.engine.clone();
+    struct Release{engine:Arc<engine::Engine>,id:String}
+    impl Drop for Release{fn drop(&mut self){self.engine.finish_operation(&self.id);}}
+    let release=Release{engine:engine.clone(),id:request.id.clone()};
+    let choices=if request.interactive{Some(state.transfer_choices.begin(&request.id,window.label())?)}else{None};
+    let lease=state.sessions.resolve(&request.session_id)?;
+    guard_connection_pin(&app,&state,lease.profile())?;
+    lease.link_stop(&stop)?;
+    tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;match choices {Some(choices)=>upload::run_interactive(&engine,request,lease.profile(),lease.secret(),&stop,&choices.exchange),None=>upload::run(&engine,request,lease.profile(),lease.secret(),&stop)}}).await.map_err(|_|"Upload worker failed; partial targets may remain; refresh before retrying")?
+}
+
+#[tauri::command]
+async fn run_remote_drag(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:native_download_drag::Request)->Result<native_download_drag::DragOutcome,String>{
+ let (operation,stop)=claim_upload_dispatch(&state,window.label(),&request.id,&request.session_id)?;
+ let engine=state.engine.clone();struct Release{engine:Arc<engine::Engine>,id:String}impl Drop for Release{fn drop(&mut self){self.engine.finish_operation(&self.id);}}
+ let release=Release{engine:engine.clone(),id:request.id.clone()};let lease=state.sessions.resolve(&request.session_id)?;guard_connection_pin(&app,&state,lease.profile())?;lease.link_stop(&stop)?;
+ let source_label=window.label().to_owned();
+ tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;native_download_drag::run(app,source_label,engine,request,lease,stop)}).await.map_err(|_|"Windows download drag worker failed; sources retained")?
+}
+
+#[tauri::command]
+async fn run_download(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:transfer_io::DownloadRequest)->Result<upload::UploadOutcome,String>{
+ let (operation,stop)=claim_upload_dispatch(&state,window.label(),&request.id,&request.session_id)?;
+ let engine=state.engine.clone();
+ struct Release{engine:Arc<engine::Engine>,id:String}
+ impl Drop for Release{fn drop(&mut self){self.engine.finish_operation(&self.id);}}
+ let release=Release{engine:engine.clone(),id:request.id.clone()};
+ let choices=state.transfer_choices.begin(&request.id,window.label())?;
+ let lease=state.sessions.resolve(&request.session_id)?;guard_connection_pin(&app,&state,lease.profile())?;lease.link_stop(&stop)?;
+ tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;transfer_io::download(&engine,request,lease.profile(),lease.secret(),&stop,&choices.exchange)}).await.map_err(|_|"Download worker failed; refresh destination before retrying")?
+}
+
 #[tauri::command]
 async fn run_file_operation(
     window: tauri::WebviewWindow,
@@ -1403,8 +1512,20 @@ async fn run_file_operation(
     result
 }
 #[tauri::command]
-fn cancel_file_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    cancel_native_operation(&state,window.label(),&id)
+fn cancel_file_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, id: String, abandon: Option<bool>) -> Result<(), String> {
+    if abandon.unwrap_or(false){abandon_native_preparation(&state,window.label(),&id)}else{cancel_native_operation(&state,window.label(),&id)}
+}
+// Only for acknowledged preparations that the caller has never dispatched.
+fn abandon_native_preparation(state:&AppState,label:&str,id:&str)->Result<(),String>{
+    let mut ownership=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    ownership.registered(label)?;
+    let owner=ownership.operations.get(id).or_else(||ownership.cancelled_preparations.get(id)).ok_or("Operation is not prepared")?;
+    if owner!=label{return Err("Operation belongs to another window".into());}
+    if ownership.active_operations.contains(id) || state.engine.operation_claimed(id)? {return Err("Operation has already been dispatched".into());}
+    state.engine.cancel_operation(id)?;
+    state.engine.discard_prepared_operation(id);
+    ownership.operations.remove(id);ownership.cancelled_preparations.remove(id);
+    Ok(())
 }
 fn cancel_native_operation(state:&AppState,label:&str,id:&str)->Result<(),String>{
     let mut ownership = state.ownership.lock().map_err(|_| "Ownership lock failed")?;
@@ -1438,15 +1559,18 @@ async fn run_local_archive(window: tauri::WebviewWindow, state:tauri::State<'_,A
     tauri::async_runtime::spawn_blocking(move||{
         let _release=release;let budget=zip_preflight::Budget::new(&stop);budget.check()?;
         // Syntactic drive gating precedes path metadata and rejects mapped networks.
-        local_zip::local_drive(Path::new(&request.source))?;local_zip::local_drive(Path::new(&request.destination))?;
-        let source=file_ops::local_path(&request.source,true).map_err(|_|ArchiveError::new("invalid_request"))?;budget.check()?;
+        local_zip::local_drive(Path::new(&request.destination))?;
+        let mut sources=Vec::new();
+        for input in request.inputs(){
+            local_zip::local_drive(Path::new(input))?;
+            sources.push(file_ops::local_path(input,true).map_err(|_|ArchiveError::new("invalid_request"))?);budget.check()?;
+        }
         let target=file_ops::local_path(&request.destination,false).map_err(|_|ArchiveError::new("collision"))?;budget.check()?;
-        if source.parent().is_none()||file_ops::local_contains(&source,&target){return Err(ArchiveError::new("invalid_request"));}
         let leaf=target.file_name().and_then(|x|x.to_str()).ok_or_else(||ArchiveError::new("invalid_request"))?;
         zip_preflight::validate_entry_name(leaf.as_bytes(),true,false)?;
         let parent=target.parent().ok_or_else(||ArchiveError::new("invalid_request"))?;
-        engine.reserve_archive_operation(&request.id,source.clone(),target.clone(),parent.to_owned()).map_err(|_|ArchiveError::new("sync_overlap"))?;
-        local_zip::execute(request.action,&source,&target,&budget)
+        engine.reserve_archive_sources(&request.id,sources.clone(),target.clone(),parent.to_owned()).map_err(|_|ArchiveError::new("sync_overlap"))?;
+        local_zip::execute_sources(request.action,&sources,&target,&budget)
     }).await.map_err(|_|ArchiveError::new("io_error"))?
 }
 struct NativeOperation { registry: Arc<Mutex<window_ownership::Registry>>, id:String }
@@ -1466,7 +1590,46 @@ impl NativeOperation {
 impl Drop for NativeOperation {fn drop(&mut self){if let Ok(mut r)=self.registry.lock(){r.active_operations.remove(&self.id);r.operations.remove(&self.id);}}}
 #[cfg(test)] mod native_reservation_tests {
     use super::*;
-    #[test]fn dispatch_reservation_blocks_close_before_engine_claim_and_drops_cleanly(){let state=AppState::default();state.ownership.lock().unwrap().bootstrap("main").unwrap();let dispatch=NativeOperation::claim(&state,"main","op",None).unwrap();assert!(!state.engine.operation_claimed("op").unwrap());{let mut r=state.ownership.lock().unwrap();assert!(r.active_operations.contains("op"));assert!(r.seal_close("main").is_err());}assert!(NativeOperation::claim(&state,"main","op",None).is_err());drop(dispatch);assert!(state.ownership.lock().unwrap().seal_close("main").is_ok());}
+    #[test]
+    fn abandoned_acknowledged_preparations_reclaim_full_capacity_and_check_ownership(){
+        let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();}
+        for n in 0..20 {let id=format!("abandon-{n}");state.engine.prepare_operation(&id).unwrap();state.ownership.lock().unwrap().operations.insert(id.clone(),"main".into());assert!(abandon_native_preparation(&state,"other",&id).is_err());if n%2==0{cancel_native_operation(&state,"main",&id).unwrap();}abandon_native_preparation(&state,"main",&id).unwrap();assert!(state.engine.cancel_operation(&id).is_err());}
+        for n in 0..8{state.engine.prepare_operation(&format!("capacity-{n}")).unwrap();}assert!(state.engine.prepare_operation("ninth").is_err());
+    }
+    #[test]
+    fn abandoning_active_or_claimed_dispatch_is_refused(){
+        let state=AppState::default();state.ownership.lock().unwrap().bootstrap("main").unwrap();
+        state.engine.prepare_operation("active").unwrap();let dispatch=NativeOperation::claim(&state,"main","active",None).unwrap();assert!(abandon_native_preparation(&state,"main","active").is_err());assert!(!state.engine.operation_claimed("active").unwrap());drop(dispatch);state.engine.finish_operation("active");
+        state.engine.prepare_operation("claimed").unwrap();state.ownership.lock().unwrap().operations.insert("claimed".into(),"main".into());state.engine.claim_operation("claimed").unwrap();assert!(abandon_native_preparation(&state,"main","claimed").is_err());assert!(state.engine.operation_claimed("claimed").unwrap());state.engine.finish_operation("claimed");
+    }
+    #[test]
+    fn upload_failed_dispatch_releases_preparation_without_exhausting_capacity(){
+        let state=AppState::default();
+        {let mut registry=state.ownership.lock().unwrap();registry.bootstrap("main").unwrap();registry.claim("main","upload-tab").unwrap();}
+        state.engine.prepare_operation("worker-one").unwrap();
+        let one=claim_upload_dispatch(&state,"main","worker-one","upload-tab").unwrap();
+        state.engine.prepare_operation("worker-two").unwrap();
+        let two=claim_upload_dispatch(&state,"main","worker-two","upload-tab").unwrap();
+        for attempt in 0..10{
+            let id=format!("failed-{attempt}");state.engine.prepare_operation(&id).unwrap();
+            assert!(claim_upload_dispatch(&state,"main",&id,"upload-tab").is_err());
+            assert!(!state.ownership.lock().unwrap().operations.contains_key(&id));
+            assert!(state.engine.cancel_operation(&id).is_err(),"Failed dispatch left an orphan engine preparation");
+        }
+        assert!(state.engine.operation_claimed("worker-one").unwrap());
+        assert!(state.engine.operation_claimed("worker-two").unwrap());
+        state.engine.finish_operation("worker-one");state.engine.finish_operation("worker-two");drop(one);drop(two);
+        for n in 0..8{state.engine.prepare_operation(&format!("fresh-{n}")).unwrap();}
+        assert!(state.engine.prepare_operation("ninth").is_err());
+    }
+    #[test]
+    fn upload_failed_claim_does_not_finish_an_existing_claimed_operation(){
+        let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.claim("main","upload-tab").unwrap();}
+        state.engine.prepare_operation("claimed").unwrap();state.engine.claim_operation("claimed").unwrap();
+        assert!(claim_upload_dispatch(&state,"main","claimed","upload-tab").is_err());
+        assert!(state.engine.operation_claimed("claimed").unwrap());state.engine.finish_operation("claimed");
+    }
+    #[test]fn upload_refuses_foreign_disconnected_and_transferring_workspace(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","upload-tab").unwrap();}assert!(NativeOperation::claim(&state,"other","upload",Some("upload-tab")).is_err());assert!(state.sessions.resolve("upload-tab").is_err());{let mut r=state.ownership.lock().unwrap();r.begin_drag("main","upload-tab",serde_json::json!({"version":1,"workspace":{"id":"upload-tab"}})).unwrap();}assert!(NativeOperation::claim(&state,"main","upload",Some("upload-tab")).is_err());}    #[test]fn dispatch_reservation_blocks_close_before_engine_claim_and_drops_cleanly(){let state=AppState::default();state.ownership.lock().unwrap().bootstrap("main").unwrap();let dispatch=NativeOperation::claim(&state,"main","op",None).unwrap();assert!(!state.engine.operation_claimed("op").unwrap());{let mut r=state.ownership.lock().unwrap();assert!(r.active_operations.contains("op"));assert!(r.seal_close("main").is_err());}assert!(NativeOperation::claim(&state,"main","op",None).is_err());drop(dispatch);assert!(state.ownership.lock().unwrap().seal_close("main").is_ok());}
     #[test]fn cancelled_preparations_are_released_after_each_owner_closes(){let state=AppState::default();for n in 0..8{let label=format!("window-{n}");let id=format!("op-{n}");{let mut r=state.ownership.lock().unwrap();r.bootstrap(&label).unwrap();r.operations.insert(id.clone(),label.clone());}state.engine.prepare_operation(&id).unwrap();cancel_native_operation(&state,&label,&id).unwrap();state.ownership.lock().unwrap().seal_close(&label).unwrap();release_closed_window_registry(&state,&label);}for n in 0..8{state.engine.prepare_operation(&format!("fresh-{n}")).unwrap();}assert!(state.engine.prepare_operation("ninth").is_err());}
     #[test]fn queued_dispatch_still_observes_early_cancellation(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.operations.insert("early".into(),"main".into());}state.engine.prepare_operation("early").unwrap();cancel_native_operation(&state,"main","early").unwrap();let _dispatch=NativeOperation::claim(&state,"main","early",None).unwrap();assert!(state.engine.claim_operation("early").unwrap().load(Ordering::SeqCst));state.engine.finish_operation("early");}
     #[test]fn empty_window_close_ignores_other_windows_pending_sync_without_stopping_it(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("other","other-tab").unwrap();r.prepare_job("other","other-job",Some("other-tab")).unwrap();}state.engine.prepare("other-job".into()).unwrap();assert!(seal_native_window_close(&state,"main",true).unwrap().is_empty());assert!(state.engine.window_busy(&["other-job".into()],&[]).unwrap());assert!(seal_native_window_close(&state,"other",false).is_err());assert!(state.ownership.lock().unwrap().registered("other").is_ok());}
@@ -1518,7 +1681,9 @@ fn validate_native_transfer(state:&AppState,r:&window_ownership::Registry,label:
 }
 fn create_workspace_window(app:&tauri::AppHandle,label:&str)->Result<tauri::WebviewWindow,String>{
     let mut config=app.config().app.windows.iter().find(|w|w.label=="main").cloned().unwrap_or_default();config.label=label.into();config.visible=false;
+    config.general_autofill_enabled=false;
     let w=tauri::WebviewWindowBuilder::from_config(app,&config).and_then(|b|b.build()).map_err(|e|format!("Window creation failed: {e}"))?;
+    input_policy::configure(&w);
     // Register before releasing a spawn reservation: the renderer may not have
     // bootstrapped yet when the last previous window finishes closing.
     let result=app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed".to_owned())?.bootstrap(label);
@@ -1773,6 +1938,7 @@ fn main() {
             app.state::<AppState>().ownership.lock().map_err(|_|"Ownership lock failed")?.register_native_window("main")?;
             let status_app=app.handle().clone();
             app.state::<AppState>().update_restart.start(Arc::new(move|report|{let _=status_app.emit("update-restart-status",report);}));
+            if let Some(window)=app.get_webview_window("main"){input_policy::configure(&window);}
             restore_main_window_size(app.handle());
             #[cfg(windows)]
             taskbar_adapter::start(app.handle().clone(), app.state::<AppState>().engine.clone(), app.state::<AppState>().ownership.clone(), taskbar_closing.clone());
@@ -1805,12 +1971,32 @@ fn main() {
             retry_sync,
             stop_sync,
             run_file_operation,
+            run_upload,
+            run_download,
+            run_remote_drag,
+            file_transfer_prompt,
+            choose_file_transfer,
             run_local_archive,
             prepare_file_operation,
             cancel_file_operation
         ])
+        .on_webview_event(|webview, event| {
+            if let tauri::WebviewEvent::DragDrop(event) = event {
+                // Snapshot before renderer dispatch. Runtime events may already
+                // be queued: source exclusion also requires the native HWND
+                // release guard and the virtual source's refusal of CF_HDROP.
+                let Some(payload) = native_download_drag::tagged_drop(event) else { return; };
+                let _ = webview.emit_to(webview.label(), "native-file-drop", payload);
+            }
+        })
         .on_window_event(move |window, event| {
-            if matches!(event,tauri::WindowEvent::Resized(_)|tauri::WindowEvent::ScaleFactorChanged{..}) {
+            // A window-content WebView is surfaced as a synthesized window event.
+            if let tauri::WindowEvent::DragDrop(event) = event {
+                if let Some(payload) = native_download_drag::tagged_drop(event) {
+                    let _ = window.emit_to(window.label(), "native-file-drop", payload);
+                }
+            }
+            if matches!(event,tauri::WindowEvent::Resized(_)|tauri::WindowEvent::Moved(_)|tauri::WindowEvent::ScaleFactorChanged{..}) {
                 observe_main_window_size(window.app_handle(),window.label());
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1851,3 +2037,17 @@ mod update_lifecycle_tests {
     #[test]fn settings_failure_never_launches_even_fake_child(){let f=fixture();let backup=f.path().with_extension("backup.json");if backup.exists(){std::fs::remove_file(&backup).unwrap();}std::fs::create_dir(&backup).unwrap();let mut launched=false;assert!(update_settings_transaction(&f.path(),&["own-tab".into()],||{launched=true;Ok(())}).is_err());assert!(!launched);}
     #[test]fn active_background_start_blocks_update_without_stopping_job(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("background").unwrap();r.claim("background","other-tab").unwrap();r.prepare_job("background","other-job",Some("other-tab")).unwrap();}state.engine.prepare("other-job".into()).unwrap();assert!(begin_native_update(&state).is_err());assert!(state.engine.window_busy(&["other-job".into()],&[]).unwrap());assert!(state.ownership.lock().unwrap().registered("main").is_ok());}
 }
+
+#[cfg(test)]
+mod input_policy_config_tests {
+    #[test]
+    fn input_policy_main_disables_general_autofill() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = config["app"]["windows"].as_array().unwrap();
+        assert!(!windows.is_empty());
+        for window in windows {
+            assert_eq!(window["generalAutofillEnabled"], false, "Every configured WebView must disable general autofill");
+        }
+    }
+}
+

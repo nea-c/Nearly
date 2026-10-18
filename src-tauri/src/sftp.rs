@@ -288,13 +288,13 @@ impl Drop for AbortSocket {
     }
 }
 pub struct Connection {
-    raw: RawSftpSession,
+    pub(crate) raw: RawSftpSession,
     session: client::Handle<VerifyHost>,
     abort: AbortSocket,
-    posix_rename: bool,
+    pub(crate) posix_rename: bool,
 }
 impl Connection {
-    fn run<F, T>(&self, stop: &AtomicBool, future: F) -> Result<T, String>
+    pub(crate) fn run<F, T>(&self, stop: &AtomicBool, future: F) -> Result<T, String>
     where
         F: Future<Output = Result<T, String>>,
     {
@@ -617,7 +617,7 @@ fn remote_error(operation: &str) -> String {
         "SFTP {operation} failed; check connection and permissions. Staging files are retained."
     )
 }
-async fn checked_directory(raw: &RawSftpSession, path: &str, create: bool) -> Result<(), String> {
+pub(crate) async fn checked_directory(raw: &RawSftpSession, path: &str, create: bool) -> Result<(), String> {
     let root = raw
         .lstat("/")
         .await
@@ -1786,4 +1786,145 @@ mod tests {
         )
         .is_err());
     }
+}
+// One-shot uploads never adopt an existing target and never clean up by pathname.
+pub fn upload_new(
+    s: &mut Connection,
+    remote: &str,
+    entries: &mut [crate::upload::Entry],
+    stop: &AtomicBool,
+) -> Result<crate::upload::UploadOutcome, String> {
+    use crate::file_ops::check;
+    fn upload_error(operation:&str)->String{format!("SFTP {operation} failed; check connection and permissions.")}
+    let mut completed = 0;
+    let mut bytes = 0u64;
+    let mut transferred_bytes = 0u64;
+    let mut attempted = false;
+    let result = s.run(stop, async {
+        checked_directory(&s.raw, remote, false).await?;
+        // Inventory existing destination siblings, bounded and case-insensitive.
+        let handle = s
+            .raw
+            .opendir(remote)
+            .await
+            .map_err(|_| upload_error("upload destination inventory"))?
+            .handle;
+        let mut existing = std::collections::HashSet::new();
+        let mut count = 0;
+        loop {
+            check(stop)?;
+            match s.raw.readdir(handle.clone()).await {
+                Ok(batch) => {
+                    for item in batch.files {
+                        if item.filename == "." || item.filename == ".." {
+                            continue;
+                        }
+                        count += 1;
+                        if count > 10000 {
+                            return Err("Destination inventory exceeds 10,000 entries".into());
+                        }
+                        existing.insert(item.filename.to_uppercase());
+                    }
+                }
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                Err(_) => return Err(upload_error("upload destination inventory")),
+            }
+        }
+        s.raw
+            .close(handle)
+            .await
+            .map_err(|_| upload_error("upload inventory close"))?;
+        for entry in entries.iter() {
+            crate::upload::revalidate(entry)?;
+            if existing.contains(&entry.relative.split('/').next().unwrap().to_uppercase()) {
+                return Err(
+                    "Destination collision or case-ambiguous name; no writes attempted".into(),
+                );
+            }
+        }
+        for entry in entries.iter_mut() {
+            check(stop)?;
+            crate::upload::revalidate(entry)?;
+            let target = format!("{}/{}", remote.trim_end_matches('/'), entry.relative);
+            let parent = target.rsplit_once('/').unwrap().0;
+            let parent = if parent.is_empty() { "/" } else { parent };
+            checked_directory(&s.raw, parent, false).await?;
+            match s.raw.lstat(target.clone()).await {
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {}
+                Ok(_) => return Err("Destination appeared; overwrite refused".into()),
+                Err(_) => return Err(upload_error("upload target lookup")),
+            }
+            check(stop)?;
+            attempted = true;
+            if entry.directory {
+                s.raw
+                    .mkdir(target.clone(), FileAttributes::empty())
+                    .await
+                    .map_err(|_| "Directory creation failed or outcome uncertain")?;
+                let attrs = s
+                    .raw
+                    .lstat(target)
+                    .await
+                    .map_err(|_| "Created directory verification failed")?
+                    .attrs;
+                if !attrs.is_dir() || attrs.is_symlink() {
+                    return Err("Created directory changed during upload".into());
+                }
+                completed += 1;
+                continue;
+            }
+            let handle = s
+                .raw
+                .open(
+                    target,
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                    FileAttributes::empty(),
+                )
+                .await
+                .map_err(|_| "Exclusive upload creation failed or outcome uncertain")?
+                .handle;
+            let transfer = async {
+                use std::io::Read;
+                let mut offset = 0;
+                loop {
+                    check(stop)?;
+                    let mut data = vec![0u8; 32768];
+                    let n = entry
+                        .file
+                        .read(&mut data)
+                        .map_err(|_| "Local upload read failed")?;
+                    if n == 0 {
+                        break;
+                    }
+                    if offset + n as u64 > entry.size {
+                        return Err("Source size changed".into());
+                    }
+                    data.truncate(n);
+                    s.raw
+                        .write(handle.clone(), offset, data)
+                        .await
+                        .map_err(|_| "Upload write failed or acknowledgement uncertain")?;
+                    offset += n as u64;
+                    transferred_bytes += n as u64;
+                }
+                if offset != entry.size {
+                    return Err("Source size changed".into());
+                }
+                crate::upload::revalidate(entry)?;
+                Ok::<(), String>(())
+            }
+            .await;
+            let close = s
+                .raw
+                .close(handle)
+                .await
+                .map_err(|_| "Upload close acknowledgement uncertain".to_owned());
+            transfer?;
+            close?;
+            completed += 1;
+            bytes += entry.size;
+        }
+        Ok::<(), String>(())
+    });
+    match result{Ok(())=>Ok(crate::upload::UploadOutcome{status:crate::upload::UploadStatus::Completed,completed,bytes,transferred_bytes,skipped:0,message:"Upload complete; local sources retained. Refresh destination.".into()}),Err(error) if attempted=>Ok(crate::upload::UploadOutcome{status:if stop.load(Ordering::SeqCst){crate::upload::UploadStatus::Cancelled}else{crate::upload::UploadStatus::Partial},completed,bytes,transferred_bytes,skipped:0,message:format!("{error}. Upload incomplete; new partial targets may remain. Preexisting targets were not replaced; local sources retained. Refresh before retrying.")}),Err(error)=>Err(error)}
 }

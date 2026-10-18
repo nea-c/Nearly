@@ -23,6 +23,8 @@ pub struct ArchiveRequest {
     pub id: String,
     pub action: ZipAction,
     pub source: String,
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
     pub destination: String,
     pub side: String,
 }
@@ -46,8 +48,13 @@ impl ArchiveRequest {
         if self.source.len() > 4096 || self.destination.len() > 4096 {
             return Err(ArchiveError::new("invalid_request"));
         }
+        let inputs=self.inputs();
+        if inputs.is_empty() || inputs.len()>500 || inputs.iter().any(|p|p.is_empty() || p.len()>4096 || p.split(['\\','/']).any(|c|c==".." || c==".")) || self.action == ZipAction::Extract && inputs.len()!=1 {
+            return Err(ArchiveError::new("invalid_request"));
+        }
         Ok(())
     }
+    pub fn inputs(&self) -> Vec<&str> { self.sources.as_ref().map(|v|v.iter().map(String::as_str).collect()).unwrap_or_else(||vec![self.source.as_str()]) }
 }
 fn budget_io(budget: &Budget) -> std::io::Result<()> {
     budget
@@ -250,52 +257,50 @@ fn inventory(source: &Path, budget: &Budget) -> Result<(Vec<Item>, Vec<File>), A
     Ok((items, guards))
 }
 // Inputs are canonical, validated ordinary local paths from the native command.
-pub fn execute(
-    action: ZipAction,
-    source: &Path,
-    target: &Path,
-    budget: &Budget,
-) -> Result<ArchiveOutcome, ArchiveError> {
-    budget.check()?;
-    local_drive(source)?;
-    local_drive(target)?;
-    path_limit(source)?;
-    path_limit(target)?;
-    let parent = target
-        .parent()
-        .ok_or_else(|| ArchiveError::new("invalid_request"))?;
-    let _source_parents = ancestors(
-        source
-            .parent()
-            .ok_or_else(|| ArchiveError::new("invalid_request"))?,
-    )?;
-    let _target_parents = ancestors(parent)?;
-    match fs::symlink_metadata(target) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => return Err(ArchiveError::new("collision")),
-        Err(_) => return Err(ArchiveError::new("io_error")),
-    }
-    let meta = fs::symlink_metadata(source)?;
-    if !local_publish::ordinary(&meta) {
-        return Err(ArchiveError::new("unsafe_entry"));
-    }
-    let suffix = |p: &Path| {
-        p.extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("zip"))
-    };
-    if action == ZipAction::Extract && (!meta.is_file() || !suffix(source))
-        || action == ZipAction::Compress && !suffix(target)
-    {
-        return Err(ArchiveError::new("invalid_request"));
-    }
-    match action {
-        ZipAction::Compress => compress(source, target, budget),
-        ZipAction::Extract => extract(source, target, budget),
-    }
+pub fn execute(action: ZipAction,source: &Path,target: &Path,budget: &Budget)->Result<ArchiveOutcome,ArchiveError>{
+    execute_sources(action,&[source.to_owned()],target,budget)
 }
-fn compress(source: &Path, target: &Path, budget: &Budget) -> Result<ArchiveOutcome, ArchiveError> {
-    let (items, _guards) = inventory(source, budget)?;
+pub fn execute_sources(action: ZipAction,sources: &[PathBuf],target: &Path,budget: &Budget)->Result<ArchiveOutcome,ArchiveError>{
+    budget.check()?;
+    if sources.is_empty() || sources.len()>500 || action == ZipAction::Extract && sources.len()!=1 {return Err(ArchiveError::new("invalid_request"));}
+    local_drive(target)?;path_limit(target)?;
+    let parent=target.parent().ok_or_else(||ArchiveError::new("invalid_request"))?;
+    let _target_parents=ancestors(parent)?;
+    let mut source_guards=Vec::new();
+    let source_parent=sources[0].parent().ok_or_else(||ArchiveError::new("invalid_request"))?;
+    let mut names=HashMap::new();
+    for source in sources {
+        budget.check()?;local_drive(source)?;path_limit(source)?;
+        if source.components().any(|c|matches!(c,std::path::Component::ParentDir|std::path::Component::CurDir)) || source.parent()!=Some(source_parent) || crate::file_ops::local_contains(source,target) {return Err(ArchiveError::new("invalid_request"));}
+        source_guards.extend(ancestors(source_parent)?);
+        let meta=fs::symlink_metadata(source)?;
+        if !local_publish::ordinary(&meta){return Err(ArchiveError::new("unsafe_entry"));}
+        let leaf=source.file_name().and_then(|s|s.to_str()).ok_or_else(||ArchiveError::new("unsafe_entry"))?;
+        zip_preflight::validate_entry_name(leaf.as_bytes(),true,false)?;
+        zip_preflight::insert_name(&mut names,leaf,meta.is_dir(),budget.limits.entries)?;
+        if action==ZipAction::Extract && (!meta.is_file() || !source.extension().is_some_and(|s|s.eq_ignore_ascii_case("zip"))) {return Err(ArchiveError::new("invalid_request"));}
+    }
+    if action==ZipAction::Compress && !target.extension().is_some_and(|s|s.eq_ignore_ascii_case("zip")){return Err(ArchiveError::new("invalid_request"));}
+    match fs::symlink_metadata(target){Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Ok(_)=>return Err(ArchiveError::new("collision")),Err(_)=>return Err(ArchiveError::new("io_error"))}
+    match action {ZipAction::Compress=>compress_sources(sources,target,budget),ZipAction::Extract=>extract(&sources[0],target,budget)}
+}
+fn inventory_sources(sources: &[PathBuf],budget: &Budget)->Result<(Vec<Item>,Vec<File>),ArchiveError>{
+    let mut items=Vec::new();let mut guards=Vec::new();let mut names=HashMap::new();let mut total=0u64;
+    for source in sources {
+        let (more,held)=inventory(source,budget)?;
+        for item in more {
+            if items.len()>=budget.limits.entries{return Err(ArchiveError::new("limit_exceeded"));}
+            zip_preflight::insert_name(&mut names,&item.name,item.dir,budget.limits.entries)?;
+            total=total.checked_add(item.size).ok_or_else(||ArchiveError::new("limit_exceeded"))?;
+            if total>budget.limits.total{return Err(ArchiveError::new("limit_exceeded"));}
+            items.push(item);
+        }
+        guards.extend(held);
+    }
+    Ok((items,guards))
+}
+fn compress_sources(sources: &[PathBuf], target: &Path, budget: &Budget) -> Result<ArchiveOutcome, ArchiveError> {
+    let (items, _guards) = inventory_sources(sources, budget)?;
     let mut stage = OwnedStage::create(target.parent().unwrap(), false, budget)?;
     let result = (|| {
         let output = stage.handle.try_clone()?;
@@ -349,7 +354,7 @@ fn compress(source: &Path, target: &Path, budget: &Budget) -> Result<ArchiveOutc
         output.flush()?;
         output.inner.sync_all()?;
         budget.check()?;
-        if inventory(source, budget)?.0 != items {
+        if inventory_sources(sources, budget)?.0 != items {
             return Err(ArchiveError::new("source_changed"));
         }
         let bytes = stage.handle.metadata()?.len();
@@ -541,6 +546,25 @@ mod tests {
         p
     }
     #[test]
+    fn multisource_roundtrip_collision_traversal_and_aggregate_limits(){
+        let parent=temp();let a=parent.join("a.txt");let b=parent.join("folder");fs::write(&a,b"abc").unwrap();fs::create_dir(&b).unwrap();fs::write(b.join("b.txt"),b"def").unwrap();
+        let sources=vec![a.clone(),b.clone()];let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let zip=parent.join("multi.zip");
+        let result=execute_sources(ZipAction::Compress,&sources,&zip,&budget).unwrap();assert_eq!(result.entries,3);assert_eq!(result.bytes,6);
+        let extracted=parent.join("result");execute(ZipAction::Extract,&zip,&extracted,&budget).unwrap();assert_eq!(fs::read(extracted.join("a.txt")).unwrap(),b"abc");assert_eq!(fs::read(extracted.join("folder/b.txt")).unwrap(),b"def");
+        assert_eq!(execute_sources(ZipAction::Compress,&sources,&zip,&budget).unwrap_err().code,"collision");
+        assert!(execute_sources(ZipAction::Compress,&[a.clone(),a.clone()],&parent.join("duplicate.zip"),&budget).is_err());assert!(!parent.join("duplicate.zip").exists());
+        assert!(execute_sources(ZipAction::Extract,&sources,&parent.join("bad"),&budget).is_err());
+        assert!(execute_sources(ZipAction::Compress,&[parent.join("folder/../a.txt")],&parent.join("traversal.zip"),&budget).is_err());assert!(!parent.join("traversal.zip").exists());
+        let mut small=Budget::new(&stop);small.limits.total=5;assert_eq!(execute_sources(ZipAction::Compress,&sources,&parent.join("limited.zip"),&small).unwrap_err().code,"limit_exceeded");assert!(!parent.join("limited.zip").exists());
+        small.limits.total=100;small.limits.entries=2;assert_eq!(execute_sources(ZipAction::Compress,&sources,&parent.join("entries.zip"),&small).unwrap_err().code,"limit_exceeded");assert!(!parent.join("entries.zip").exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn request_sources_compatibility_and_restrictions(){
+        let old:ArchiveRequest=serde_json::from_value(serde_json::json!({"id":"old","source":"C:\\fixture\\a","destination":"C:\\fixture\\a.zip","side":"local","action":"compress"})).unwrap();assert_eq!(old.inputs(),vec!["C:\\fixture\\a"]);old.validate().unwrap();
+        let mut new=old;new.sources=Some(vec![]);assert!(new.validate().is_err());new.sources=Some(vec!["C:\\fixture\\a".into(),"C:\\fixture\\b".into()]);new.validate().unwrap();new.action=ZipAction::Extract;assert!(new.validate().is_err());new.action=ZipAction::Compress;new.sources=Some(vec!["C:\\fixture\\..\\a".into()]);assert!(new.validate().is_err());
+    }
+    #[test]
     fn roundtrip_file_unicode_empty_nested_directory_without_overwrite() {
         let parent = temp();
         let source = parent.join("source");
@@ -610,6 +634,7 @@ mod tests {
         let request = ArchiveRequest {
             id: "x".into(),
             source: "unreadable".into(),
+            sources: None,
             destination: "unreadable".into(),
             side: "remote".into(),
             action: ZipAction::Extract,

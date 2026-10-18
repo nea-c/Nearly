@@ -158,12 +158,37 @@ fn merge(base: Option<&Value>, proposed: Option<&Value>, current: Option<&Value>
         (Some(Value::Array(b)), Some(Value::Array(p)), Some(Value::Array(c))) if keyed_path(path) => {
             Ok(Some(Value::Array(merge_records(b, p, c, path, depth + 1)?)))
         }
+        (Some(Value::Array(b)), Some(Value::Array(p)), Some(Value::Array(c))) if matches!(path,"/localFolderHistory"|"/remoteFolderHistory") => {
+            Ok(Some(Value::Array(merge_side_history(b,p,c,path)?)))
+        }
         _ => Err(conflict(path)), // includes delete versus edit, unknown arrays, and shape changes
     }
 }
 
 fn keyed_path(path: &str) -> bool {
-    matches!(path, "/profiles" | "/folderBookmarks" | "/syncPresets" | "/retainedSyncs" | "/connectionTree/nodes" | "/bookmarkTree/nodes")
+    matches!(path, "/profiles" | "/folderBookmarks" | "/localBookmarks" | "/remoteBookmarks" | "/syncPresets" | "/retainedSyncs" | "/connectionTree/nodes" | "/bookmarkTree/nodes" | "/localBookmarkTree/nodes" | "/remoteBookmarkTree/nodes")
+}
+fn merge_side_history(base:&[Value],proposed:&[Value],current:&[Value],path:&str)->Result<Vec<Value>,String>{
+    let index_history=|records:&[Value]|->Result<BTreeMap<String,Value>,String>{
+        if records.len()>200{return Err(conflict(path));}
+        let mut out=BTreeMap::new();
+        for record in records{
+            let raw=record.get("path").and_then(Value::as_str).ok_or_else(||conflict(path))?;
+            let folder=if path=="/localFolderHistory"{raw.replace('/',"\\").trim_end_matches('\\').to_lowercase()}else{raw.to_owned()};
+            let key=serde_json::to_string(&(record.get("connectionKey"),folder)).map_err(|_|conflict(path))?;
+            if record.get("openedAt").and_then(Value::as_u64).is_none()||out.insert(key,record.clone()).is_some(){return Err(conflict(path));}
+        }Ok(out)
+    };
+    let (b,p,c)=(index_history(base)?,index_history(proposed)?,index_history(current)?);
+    let keys:BTreeSet<_>=b.keys().chain(p.keys()).chain(c.keys()).collect();let mut out=Vec::new();
+    for key in keys{
+        let (bv,pv,cv)=(b.get(key),p.get(key),c.get(key));
+        // Omission of an acknowledged entry is a deletion, including bounded-history eviction.
+        if bv.is_some()&&(pv.is_none()||cv.is_none()){continue;}
+        let record=match(pv,cv){(Some(p),Some(c))=>if p["openedAt"].as_u64()>=c["openedAt"].as_u64(){p}else{c},(Some(p),None)=>p,(None,Some(c))=>c,_=>continue};
+        out.push(record.clone());
+    }
+    out.sort_by(|a,b|b["openedAt"].as_u64().cmp(&a["openedAt"].as_u64()).then_with(||a["path"].as_str().cmp(&b["path"].as_str())));out.truncate(200);Ok(out)
 }
 
 fn index<'a>(values: &'a [Value], path: &str) -> Result<BTreeMap<&'a str, (usize, &'a Value)>, String> {
@@ -184,7 +209,35 @@ mod tests {
     fn initial() -> Value {
         json!({"settingsRevision":0,"theme":"system","language":"ja","history":{},"exclusions":{},
             "syncOptions":{},"browseLocations":{},"profiles":[],"retainedSyncs":[],"folderBookmarks":[],
-            "syncPresets":[],"connectionTree":{"version":1,"nodes":[]},"unknownArray":[1,2]})
+            "syncPresets":[],"localBookmarks":[],"remoteBookmarks":[],"connectionTree":{"version":1,"nodes":[]},"unknownArray":[1,2]})
+    }
+    #[test]
+    fn side_history_merges_recent_paths_and_does_not_resurrect_removed_entries() {
+        let b=vec![json!({"path":"C:\\old","openedAt":1})];
+        let p=vec![json!({"path":"C:\\a","openedAt":2})];
+        let c=vec![json!({"path":"C:\\b","openedAt":3}),b[0].clone()];
+        let out=merge_side_history(&b,&p,&c,"/localFolderHistory").unwrap();
+        assert_eq!(out,vec![c[0].clone(),p[0].clone()]);
+        let a=vec![json!({"path":"C:\\A","openedAt":4})];
+        let z=vec![json!({"path":"c:/a/","openedAt":5})];
+        assert_eq!(merge_side_history(&[],&a,&z,"/localFolderHistory").unwrap(),z);
+    }
+    #[test]
+    fn side_bookmark_records_merge_additions_and_refuse_delete_edit_conflicts() {
+        for field in ["localBookmarks", "remoteBookmarks"] {
+            let mut base=initial();base[field]=json!([]);
+            let mut clients=setup_clients(&base);let mut disk=base.clone();
+            let mut a=base.clone();a[field]=json!([{"id":"a","name":"A","path":"/a"}]);
+            save(&mut clients,"a",&a,&mut disk);
+            let mut b=base.clone();b[field]=json!([{"id":"b","name":"B","path":"/b"}]);
+            save(&mut clients,"b",&b,&mut disk);
+            assert_eq!(disk[field].as_array().unwrap().len(),2);
+            clients.remember_loaded("a",disk.clone()).unwrap();clients.remember_loaded("b",disk.clone()).unwrap();
+            let mut edit=disk.clone();edit[field][0]["name"]=json!("Edited");
+            let mut delete=disk.clone();delete[field].as_array_mut().unwrap().remove(0);
+            save(&mut clients,"a",&edit,&mut disk);
+            assert!(clients.prepare_save("b",&delete,&disk).is_err());
+        }
     }
     fn setup_clients(base: &Value) -> SettingsClients {
         let mut clients = SettingsClients::default();
@@ -256,6 +309,21 @@ mod tests {
         b["theme"] = base["theme"].clone(); b["profiles"] = json!([]);
         assert!(clients.prepare_save("b", &b, &disk).unwrap_err().contains("/profiles/p"));
         assert_eq!(disk, before);
+    }
+
+    #[test]
+    fn optional_tree_widths_merge_per_side_and_stale_omissions_preserve_unseen_widths() {
+        let base = initial(); let mut clients = setup_clients(&base); let mut disk = base.clone();
+        let mut a = base.clone(); a["localTreeWidth"] = json!(330);
+        save(&mut clients, "a", &a, &mut disk);
+        let mut b = base.clone(); b["remoteTreeWidth"] = json!(240);
+        save(&mut clients, "b", &b, &mut disk);
+        assert_eq!(disk["localTreeWidth"], 330); assert_eq!(disk["remoteTreeWidth"], 240);
+        a = with_revision(a, 1); a["theme"] = json!("mint");
+        save(&mut clients, "a", &a, &mut disk);
+        assert_eq!(disk["remoteTreeWidth"], 240);
+        b = with_revision(b, 2); b["localTreeWidth"] = json!(450);
+        assert!(clients.prepare_save("b", &b, &disk).unwrap_err().contains("/localTreeWidth"));
     }
 
     #[test]

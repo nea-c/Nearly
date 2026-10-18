@@ -1,4 +1,5 @@
 import {
+  uploadPartialSuffix,
   nativeErrorLiterals,
   nativeErrorTemplates,
 } from "./translations-native-errors.js";
@@ -46,6 +47,14 @@ export function localizeNativeError(
   message: string,
   language: Language,
 ): string {
+  for (const suffix of Object.values(uploadPartialSuffix)) {
+    if(message.endsWith(suffix) && message.length > suffix.length && message.length <= 65536) {
+      const inner=message.slice(0,-suffix.length);
+      // Only this owned wrapper recursively localizes a complete owned inner error.
+      if(!inner.includes(uploadPartialSuffix.en) && !inner.includes(uploadPartialSuffix.ja))
+        return localizeNativeError(inner,language)+uploadPartialSuffix[language];
+    }
+  }
   const literal = exact[language].get(message);
   if (literal !== undefined) return literal;
   if (message.length > 65536) return message;

@@ -1,0 +1,46 @@
+import { test, expect } from '@playwright/test';
+async function setup(page) {
+ await page.addInitScript(()=>{
+ window.calls=[];window.hold=true;window.fail=false;window.holdPrepare=false;
+ const profile={id:'file',name:'Fixture',host:'fixture.invalid',port:22,user:'fixture',auth:'key',mode:'sftp',hostKey:'pin'};
+ const entries=[{name:'folder',dir:true,size:0},{name:'one.txt',dir:false,size:1},{name:'two.ZIP',dir:false,size:1}];
+ window.__TAURI__={core:{invoke:async(cmd,args)=>{window.calls.push({cmd,args});
+ if(cmd==='load_settings')return {version:1,settingsRevision:1,profiles:[profile],history:{},theme:'light',language:'en'};
+ if(cmd==='save_settings')return 2;if(cmd==='default_folder')return 'C:\\fixture';if(cmd==='list_drives')return [{path:'C:\\',name:'C:'}];
+ if(cmd==='connect_session')return {path:'/',entries};if(cmd==='list_local'||cmd==='list_remote')return entries;
+ if(cmd==='prepare_file_operation' && window.holdPrepare)await new Promise(r=>window.releasePrepare=r);
+ if(cmd==='run_file_operation'||cmd==='run_local_archive'){if(window.hold)await new Promise(r=>window.release=r);if(window.fail)throw 'Injected later failure';return {completed:1,message:'done',entries:2,bytes:2,finalPath:args.request.destination};}
+ }}};
+ });await page.goto('/');await page.locator('#connect-form .primary').click();await expect(page.locator('[data-pane=local]')).toHaveAttribute('aria-busy','false');
+}
+async function menu(page,name='one.txt'){await page.locator(`[data-list=local] [data-name="${name}"]`).click({button:'right'});}
+test('valid create leaves modal synchronously, reserves operation, prevents double dispatch and shows later failure',async({page})=>{
+ await setup(page);await menu(page);await page.locator('[data-file-action=createfile]').click();await page.locator('[name=create-name]').fill('CON');await page.locator('#create-entry-confirm').click();await expect(page.locator('.create-entry-dialog')).toBeVisible();await page.locator('[name=create-name]').fill('new.txt');
+ await page.locator('#create-entry-confirm').evaluate(b=>{b.click();b.click()});await expect(page.locator('[role=dialog]')).toHaveCount(0);await expect(page.locator('.operation-feedback')).toBeVisible();
+ await expect.poll(()=>page.evaluate(()=>window.calls.filter(c=>c.cmd==='run_file_operation').length)).toBe(1);
+ await page.evaluate(()=>{window.fail=true;window.release()});await expect(page.locator('.operation-feedback')).toContainText('Injected later failure');
+});
+test('delete held RPC never retargets browsed path or clears later selection',async({page})=>{
+ await setup(page);await menu(page);await page.locator('[data-file-action=delete]').click();await page.locator('#file-operation-confirm').click();await expect(page.locator('[role=dialog]')).toHaveCount(0);
+ await expect.poll(()=>page.evaluate(()=>typeof window.release)).toBe('function');await page.locator('[data-list=local] [data-name=folder]').dblclick();await expect(page.locator('#local-path')).toHaveValue('C:\\fixture\\folder');await page.locator('[data-list=local] [data-name="two.ZIP"]').click();await page.evaluate(()=>window.release());
+ await expect(page.locator('.operation-feedback')).toContainText('1');await expect(page.locator('#local-path')).toHaveValue('C:\\fixture\\folder');await expect(page.locator('[data-list=local] [data-name="two.ZIP"]')).toHaveAttribute('aria-selected','true');expect(await page.evaluate(()=>window.calls.find(c=>c.cmd==='run_file_operation').args.request.source)).toBe('C:\\fixture\\one.txt');
+});
+test('explicit Duplicate validates new leaf; Move accepts destination directory',async({page})=>{
+ await setup(page);await menu(page);await page.locator('[data-file-action=duplicate]').click();await page.locator('[name=operation-destination]').fill('copy.txt');await page.locator('#file-operation-confirm').click();await expect.poll(()=>page.evaluate(()=>typeof window.release)).toBe('function');expect(await page.evaluate(()=>window.calls.find(c=>c.cmd==='run_file_operation').args.request.destination)).toBe('C:\\fixture\\copy.txt');await page.evaluate(()=>window.release());await page.locator('.operation-feedback [data-feedback-close]').click();
+ await menu(page);await page.locator('[data-file-action=move]').click();await page.locator('[name=operation-destination]').fill('C:\\elsewhere');await page.locator('#file-operation-confirm').click();await expect.poll(()=>page.evaluate(()=>window.calls.filter(c=>c.cmd==='run_file_operation').length)).toBe(2);expect(await page.evaluate(()=>window.calls.filter(c=>c.cmd==='run_file_operation')[1].args.request.destination)).toBe('C:\\elsewhere\\one.txt');await page.evaluate(()=>window.release());
+});
+test('mixed multi-selection compresses all frozen siblings and never offers extraction',async({page})=>{
+ await setup(page);await page.locator('[data-list=local] [data-name="one.txt"]').click();await page.locator('[data-list=local] [data-name="two.ZIP"]').click({modifiers:['Control']});await menu(page,'two.ZIP');await expect(page.locator('[data-file-action=extract]')).toHaveCount(0);await page.locator('[data-file-action=compress]').click();await page.locator('#archive-confirm').click();await expect(page.locator('[role=dialog]')).toHaveCount(0);await expect.poll(()=>page.evaluate(()=>typeof window.release)).toBe('function');expect(await page.evaluate(()=>window.calls.find(c=>c.cmd==='run_local_archive').args.request.sources)).toEqual(['C:\\fixture\\one.txt','C:\\fixture\\two.ZIP']);await page.evaluate(()=>window.release());
+});
+test('held delete tab switch leaves later tab selection and path intact',async({page})=>{
+ await setup(page);await menu(page);await page.locator('[data-file-action=delete]').click();await page.locator('#file-operation-confirm').click();await expect.poll(()=>page.evaluate(()=>typeof window.release)).toBe('function');await page.locator('#add-tab').click();await page.locator('#connect-form .primary').click();await page.locator('[data-list=local] [data-name="two.ZIP"]').click();await page.evaluate(()=>window.release());await expect(page.locator('.operation-feedback')).toContainText('1');await expect(page.locator('[data-list=local] [data-name="two.ZIP"]')).toHaveAttribute('aria-selected','true');await expect(page.locator('#local-path')).toHaveValue('C:\\fixture');
+});
+test('held Move browse away and back does not change later selection',async({page})=>{
+ await setup(page);await menu(page);await page.locator('[data-file-action=move]').click();await page.locator('[name=operation-destination]').fill('C:\\elsewhere');await page.locator('#file-operation-confirm').click();await expect.poll(()=>page.evaluate(()=>typeof window.release)).toBe('function');await page.locator('[data-list=local] [data-name=folder]').dblclick();await page.locator('#local-path').fill('C:\\fixture');await page.locator('#local-path').press('Enter');await expect(page.locator('[data-pane=local]')).toHaveAttribute('aria-busy','false');await page.locator('[data-list=local] [data-name="two.ZIP"]').click();await page.evaluate(()=>window.release());await expect(page.locator('.operation-feedback')).toContainText('1');await expect(page.locator('[data-list=local] [data-name="two.ZIP"]')).toHaveAttribute('aria-selected','true');
+});
+test('cancel during held prepare remains available, prevents dispatch and releases reservation',async({page})=>{
+ await setup(page);await page.evaluate(()=>window.holdPrepare=true);await menu(page);await page.locator('[data-file-action=createfile]').click();await page.locator('[name=create-name]').fill('cancel.txt');await page.locator('#create-entry-confirm').click();await expect.poll(()=>page.evaluate(()=>typeof window.releasePrepare)).toBe('function');await page.locator('#create-entry-cancel').click();await page.evaluate(()=>window.releasePrepare());await expect(page.locator('.operation-feedback')).toContainText('cancellation was requested');expect(await page.evaluate(()=>window.calls.filter(c=>c.cmd==='run_file_operation').length)).toBe(0);await expect(page.locator('[data-feedback-close]')).toBeEnabled();
+});
+test('remote copy explains client relay and ZIP is disabled with explanation',async({page})=>{
+ await setup(page);await page.locator('[data-list=remote] [data-name="one.txt"]').click({button:'right'});await expect(page.locator('.menu-explanation')).toContainText('Remote ZIP is unavailable');await page.locator('[data-file-action=duplicate]').click();await expect(page.locator('.operation-dialog')).toContainText('relays data through this client over SFTP');
+});

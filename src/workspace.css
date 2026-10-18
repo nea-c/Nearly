@@ -1608,7 +1608,7 @@ main {
 .path .path-navigation svg { pointer-events: none; }
 /* Explorer preferences use fixed pixel columns and a compact connection-scoped row. */
 .bookmark-bar { display:flex; align-items:center; gap:5px; flex:none; height:31px; padding:3px 8px; background:#f7f9fc; border-bottom:1px solid #d2dce9; font-size:11px; min-width:0; }
-.bookmark-items { display:flex; align-items:center; gap:4px; flex:1; min-width:0; overflow:auto; scrollbar-width:none; }
+.bookmark-items { display:flex; align-items:center; gap:4px; flex:1; min-width:0; overflow:hidden; scrollbar-width:none; }
 .bookmark-items::-webkit-scrollbar { display:none; }
 .bookmark-bar button { padding:3px 7px; font-size:11px; white-space:nowrap; flex:none; }
 .bookmark-items button { max-width:180px; overflow:hidden; text-overflow:ellipsis; }
@@ -1788,8 +1788,8 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 .pointer-reorder-source { opacity: .65; }
 
 /* Compact browser-like controls, scoped to the requested surfaces only. */
-.bookmark-bar .bookmark-items > .bookmark-tree-item,
-.bookmark-bar #bookmark-more,
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item,
+:is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow],
 .bookmark-tree-menu > .bookmark-tree-item {
   border: 1px solid transparent;
   background: transparent;
@@ -1799,15 +1799,15 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
   color: inherit;
 }
 .bookmark-tree-menu > .bookmark-tree-item { min-height: 30px; }
-.bookmark-bar .bookmark-items > .bookmark-tree-item:hover,
-.bookmark-bar #bookmark-more:hover,
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:hover,
+:is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:hover,
 .bookmark-tree-menu > .bookmark-tree-item:hover { background: #e8eef6; }
-.bookmark-bar .bookmark-items > .bookmark-tree-item:active,
-.bookmark-bar .bookmark-items > .bookmark-tree-item[aria-expanded=true],
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:active,
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[aria-expanded=true],
 .bookmark-tree-menu > .bookmark-tree-item:active,
 .bookmark-tree-menu > .bookmark-tree-item[aria-expanded=true] { background: #d9e4f1; }
-.bookmark-bar .bookmark-items > .bookmark-tree-item:focus-visible,
-.bookmark-bar #bookmark-more:focus-visible,
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:focus-visible,
+:is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:focus-visible,
 .bookmark-tree-menu > .bookmark-tree-item:focus-visible,
 .pane .path .path-navigation:focus-visible {
   outline: 2px solid #315e91;
@@ -1823,42 +1823,42 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 .statusbar :is(#error-count,#toggle-logs):hover { border-color: #8ca3bd; background: #e8eef6; }
 .statusbar :is(#error-count,#toggle-logs):active { background: #d9e4f1; }
 .statusbar :is(#error-count,#toggle-logs):focus-visible { outline: 2px solid #315e91; outline-offset: -2px; }
-#bookmark-tree-context [data-bookmark-action=delete] { color: #b3261e; }
-#bookmark-tree-context [data-bookmark-action=delete]:is(:hover,:focus-visible) { color: #b3261e; background: #fce8e6; }
-#bookmark-tree-context [data-bookmark-action=delete]:focus-visible { outline: 2px solid #b3261e; outline-offset: -2px; }
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item,
-:root[data-theme=dark] .bookmark-bar #bookmark-more,
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #b3261e; }
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #b3261e; background: #fce8e6; }
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline: 2px solid #b3261e; outline-offset: -2px; }
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow],
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item,
 :root[data-theme=dark] .pane .path .path-navigation { border-color: transparent; background: transparent; color: var(--text-main); }
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item:hover,
-:root[data-theme=dark] .bookmark-bar #bookmark-more:hover,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:hover,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:hover,
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item:hover,
 :root[data-theme=dark] .pane .path .path-navigation:hover:not(:disabled) { background: var(--surface-hover); }
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item:active,
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item[aria-expanded=true],
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:active,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[aria-expanded=true],
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item:active,
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item[aria-expanded=true],
 :root[data-theme=dark] .pane .path .path-navigation:active:not(:disabled) { background: var(--surface-active); }
 :root[data-theme=dark] .bookmark-tree-item .bookmark-item-icon { color: var(--text-accent); }
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item:focus-visible,
-:root[data-theme=dark] .bookmark-bar #bookmark-more:focus-visible,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:focus-visible,
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:focus-visible,
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item:focus-visible,
 :root[data-theme=dark] .pane .path .path-navigation:focus-visible { outline-color: var(--focus-ring); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs) { border-color: var(--border-main); background: var(--surface-raised); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):hover { border-color: var(--border-hover); background: var(--surface-hover); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):active { background: var(--surface-active); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
-:root[data-theme=dark] #bookmark-tree-context [data-bookmark-action=delete] { color: #ffb4ab; }
-:root[data-theme=dark] #bookmark-tree-context [data-bookmark-action=delete]:is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
-:root[data-theme=dark] #bookmark-tree-context [data-bookmark-action=delete]:focus-visible { outline-color: #ffb4ab; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #ffb4ab; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline-color: #ffb4ab; }
 /* Drop feedback must remain stronger than flat-button hover/pressed feedback. */
-.bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=before] { box-shadow: inset 3px 0 #2468c9; }
-.bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=after] { box-shadow: inset -3px 0 #2468c9; }
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=before] { box-shadow: inset 3px 0 #2468c9; }
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=after] { box-shadow: inset -3px 0 #2468c9; }
 .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=before] { box-shadow: inset 0 2px #2468c9; }
 .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=after] { box-shadow: inset 0 -2px #2468c9; }
-.bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
+:is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
 .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { outline: 2px solid #2468c9; outline-offset: -2px; background: #e4efff; }
-:root[data-theme=dark] .bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
+:root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { background: var(--surface-selected); }
 
 /* Navigation availability must remain visible after the flat theme rules. */
@@ -1889,8 +1889,8 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 #connection-context-menu .connection-delete-reason { margin: 0; padding: 6px 8px; max-width: 210px; white-space: normal; }
 
 /* Preserve the former glyph button's hitbox and center a standard horizontal icon. */
-.bookmark-bar #bookmark-more { display: grid; place-items: center; width: 24.0625px; height: 24.5px; padding: 0; }
-.bookmark-bar #bookmark-more .bookmark-more-icon { display: block; width: 16px; height: 16px; pointer-events: none; }
+:is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow] { display: grid; place-items: center; width: 24.0625px; height: 24.5px; padding: 0; }
+:is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow] .bookmark-more-icon { display: block; width: 16px; height: 16px; pointer-events: none; }
 /* Neutral dark backdrops; light mode and semantic action/state colors are unchanged. */
 :root[data-theme="dark"] :is(.connection-tree-overlay, .bookmark-tree-overlay) {
   background: #00000066;
@@ -2148,32 +2148,32 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 :root[data-theme="midnight"] .bookmark-menu-empty { color: var(--text-muted); }
 :root[data-theme="midnight"] [data-bookmark-drop=inside] { background: #294e75; }
 :root[data-theme="midnight"] .selected .hidden-item-label { color: inherit; }
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item,
-:root[data-theme="midnight"] .bookmark-bar #bookmark-more,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow],
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item,
 :root[data-theme="midnight"] .pane .path .path-navigation { border-color: transparent; background: transparent; color: var(--text-main); }
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item:hover,
-:root[data-theme="midnight"] .bookmark-bar #bookmark-more:hover,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:hover,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:hover,
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item:hover,
 :root[data-theme="midnight"] .pane .path .path-navigation:hover:not(:disabled) { background: var(--surface-hover); }
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item:active,
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item[aria-expanded=true],
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:active,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[aria-expanded=true],
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item:active,
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item[aria-expanded=true],
 :root[data-theme="midnight"] .pane .path .path-navigation:active:not(:disabled) { background: #354960; }
 :root[data-theme="midnight"] .bookmark-tree-item .bookmark-item-icon { color: #b3c3d8; }
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item:focus-visible,
-:root[data-theme="midnight"] .bookmark-bar #bookmark-more:focus-visible,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item:focus-visible,
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow]:focus-visible,
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item:focus-visible,
 :root[data-theme="midnight"] .pane .path .path-navigation:focus-visible { outline-color: var(--focus-ring); }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs) { border-color: #53677f; background: #263548; }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):hover { border-color: #90a9c5; background: var(--surface-hover); }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):active { background: #354960; }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
-:root[data-theme="midnight"] #bookmark-tree-context [data-bookmark-action=delete] { color: #ffb4ab; }
-:root[data-theme="midnight"] #bookmark-tree-context [data-bookmark-action=delete]:is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
-:root[data-theme="midnight"] #bookmark-tree-context [data-bookmark-action=delete]:focus-visible { outline-color: #ffb4ab; }
-:root[data-theme="midnight"] .bookmark-bar .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #ffb4ab; }
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline-color: #ffb4ab; }
+:root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { background: #294e75; }
 :root[data-theme="midnight"] .pane .path .path-navigation:disabled,
 :root[data-theme="midnight"] .pane .path .path-navigation:disabled:hover,
@@ -2254,3 +2254,21 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 .retained-sync-actions button { font-size: 11px; padding: 4px 7px; }
 :root[data-compact-explorer="true"] .retained-sync-row { padding-block: 3px; }
 :root[data-compact-explorer="true"] .retained-sync-actions button { padding-block: 2px; }
+/* Fixed bookmark rows share the explorer's theme and retain one physical item per ID. */
+.side-bookmark-bar {display:flex;align-items:center;gap:4px;flex:none;height:31px;min-height:31px;box-sizing:border-box;min-width:0;padding:3px 6px;border-bottom:1px solid var(--border-main,#d2dce9);background:var(--surface-panel,#f7f9fc);font-size:11px;}
+.side-bookmark-bar button {flex:none;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:3px 7px;font-size:11px;}
+:is(.side-bookmark-bar,.bookmark-bar) [data-bookmark-overflow] {width:26px;height:24px;padding:0;display:grid;place-items:center;}
+:is(.side-bookmark-bar,.bookmark-bar,.bookmark-tree-menu) [hidden] {display:none!important;}
+.bookmark-tooltip {position:fixed;z-index:10000;display:flex;flex-direction:column;gap:5px;max-width:min(480px,calc(100vw - 16px));max-height:calc(100vh - 16px);overflow:auto;padding:10px 12px;background:var(--surface-panel,#fff);color:var(--text-main,#243449);border:1px solid var(--border-main,#bccbdd);border-radius:5px;box-shadow:0 3px 14px #0003;pointer-events:none;font-size:12px;box-sizing:border-box;}
+.bookmark-tooltip :is(code,strong,b){white-space:normal;overflow-wrap:anywhere;min-width:0;}
+.bookmark-tooltip b {font-size:11px;opacity:.75;}
+.side-bookmark-menu{z-index:1000;max-width:calc(100vw - 16px);}
+.popup-backdrop { position:fixed; inset:0; background:transparent; pointer-events:auto; }
+[inert] { pointer-events:none; }
+:root .bookmark-tree-item[data-bookmark-context-target=true] { background:var(--surface-selected,#d9e4f1); outline:2px solid var(--focus-ring,#315e91); outline-offset:-2px; }
+
+
+.bookmark-bar:focus-visible,.side-bookmark-bar:focus-visible{outline:2px solid var(--focus-ring,#2468c9);outline-offset:-2px}
+
+/* Preserve keyboard focus without a persistent pointer selection border. */
+.folder-tree :is(.tree-label,.tree-toggle):focus-visible{outline:2px solid var(--focus-ring,#2468c9);outline-offset:-2px}

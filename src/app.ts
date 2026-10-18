@@ -1,8 +1,14 @@
+import { installInputPolicy } from "./input-policy.js";
+import { popupBarrier } from './popup-barrier.js';
+import { bindFileDrop } from "./file-drop.js";
 import {retainedSyncsInWorkspaceOrder} from "./workspace-order.js";
 import {sessionResumeContext,syncActionLabel,resumeActionLabel,currentSyncHelp,resumeSyncHelp} from './sync-actions.js';
 import { initializeStartupUpdate } from "./startup-update.js";
 import { initializeUpdateRestart } from "./update-recovery.js";
 import { syncPathSummary } from "./sync-path-summary.js";
+import {sideBookmarkBar,bindSideBookmarks,closeSideBookmarks,closeStaleSideBookmarks} from './side-bookmarks-ui.js';
+import {connectionKey} from './explorer-preferences.js';
+import {disposeBookmarkRows} from './bookmark-overflow.js';
 import { getDisplayVersion } from "./version.js";
 import { freezeUpdateRoots, settleUpdateWrites } from "./startup-update-settle.js";
 import { createWindowStore, snapshotWorkspaceTransfer, hydrateWorkspaceTransfer, detachTransferredWorkspace } from "./workspace-transfer.js";
@@ -29,6 +35,7 @@ import {
 } from "./folder-bookmarks.js";
 import {
   bookmarkTreeDragging,
+  bookmarkContextOpen,
   cancelBookmarkTreeDrag,
   closeBookmarkTree,
 } from "./bookmark-tree-ui.js";
@@ -77,8 +84,10 @@ import {
 } from "./api.js";
 import { FolderTree, childPath, supportedName, PC_ROOT } from "./tree.js";
 import { syncSettingsMarkup, bindSyncSettings } from "./sync-settings.js";
-import { bindFileActions, refreshFileActionLocale } from "./file-actions.js";
+import { operationBusy } from "./operation-feedback.js";
+import { bindFileActions, refreshFileActionLocale, type ActionHost } from "./file-actions.js";
 import { applyTreeRatios, bindTreeSplitters } from "./pane-layout.js";
+import { TreeRevealIntent, expandConnectionTree, treeBranchContains, visibleTreeTarget, renderedTreePaths, scrollTreeVertically } from "./tree-focus.js";
 import {
   captureTabStrip,
   bindTabStrip,
@@ -105,6 +114,7 @@ import {
 } from "./connection-mode.js";
 import { sameSettingsAfterHostPin } from "./settings-revision.js";
 type Side = "local" | "remote";
+installInputPolicy(document);
 const retrying = new Set<string>();
 const closingWorkspaces = new Set<string>();
 const treeScrolls = new WeakMap<FolderTree, { top: number; left: number }>();
@@ -322,7 +332,7 @@ function transferBusy(id: string) {
   const w = store.workspaces.find(w => w.id === id);
   return !w || workspaceMoving(id) || closingWorkspaces.has(id) || !!dialog || !!w.connecting || !!w.starting ||
     w.loading.local || w.loading.remote || selectionDrag || splitterDragging || pointerReordering() ||
-    retainedWriteCount > 0 || !!document.querySelector(".operation-overlay,[role=dialog]");
+    retainedWriteCount > 0 || operationBusy() || !!document.querySelector(".operation-overlay,[role=dialog]");
 }
 function applyTransferLock() {
   const locked = workspaceMoving(active);
@@ -533,7 +543,7 @@ async function beginNativeTabDrag(id:string, grab:{x:number;y:number}, title:str
   if (!windowRegistration || nativeDrag || transferBusy(id)) return;
   captureWorkspace();
   try {
-    const payload=snapshotWorkspaceTransfer(store,id,{modalOpen:!!dialog,fileOperationBusy:!!document.querySelector(".operation-overlay")});
+    const payload=snapshotWorkspaceTransfer(store,id,{modalOpen:!!dialog,fileOperationBusy:operationBusy() || !!document.querySelector(".operation-overlay")});
     nativeDrag={workspaceId:id}; movingWorkspaces.add(id); applyTransferLock(); reconcileLocalWatch(); updatePrimaryState();
     await registerWorkspace(id);
     await publishTabStrip(true);
@@ -597,6 +607,42 @@ const demoFiles = (p: string): Entry[] =>
   ].filter((x) => !/[\\/]assets$/.test(p) || !x.dir);
 let defaultLocalBrowse = localBrowse;
 const workspace = () => store.workspaces.find((w) => w.id === active)!;
+const hiddenTrees = new WeakMap<Workspace, Set<Side>>();
+const treeInteractions = new WeakMap<FolderTree, number>();
+const treeVerticalScrolls = new WeakMap<FolderTree, number>();
+const connectionTreeScrolls = new WeakMap<Workspace, Map<Side, {path:string; valid:()=>boolean}>>();
+const treeReveal = new TreeRevealIntent();
+let restoringTreeFocus = false;
+const treeShown = (w: Workspace, side: Side) => !hiddenTrees.get(w)?.has(side);
+const treeRevealContext = (w: Workspace, side: Side) => ({
+  workspace: w, connection: w.connection, tree: w.trees[side], side,
+  path: side === 'local' ? w.localBrowse : w.remoteBrowse,
+});
+for (const event of ['pointerdown', 'keydown', 'wheel'] as const)
+  document.addEventListener(event, () => treeReveal.cancel(), true);
+document.addEventListener('focusin', () => { if (!restoringTreeFocus) treeReveal.cancel(); }, true);
+window.addEventListener('blur', () => treeReveal.cancel());
+
+function revealTreeFocus(w: Workspace) {
+  const side = treeReveal.side;
+  if (!side) return false;
+  if (w.id !== active || !treeShown(w, side) || !w.connection || closingWorkspaces.has(w.id)) {
+    treeReveal.cancel(); return false;
+  }
+  const waiting = treeReveal.waitingFor && w.trees[side].peek(treeReveal.waitingFor);
+  if (waiting && waiting.loading && waiting.expanded) return false;
+  const rows = [...document.querySelectorAll<HTMLElement>(`[data-tree-row="${side}"]`)]
+    .filter(row => row.getClientRects().length > 0);
+  const path = treeReveal.consume(treeRevealContext(w, side), rows.map(row => row.dataset.treePath!));
+  const row = rows.find(row => row.dataset.treePath === path);
+  const target = row?.querySelector<HTMLElement>('[data-tree-select], [data-tree-toggle]');
+  // Prefer the non-navigable PC root's branch button only when it has no label button.
+  const label = row?.querySelector<HTMLElement>('[data-tree-select]') ?? target;
+  if (!label) return false;
+  label.focus({ preventScroll: true });
+  scrollTreeVertically(label);
+  return true;
+}
 const tab = () => store.tabs.find((t) => t.id === workspace()?.jobId)!;
 const profile = () => {
   return workspaceProfile(workspace());
@@ -649,7 +695,6 @@ async function loadTree(
     tree = folderTree(w, side, p),
     node = tree.node(path);
   if (node.loading) return;
-  node.expanded = true;
   if (side === "remote" && !w.connection) {
     openConnection(w);
     return;
@@ -680,6 +725,7 @@ async function loadTree(
       if (drives) tree.setDrives(drives);
       else tree.record(path, result);
       node.expanded = expanded;
+      return node.request;
     }
   } catch (error) {
     if (!stale()) node.error = rawError(error);
@@ -691,11 +737,11 @@ async function loadTree(
 function renderTree(side: Side) {
   if (side === "remote" && !workspace().connection)
     return html`<nav class="folder-tree" data-tree="remote">
-      <div class="tree-caption">フォルダ</div>
       <p class="tree-note">未接続</p>
     </nav>`;
   const tree = folderTree(workspace(), side),
     current = side === "local" ? localBrowse : remoteBrowse;
+  const selectedPath = visibleTreeTarget(side, current, renderedTreePaths(tree));
   const nodeHtml = (
     path: string,
     name: string,
@@ -704,11 +750,7 @@ function renderTree(side: Side) {
   ): string => {
     const node = tree.peek(path),
       expanded = !!node?.expanded;
-    const selected =
-      side === "local"
-        ? path.replace(/\\$/, "").toLowerCase() ===
-          current.replace(/\\$/, "").toLowerCase()
-        : path === current;
+    const selected = path === selectedPath;
     const children =
       expanded && depth < 40
         ? (node?.children ?? [])
@@ -770,7 +812,7 @@ function renderTree(side: Side) {
       ${
         expanded
           ? html`<ul role="group">
-              ${node?.loading ? html`<li class="tree-note">読込中…</li>` : ""}${node?.error ? html`<li class="tree-error" role="alert">${esc(tError(node.error))}<button data-tree-retry="${side}" data-tree-path="${esc(path)}">再読込</button></li>` : ""}${children}${node?.loaded && !node.children.length ? html`<li class="tree-note">サブフォルダなし</li>` : ""}${node?.limited ? html`<li class="tree-note">先頭500フォルダを表示</li>` : ""}
+              ${node?.error ? html`<li class="tree-error" role="alert">${esc(tError(node.error))}<button data-tree-retry="${side}" data-tree-path="${esc(path)}">再読込</button></li>` : ""}${children}${node?.loaded && !node.children.length ? html`<li class="tree-note">サブフォルダなし</li>` : ""}${node?.limited ? html`<li class="tree-note">先頭500フォルダを表示</li>` : ""}
             </ul>`
           : ""
       }
@@ -781,7 +823,6 @@ function renderTree(side: Side) {
     data-tree="${side}"
     aria-label="${trText`${side === "local" ? tr("ローカル") : tr("リモート")}のフォルダツリー`}"
   >
-    <div class="tree-caption">フォルダ</div>
     <ul role="tree">
       ${nodeHtml(tree.root, tree.root === PC_ROOT ? "PC" : tree.root, 0)}
     </ul>
@@ -796,12 +837,58 @@ function navigateFolder(side: Side, path: string) {
 }
 function bindTrees(scope: ParentNode = document) {
   scope.querySelectorAll<HTMLElement>("[data-tree]").forEach((nav) => {
+    const side = nav.dataset.tree as Side;
+    const shown = treeShown(workspace(), side);
+    nav.hidden = !shown;
+    nav.id = `${side}-folder-tree`;
+    const body = nav.closest<HTMLElement>('.pane-body');
+    if (body) body.dataset.treeHidden = String(!shown);
+    const splitter = body?.querySelector<HTMLElement>('.tree-splitter');
+    if (splitter) splitter.hidden = !shown;
     const tree = folderTree(workspace(), nav.dataset.tree as Side);
+    const cancelConnectionScroll = () => treeVerticalScrolls.set(tree, (treeVerticalScrolls.get(tree) ?? 0) + 1);
     const saved = treeScrolls.get(tree);
     nav.scrollTop = saved?.top ?? 0;
     nav.scrollLeft = saved?.left ?? 0;
-    nav.onscroll = () =>
-      treeScrolls.set(tree, { top: nav.scrollTop, left: nav.scrollLeft });
+    nav.onscroll = () => {
+      if (nav.isConnected && !nav.hidden) {
+        if (nav.scrollTop !== (treeScrolls.get(tree)?.top ?? 0)) cancelConnectionScroll();
+        treeScrolls.set(tree, { top: nav.scrollTop, left: nav.scrollLeft });
+      }
+    };
+    nav.addEventListener('wheel', event => { if (event.deltaY && !event.shiftKey) cancelConnectionScroll(); }, {passive:true});
+    nav.addEventListener('keydown', event => {
+      if (['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key)) cancelConnectionScroll();
+    });
+    const controls = [...nav.querySelectorAll<HTMLElement>('[data-tree-row]')].map(row =>
+      row.querySelector<HTMLElement>('[data-tree-select]') ?? row.querySelector<HTMLElement>('[data-tree-toggle]')!,
+    );
+    const setRoving = (target: HTMLElement) => controls.forEach(control => { control.tabIndex = control === target ? 0 : -1; });
+    controls.forEach((control, index) => {
+      control.tabIndex = index === 0 ? 0 : -1;
+      control.addEventListener('focus', () => setRoving(control));
+      control.onkeydown = event => {
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 :
+          event.key === 'ArrowUp' ? Math.max(0, index - 1) : event.key === 'ArrowDown' ? Math.min(controls.length - 1, index + 1) : undefined;
+        if (next === undefined) return;
+        event.preventDefault(); controls[next]?.focus({ preventScroll: true });
+        if (controls[next]) scrollTreeVertically(controls[next]);
+      };
+    });
+  });
+  scope.querySelectorAll<HTMLButtonElement>('[data-tree-visibility]').forEach(button => {
+    button.onclick = () => {
+      const w = workspace(), side = button.dataset.treeVisibility as Side;
+      const hidden = hiddenTrees.get(w) ?? new Set<Side>();
+      hiddenTrees.set(w, hidden);
+      if (hidden.has(side)) { hidden.delete(side); treeReveal.request(treeRevealContext(w, side)); }
+      else {
+        const nav = document.querySelector<HTMLElement>(`[data-tree="${side}"]`);
+        if (nav) treeScrolls.set(w.trees[side], { top: nav.scrollTop, left: nav.scrollLeft });
+        hidden.add(side); treeReveal.cancel();
+      }
+      render();
+    };
   });
   scope
     .querySelectorAll<HTMLButtonElement>("[data-tree-toggle],[data-tree-retry]")
@@ -814,12 +901,16 @@ function bindTrees(scope: ParentNode = document) {
             w = workspace(),
             tree = folderTree(w, side),
             node = tree.node(path);
+          treeInteractions.set(tree, (treeInteractions.get(tree) ?? 0) + 1);
+          const context = treeRevealContext(w, side);
+          if (treeBranchContains(side, path, context.path)) treeReveal.request(context, path);
+          else treeReveal.cancel();
           if (node.expanded && !button.hasAttribute("data-tree-retry")) {
             node.expanded = false;
             render();
           } else {
             node.expanded = true;
-            if (node.loaded && !node.error) render();
+            if (node.loading || (node.loaded && !node.error)) render();
             else {
               if (button.hasAttribute("data-tree-retry"))
                 directoryCache(w, side).invalidate();
@@ -1043,7 +1134,8 @@ function bindOperations() {
   const signature = JSON.stringify(profileSnapshot),
     local = w.localBrowse,
     remote = w.remoteBrowse;
-  bindFileActions({
+  const connectionIdentity=w.connection, profileIdentity=workspaceProfile(w), originalGeneration={...w.generation}, originalViewEpoch=fileActionViewEpoch, originalSelection={local:JSON.stringify(w.selections.local.snapshot()),remote:JSON.stringify(w.selections.remote.snapshot())};
+  const actionHost: ActionHost = {
     workspaceId: w.id,
     sessionId: w.connection?.mode === "sftp" ? w.id : undefined,
     profile: profileSnapshot,
@@ -1065,102 +1157,63 @@ function bindOperations() {
       .filter((t) => t.status !== "stopped")
       .map((t) => t.local),
     selected: paintSelection,
-    valid: () =>
-      !workspaceMoving(w.id) && store.workspaces.includes(w) &&
+    operationValid: () => !workspaceMoving(w.id) && !closingWorkspaces.has(w.id) && store.workspaces.includes(w) && w.connection === connectionIdentity && workspaceProfile(w) === profileIdentity && JSON.stringify(workspaceProfile(w)) === signature,
+    valid: () => {
+      const valid=active === w.id && !closingWorkspaces.has(w.id) && w.connection === connectionIdentity && workspaceProfile(w) === profileIdentity && !workspaceMoving(w.id) && store.workspaces.includes(w) &&
       JSON.stringify(workspaceProfile(w)) === signature &&
       w.localBrowse === local &&
-      w.remoteBrowse === remote,
-    changed: async (side, passphrase, change) => {
-      if (change.action === "createfile" || change.action === "mkdir") {
-        const parent = change.parent!;
-        const samePath = (a: string, b: string) => side === "local"
-          ? a.replaceAll("/", "\\").replace(/\\$/, "").toLowerCase() === b.replaceAll("/", "\\").replace(/\\$/, "").toLowerCase()
-          : (a.replace(/\/$/, "") || "/") === (b.replace(/\/$/, "") || "/");
-        // Creation never relocates another view or clears another pane's selection/tree.
-        for (const target of store.workspaces) {
-          if (side === "remote" && JSON.stringify(workspaceProfile(target)) !== signature) continue;
-          directoryCache(target, side).invalidate();
-          const node = target.trees[side].peek(parent);
-          if (node) { node.loaded = false; node.loading = false; node.request++; }
-        }
-        if (!store.workspaces.includes(w) || JSON.stringify(workspaceProfile(w)) !== signature) return;
-        const current = side === "local" ? w.localBrowse : w.remoteBrowse;
-        if (samePath(current, parent)) {
-          const expected = w.generation[side] + 1;
-          const ok = await refresh(side, { restoring: true }, w);
-          if (ok && change.created && active === w.id && w.generation[side] === expected && samePath(side === "local" ? w.localBrowse : w.remoteBrowse, parent)) {
-            const name = change.paths[0]?.split(/[\\/]/).pop();
-            if (name && w.entries[side].some(entry => entry.name === name)) {
-              w.selections[side].clickName(name);
-              paintSelection(side);
-            }
-          }
-        } else {
-          // A tree context may target a folder other than the committed list path.
-          const tree = w.trees[side], node = tree.peek(parent);
-          if (node) {
-            const expanded = node.expanded, generation = w.generation[side], token = tree.begin(parent);
-            try {
-              const result = await readDirectory(w, side, parent);
-              if (store.workspaces.includes(w) && w.trees[side] === tree && w.generation[side] === generation && tree.current(parent, token)) {
-                tree.record(parent, result); tree.node(parent).expanded = expanded;
-              }
-            } finally {
-              if (tree.current(parent, token)) node.loading = false;
-              if (active === w.id && store.workspaces.includes(w)) render();
-            }
-          }
-        }
-        return;
-      }
+      w.remoteBrowse === remote;
+      if(valid){originalSelection.local=JSON.stringify(w.selections.local.snapshot());originalSelection.remote=JSON.stringify(w.selections.remote.snapshot());}
+      return valid;
+    },
+    changed: async (side, _passphrase, change) => {
+      const samePath = (a: string,b: string) => side === "local"
+        ? a.replaceAll("/","\\").replace(/\\$/, "").toLowerCase() === b.replaceAll("/","\\").replace(/\\$/, "").toLowerCase()
+        : (a.replace(/\/$/, "") || "/") === (b.replace(/\/$/, "") || "/");
+      const affected = Object.freeze([...change.affectedDirectories]);
+      const removedDirectories = Object.freeze([...(change.removedDirectories ?? []), ...(change.affectedSubtrees ?? [])]);
+      const within = (root: string, path: string) => {
+        const clean = (value: string) => side === "local"
+          ? value.replaceAll("/", "\\").replace(/\\$/, "").toLowerCase()
+          : value.replace(/\/$/, "") || "/";
+        root=clean(root);path=clean(path);
+        return root === path || path.startsWith(root.replace(/[\\/]$/, "") + (side === "local" ? "\\" : "/"));
+      };
+      // Invalidation is independent of the original view. Never mutate another tab's navigation/selection.
       for (const target of store.workspaces) {
-        if (
-          side === "remote" &&
-          JSON.stringify(workspaceProfile(target)) !== signature
-        )
-          continue;
-        const path =
-          side === "local" ? target.localBrowse : target.remoteBrowse;
-        const inside = (a: string, b: string) => {
-          const clean = (s: string) =>
-            side === "local"
-              ? s.replaceAll("/", "\\").replace(/\\$/, "").toLowerCase()
-              : s.replace(/\/$/, "") || "/";
-          a = clean(a);
-          b = clean(b);
-          return a === b || b.startsWith(a + (side === "local" ? "\\" : "/"));
-        };
-        const removed =
-          change.action === "delete" || change.action === "move"
-            ? change.paths.find((source) => inside(source, path))
-            : undefined;
-        if (removed) {
-          const parent =
-            side === "remote"
-              ? remotePath(removed + "/..")
-              : removed.replace(/[\\/][^\\/]+[\\/]?$/, "") +
-                (/^[A-Za-z]:$/.test(removed.replace(/[\\/][^\\/]+[\\/]?$/, ""))
-                  ? "\\"
-                  : "");
-          if (side === "local") target.localBrowse = parent;
-          else target.remoteBrowse = parent;
+        if (side === "remote" && JSON.stringify(workspaceProfile(target)) !== signature) continue;
+        for (const removed of removedDirectories) {
+          directoryCache(target,side).invalidateMatching(path=>within(removed,path));
+          target.trees[side].invalidateSubtree(removed,true);
         }
-        directoryCache(target, side).invalidate();
-        target.selections[side].clear();
-        target.trees[side].reset(
-          side === "local" ? PC_ROOT : "/",
-          side === "remote" ? signature : undefined,
-        );
-        target.generation[side]++;
-        target.loading[side] = false;
-        target.entries[side] = [];
-        listingState(target, side).path = undefined;
+        for(const parent of affected) {
+          directoryCache(target,side).invalidatePath(parent);
+          const node=target.trees[side].peek(parent);
+          if(node){node.loaded=false;node.loading=false;node.request++;}
+        }
       }
-      if (active === w.id) {
-        restoreWorkspace();
-        await refresh(side);
+      const current=()=>!workspaceMoving(w.id) && !closingWorkspaces.has(w.id) && store.workspaces.includes(w) && w.connection === connectionIdentity && workspaceProfile(w) === profileIdentity && JSON.stringify(workspaceProfile(w)) === signature;
+      // A browse-away/back is a later view too: generation protects its selection.
+      if(!current() || fileActionViewEpoch !== originalViewEpoch || active !== w.id || w.generation[side] !== originalGeneration[side] || !samePath(side === "local" ? w.localBrowse : w.remoteBrowse,side === "local" ? local : remote)) return;
+      const original=side === "local" ? local : remote;
+      const removedCurrent=(change.action === "delete" || change.action === "move") && change.paths.some(path=>samePath(path,original) || samePath(path,original.slice(0,path.length)) && /[\\/]/.test(original[path.length] ?? ""));
+      if(!removedCurrent && !affected.some(parent=>samePath(parent,original))) return;
+      const selectionUnchanged=JSON.stringify(w.selections[side].snapshot()) === originalSelection[side];
+      const expected=w.generation[side]+1;
+      const ok=await refresh(side,{path:original,restoring:true,remember:false},w);
+      if(!current() || fileActionViewEpoch !== originalViewEpoch || active !== w.id || w.generation[side] !== expected) return;
+      if(ok && selectionUnchanged && change.created && !change.uncertain && change.paths.length === 1) {
+        const name=change.paths[0].split(/[\\/]/).pop();
+        if(name && w.entries[side].some(e=>e.name === name)){w.selections[side].clickName(name);paintSelection(side);}
       }
     },
+  };
+  bindFileActions(actionHost);
+  bindFileDrop({ ...actionHost,
+    uploadAllowed: () => native && !previewBootstrap && !(incomingTransfer && ["dragging","pending"].includes(incomingTransfer.phase)) && !nativeDrag && !windowClosing && !w.starting && !dialog && !splitterDragging && !pointerReordering() && !!w.connection && w.connection.mode === "sftp" && !w.connecting && !w.loading.remote && !workspaceMoving(w.id) && !closingWorkspaces.has(w.id) && !store.tabs.some(tab => tab.status !== "stopped" && tab.id === w.jobId),
+    remoteDirectory: path => !!w.trees.remote.peek(path),
+    localDirectory: path => !!w.trees.local.peek(path),
+    dragging: (value, cancel) => {selectionDrag=value;finishSelectionDrag=cancel;},
   });
 }
 function captureWorkspace() {
@@ -1203,11 +1256,13 @@ function leavePathEditor() {
   if (focused instanceof HTMLElement && focused.closest("form[data-path]"))
     focused.blur();
 }
+let fileActionViewEpoch=0;
 function switchWorkspace(id: string) {
+  treeReveal.cancel();
   cancelPointerReorder();
   cancelBookmarkTreeDrag();
   cancelConnectionTreeDrag();
-  if (id !== active) cancelHostKeyApproval();
+  if (id !== active) { fileActionViewEpoch++; cancelHostKeyApproval(); }
   if (
     dialog ||
     workspace().connecting ||
@@ -1223,6 +1278,7 @@ function switchWorkspace(id: string) {
   render();
 }
 function addWorkspace() {
+  treeReveal.cancel();
   if(windowClosing) return;
   cancelPointerReorder();
   cancelBookmarkTreeDrag();
@@ -1247,7 +1303,8 @@ function addWorkspace() {
   }
 }
 function closeWorkspace(id: string) {
-  if (workspaceMoving(id)) return;
+  treeReveal.cancel();
+  if (workspaceMoving(id) || operationBusy()) return;
   cancelPointerReorder();
   cancelBookmarkTreeDrag();
   cancelConnectionTreeDrag();
@@ -1358,6 +1415,10 @@ type SettingsOverrides = Partial<
   Pick<
     Settings,
     | "folderBookmarks"
+    | "localBookmarks"
+    | "remoteBookmarks"
+    | "localBookmarkTree"
+    | "remoteBookmarkTree"
     | "bookmarkTree"
     | "bookmarkTreeChanged"
     | "profiles"
@@ -1404,6 +1465,10 @@ async function persist(
         store.markLastSelectedProfileSaved(selectedProfileRevision);
       if (requested?.folderBookmarks)
         store.folderBookmarks = requested.folderBookmarks;
+      if(requested?.localBookmarks)store.localBookmarks=requested.localBookmarks;
+      if(requested?.remoteBookmarks)store.remoteBookmarks=requested.remoteBookmarks;
+      if(requested?.localBookmarkTree)store.localBookmarkTree=requested.localBookmarkTree;
+      if(requested?.remoteBookmarkTree)store.remoteBookmarkTree=requested.remoteBookmarkTree;
       if (requested?.bookmarkTree) {
         store.bookmarkTree = requested.bookmarkTree;
         if (requested.bookmarkTreeChanged) store.markBookmarkTreeSaved();
@@ -1467,6 +1532,10 @@ async function mutateBookmarks<T>(change: (candidate: Store) => T): Promise<T> {
     const data = candidate.serialize();
     await persist({
       folderBookmarks: data.folderBookmarks,
+      localBookmarks:data.localBookmarks,
+      remoteBookmarks:data.remoteBookmarks,
+      localBookmarkTree:data.localBookmarkTree,
+      remoteBookmarkTree:data.remoteBookmarkTree,
       bookmarkTree: data.bookmarkTree,
       bookmarkTreeChanged: data.bookmarkTreeChanged,
     });
@@ -1658,8 +1727,9 @@ function primaryState() {
     return { text: tr("停止中…"), disabled: true, stop: true };
   if (t && t.status !== "stopped")
     return { text: tr("同期停止"), disabled: false, stop: true };
-  return { text: syncActionLabel(), disabled: !profile() || loading || w.loading.local || w.loading.remote, stop: false };
+  return { text: syncActionLabel(), disabled: operationBusy() || !profile() || loading || w.loading.local || w.loading.remote, stop: false };
 }
+window.addEventListener("operation-busy-changed",()=>updatePrimaryState());
 function updatePrimaryState() {
   const button = document.querySelector<HTMLButtonElement>("#prepare");
   if (button) {
@@ -1678,15 +1748,16 @@ async function readDirectory(
   path: string,
 ): Promise<Entry[]> {
   if (workspaceMoving(w.id)) throw Error("Workspace transfer pending");
-  if (!w.connection) throw Error(tr("接続先がありません"));
+  if (!w.connection && side === "remote") throw Error(tr("接続先がありません"));
   const connection = w.connection;
-  if (!canUseConnection(connection.mode)) throw Error(disabledMockMessage);
+  if (connection && !canUseConnection(connection.mode)) throw Error(disabledMockMessage);
   const generation = w.generation[side];
   return directoryCache(w, side).read(
     path,
     async () => {
       if (side === "local")
         return native ? await invoke("list_local", { path }) : demoFiles(path);
+      if (!connection) throw Error(tr("接続先がありません"));
       if (connection.mode === "mock") return demoFiles(path);
       if (!native) throw Error(tr("実SFTPはデスクトップで利用できます"));
       return await invoke("list_remote", {
@@ -1716,7 +1787,7 @@ function sameBrowsePath(side: Side, a: string, b: string) {
 }
 function browsePath(w: Workspace, side: Side) { return side === "local" ? w.localBrowse : w.remoteBrowse; }
 function automaticBusy() {
-  return selectionDrag || pointerBusy || splitterDragging || pointerReordering() || bookmarkTreeDragging() || connectionTreeDragging() || performance.now() < wheelQuietUntil || !!document.querySelector("#modal-root > *,[role=menu],[role=dialog],.file-menu,.operation-overlay") || !!document.activeElement?.closest("form[data-path]")?.matches("[data-dirty],[data-composing]");
+  return operationBusy() || selectionDrag || pointerBusy || splitterDragging || pointerReordering() || bookmarkTreeDragging() || connectionTreeDragging() || performance.now() < wheelQuietUntil || !!document.querySelector("#modal-root > *,[role=menu],[role=dialog],.file-menu,.operation-overlay") || !!document.activeElement?.closest("form[data-path]")?.matches("[data-dirty],[data-composing]");
 }
 function reconcileLocalWatch(force = false) {
   const w = workspace();
@@ -1878,10 +1949,11 @@ function disposeAutomaticRefresh() {
   if(old)watchChain=watchChain.catch(()=>{}).then(()=>invoke("unwatch_local_directory",{id:old.w.id,token:old.token})).catch(()=>{});
 }
 window.addEventListener("pagehide",disposeAutomaticRefresh);
+const sideBookmarkViews=new WeakSet<Workspace>();
 function rememberViewedPair(w: Workspace) {
   if (!w.connection) return;
   try {
-    if (w.navigation.local.current && w.navigation.remote.current)
+    if (!sideBookmarkViews.has(w) && w.navigation.local.current && w.navigation.remote.current)
       store.rememberFolderPair(w.connection, w.localBrowse, w.remoteBrowse);
     void persist().catch((error) => {
       if (active === w.id) message(error);
@@ -1977,6 +2049,7 @@ async function openFolderPair(
     }
     w.localBrowse = pair.local;
     w.remoteBrowse = pair.remote;
+    sideBookmarkViews.delete(w);
     rememberViewedPair(w);
     return true;
   } catch (error) {
@@ -1996,11 +2069,11 @@ async function openFolderPair(
 }
 async function refresh(
   side: Side,
-  options: { path?: string; historyIndex?: number; restoring?: boolean; remember?: boolean } = {},
+  options: { path?: string; historyIndex?: number; restoring?: boolean; remember?: boolean; suppressPairHistory?:boolean } = {},
   w = workspace(),
 ) {
   if (workspaceMoving(w.id)) return false;
-  if (!w.connection) {
+  if (!w.connection && side==='remote') {
     openConnection(w);
     return false;
   }
@@ -2013,10 +2086,12 @@ async function refresh(
       : side === "remote"
         ? remotePath(options.path)
         : normalizeLocalBrowse(options.path);
-  const requestedProfile = { ...w.connection };
+  const requestedConnection=w.connection;
+  const requestedProfile = w.connection?{ ...w.connection }:undefined;
+  if(options.suppressPairHistory)sideBookmarkViews.add(w);
   const requestedTree = folderTree(w, side, requestedProfile);
   const request = ++w.generation[side];
-  const browseToken = store.beginBrowse(requestedProfile, side);
+  const browseToken = requestedProfile?store.beginBrowse(requestedProfile, side):undefined;
   if (options.path === undefined) directoryCache(w, side).invalidate();
   automaticRefresh.cancel(refreshKey(w,side));
   w.loading[side] = true;
@@ -2028,6 +2103,7 @@ async function refresh(
   }
   const stale = () =>
     !store.workspaces.includes(w) ||
+    w.connection!==requestedConnection ||
     w.generation[side] !== request ||
     w.trees[side] !== requestedTree;
   try {
@@ -2038,6 +2114,13 @@ async function refresh(
       if (side === "local") w.localBrowse = requestedPath;
       else w.remoteBrowse = requestedPath;
       w.entries[side] = result;
+      if(!options.restoring && (options.path!==undefined||options.historyIndex!==undefined)){
+        store.rememberSideFolder(side,requestedPath,requestedProfile);
+        if(!requestedProfile)void persist().catch(message);
+      }
+      // Completion/reload restores the same view; only deliberate navigation
+      // releases side-bookmark suppression of mixed paired-history entries.
+      if(!options.restoring&&!options.suppressPairHistory&&(options.path!==undefined||options.historyIndex!==undefined))sideBookmarkViews.delete(w);
       listingSucceeded(w, side, requestedPath);
       parentSelection(w).delete(side);
       w.selections[side].context(
@@ -2050,7 +2133,7 @@ async function refresh(
           .filter((entry) => supportedName(entry.name))
           .map((entry) => entry.name),
       );
-      if(options.remember !== false) store.rememberSuccessfulBrowse(
+      if(options.remember !== false && requestedProfile && browseToken!==undefined) store.rememberSuccessfulBrowse(
         requestedProfile,
         side,
         requestedPath,
@@ -2084,6 +2167,11 @@ async function restoreBrowses(
   const connection = w.connection,
     localDefault = defaultLocalBrowse,
     homePath = remotePath(home.path);
+  const viewEpoch = fileActionViewEpoch;
+  const trees = {local:w.trees.local,remote:w.trees.remote};
+  const interactions = {local:treeInteractions.get(trees.local),remote:treeInteractions.get(trees.remote)};
+  const scrolls = {local:treeVerticalScrolls.get(trees.local),remote:treeVerticalScrolls.get(trees.remote)};
+  const generations: Partial<Record<Side, number>> = {};
   const warnings: string[] = [];
   const restoreSide = async (side: Side) => {
     const fallback = side === "local" ? localDefault : homePath;
@@ -2091,16 +2179,18 @@ async function restoreBrowses(
     if (side === "remote" && desired === homePath) {
       const token = store.beginBrowse(connection, side);
       store.rememberSuccessfulBrowse(connection, side, homePath, token);
+      generations[side] = w.generation[side];
       return;
     }
     const expected = w.generation[side] + 1;
     const success = await refresh(side, { path: desired, restoring: true }, w);
     if (
-      success ||
       !store.workspaces.includes(w) ||
+      w.connection !== connection ||
       w.generation[side] !== expected
     )
       return;
+    if (success) { generations[side] = expected; return; }
     const reason = w.notice;
     if (saved[side])
       warnings.push(
@@ -2113,14 +2203,34 @@ async function restoreBrowses(
       store.beginBrowse(connection, side);
       w.navigation.remote.commit(homePath);
       listingSucceeded(w, "remote", homePath);
-    } else await refresh(side, { path: fallback, restoring: true, remember: false }, w);
+      generations[side] = expected;
+    } else {
+      const fallbackRequest = w.generation[side] + 1;
+      if (await refresh(side, { path: fallback, restoring: true, remember: false }, w)) generations[side] = fallbackRequest;
+    }
   };
   await Promise.all([
     loadTree(w, "local", PC_ROOT),
     restoreSide("local"),
     restoreSide("remote"),
   ]);
-  if (!store.workspaces.includes(w)) return;
+  if (!store.workspaces.includes(w) || w.connection !== connection) return;
+  await Promise.all((['local','remote'] as const).map(async side => {
+    const tree = trees[side], path = side === 'local' ? w.localBrowse : w.remoteBrowse;
+    const valid = () => store.workspaces.includes(w) && w.connection === connection && w.trees[side] === tree &&
+      w.generation[side] === generations[side] && treeInteractions.get(tree) === interactions[side] &&
+      fileActionViewEpoch === viewEpoch && active === w.id && !closingWorkspaces.has(w.id);
+    if (!valid()) return;
+    try {
+      await expandConnectionTree(tree, path, branch => loadTree(w, side, branch), valid);
+    } catch { /* A tree limit/listing failure never rewrites the opened path. */ }
+    if (valid()) {
+      const pending = connectionTreeScrolls.get(w) ?? new Map();
+      pending.set(side, {path,valid:()=>valid() && treeVerticalScrolls.get(tree) === scrolls[side]}); connectionTreeScrolls.set(w,pending);
+      render();
+    }
+  }));
+  if (!store.workspaces.includes(w) || w.connection !== connection) return;
   if (warnings.length) {
     w.notice = warnings.join("\n");
     // Automatic safe fallbacks are temporary views. Keep the last successful
@@ -2161,6 +2271,7 @@ function filePane(side: Side) {
       >${isLocal ? "" : html`<span class="sync-controls"><span class="sync-location-slot">${retainedLocationsMarkup()}</span>${primarySyncMarkup()}<span class="sync-resume-slot">${retainedControlsMarkup()}</span></span>`}
     </header>
     <form data-path="${side}" class="path">
+
       ${(["back", "forward", "up", "refresh"] as const)
         .map((action) => {
           const label = {
@@ -2195,7 +2306,15 @@ function filePane(side: Side) {
         name="path"
         value="${esc(p)}"
       />
+      <button type="button" class="path-navigation tree-visibility" data-tree-visibility="${side}"
+        id="${side}-tree-visibility" aria-controls="${side}-folder-tree"
+        aria-expanded="${treeShown(w, side)}"
+        title="${treeShown(w, side) ? tr('フォルダツリーを隠す') : tr('フォルダツリーを表示')}"
+        aria-label="${isLocal ? tr('ローカル') : tr('リモート')}: ${treeShown(w, side) ? tr('フォルダツリーを隠す') : tr('フォルダツリーを表示')}">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1"/><path d="M6 3v10M3 5h1M3 8h1M3 11h1"/></svg>
+      </button>
     </form>
+    ${sideBookmarkBar(store,w,side)}
     <div class="pane-body">
       ${renderTree(side)}
       <div
@@ -2407,11 +2526,15 @@ function render() {
   if(windowClosing) return;
   if(initialized && !store.workspaces.length) { renderEmptyWindow(); return; }
   reconcileLocalWatch();
+  // A foreign side dialog must not prevent its replacement workspace from rendering.
+  closeStaleSideBookmarks();
   if (
     selectionDrag ||
     pointerBusy ||
     splitterDragging ||
     pointerReordering() ||
+    bookmarkContextOpen() ||
+    !!document.querySelector('#side-bookmark-dialog,#side-history-dialog,#bookmark-tree-dialog') ||
     bookmarkTreeDragging() ||
     connectionTreeDragging()
   ) {
@@ -2480,6 +2603,9 @@ function render() {
     }
   captureTabStrip();
   captureBookmarks();
+  disposeBookmarkRows();
+  closeSideBookmarks();
+  // Paired dialogs live outside #app; bindBookmarks preserves their owner and draft.
   $("#app")!.innerHTML =
     titlebar(store, active, settingsOpen) +
     html`<main>
@@ -2534,9 +2660,30 @@ function render() {
     message,
     mutateBookmarks,
   );
+  for(const side of ['local','remote'] as const){
+    const connection=w.connection;
+    const key=connection?connectionKey(connection):undefined;
+    const owned=()=>store.workspaces.includes(w)&&active===w.id&&!workspaceMoving(w.id)&&w.connection===connection&&(!connection||connectionKey(connection)===key);
+    bindSideBookmarks(store,w,side,owned,path=>{if(!owned())return Promise.resolve(false);leavePathEditor();return refresh(side,{path,suppressPairHistory:true},w);},mutateBookmarks,render,message);
+  }
   bind();
   if (p) {
     bindTrees();
+    const pending = connectionTreeScrolls.get(w);
+    for (const [side, reveal] of pending ?? []) {
+      pending!.delete(side);
+      if (!reveal.valid() || !treeShown(w, side)) continue;
+      const rows = [...document.querySelectorAll<HTMLElement>(`[data-tree-row="${side}"]`)];
+      const target = visibleTreeTarget(side, reveal.path, rows.map(row => row.dataset.treePath!));
+      const row = rows.find(row => row.dataset.treePath === target);
+      if (row) {
+        scrollTreeVertically(row);
+        // Another completed side/final restoration can render before onscroll.
+        // Persist the programmatic reveal now, while this nav still exists.
+        const nav = row.closest<HTMLElement>('[data-tree]')!;
+        treeScrolls.set(w.trees[side], {top:nav.scrollTop,left:nav.scrollLeft});
+      }
+    }
     bindSelections();
     bindOperations();
     bindColumns(
@@ -2583,11 +2730,14 @@ function render() {
   const logs = document.querySelector<HTMLElement>(".log-drawer .logs");
   if (logs) logs.scrollTop = oldLogScroll;
   const selector = focusId ? "#" + CSS.escape(focusId) : dataFocus;
-  if (focused?.isConnected) focused.focus({ preventScroll: true });
-  else if (selector)
-    document
-      .querySelector<HTMLElement>(selector)
-      ?.focus({ preventScroll: true });
+  if (!revealTreeFocus(w)) {
+    restoringTreeFocus = true;
+    try {
+      if (focused?.isConnected) focused.focus({ preventScroll: true });
+      else if (selector)
+        document.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+    } finally { restoringTreeFocus = false; }
+  }
 }
 const startingRetained = new Set<string>();
 const retainedFailures = new Map<string,string>();
@@ -2607,7 +2757,7 @@ async function mutateRetained(change:(candidate:Store)=>void,guard:()=>void=()=>
 function resumeContext(){return workspace()?sessionResumeContext(workspace().id,tab(),ownedRetained()):undefined;}
 function resumeBusy(resume=true){
   const w=workspace(),t=tab();
-  return !w?.connection || workspaceMoving(w.id) || retainedWriteCount>0 || w.connecting || w.starting || closingWorkspaces.has(w.id) || w.loading.local || w.loading.remote ||
+  return operationBusy() || !w?.connection || workspaceMoving(w.id) || retainedWriteCount>0 || w.connecting || w.starting || closingWorkspaces.has(w.id) || w.loading.local || w.loading.remote ||
     (resume ? !!t&&t.status!=="stopped" : t?.status==="stopping");
 }
 function primarySyncHelp(){
@@ -3015,10 +3165,17 @@ async function saveAppearance(change: () => void, repaint: boolean) {
       document.getElementById(preferenceFocus)?.focus({ preventScroll: true });
   }
 }
+let releaseSettingsBarrier: (() => void) | undefined;
+function dismissSettings() {
+  settingsOpen = false;
+  renderSettings();
+  $('#settings-toggle')?.focus({preventScroll:true});
+}
 function renderSettings() {
   const root = document.querySelector<HTMLElement>("#settings-root")!;
   $("#settings-toggle")?.setAttribute("aria-expanded", String(settingsOpen));
   if (!settingsOpen) {
+    releaseSettingsBarrier?.(); releaseSettingsBarrier = undefined;
     root.replaceChildren();
     return;
   }
@@ -3031,6 +3188,7 @@ function renderSettings() {
     id="settings-popup"
     class="settings-popup"
     role="dialog"
+    aria-modal="true"
     aria-label="アプリ設定"
   >
     <header>
@@ -3088,11 +3246,11 @@ function renderSettings() {
     >
     <p class="compact-explorer-help">一覧とツリーの行間を狭くします</p>
   </section>`;
-  $("#settings-close")!.onclick = () => {
-    settingsOpen = false;
-    renderSettings();
-    $("#settings-toggle")?.focus();
-  };
+  $("#settings-close")!.onclick = dismissSettings;
+  if (!releaseSettingsBarrier) {
+    releaseSettingsBarrier = popupBarrier(root, dismissSettings, 209);
+    $('#settings-close')?.focus({preventScroll:true});
+  }
   $("#language-select")!.addEventListener("change", (event) => {
     const value = (event.target as HTMLSelectElement).value;
     if (value !== "ja" && value !== "en") return;
@@ -3118,25 +3276,6 @@ function renderSettings() {
     }, false);
   });
 }
-
-document.addEventListener("pointerdown", (event) => {
-  if (
-    settingsOpen &&
-    event.target instanceof Element &&
-    !event.target.closest("#settings-root,#settings-toggle")
-  ) {
-    settingsOpen = false;
-    renderSettings();
-  }
-});
-document.addEventListener("keydown", (event) => {
-  if (settingsOpen && event.key === "Escape") {
-    event.preventDefault();
-    settingsOpen = false;
-    renderSettings();
-    $("#settings-toggle")?.focus();
-  }
-});
 
 function bindEntryOpen(scope: ParentNode = document) {
   scope.querySelectorAll<HTMLElement>("[data-entry]").forEach((el) => {
@@ -3185,6 +3324,7 @@ function bind() {
   on("#window-minimize", () => windowControl("minimize").catch(message));
   on("#window-maximize", () => windowControl("toggleMaximize").catch(message));
   on("#window-close", () => {
+    if(operationBusy()){showBlockedCloseNotice(tr("処理中です。"));return;}
     if (movingWorkspaces.size) { showBlockedCloseNotice(transferText("タブの移動が完了するまでお待ちください。", "Wait for the tab move to finish.")); return; }
     if (store.workspaces.some((w) => w.connecting)) {
       showBlockedCloseNotice(tr("接続を中止し、完了してからウィンドウを閉じてください。"));
@@ -3294,6 +3434,7 @@ function bind() {
       stop(current).catch(message);
       return;
     }
+    if (operationBusy()) return;
     const connected = profile();
     if (!connected) {
       openConnection();
@@ -3434,8 +3575,8 @@ function renderDialog() {
             </form>`
           : d.type === "start"
             ? html`<form id="start-form">
-                ${syncPathSummary('destination',tr("リモート同期先 /")+" "+d.p.name,d.remote)}
                 ${syncPathSummary('source',d.retained?tr("同期元（前回のローカルフォルダー）"):tr("同期元（現在のローカルフォルダー）"),d.local)}
+                ${syncPathSummary('destination',tr("リモート同期先 /")+" "+d.p.name,d.remote)}
                 <input type="hidden" name="local" value="${esc(d.local)}">
                 ${d.retained?resumeSettingsMarkup(d.retained):syncSettingsMarkup()}
 
@@ -3542,6 +3683,7 @@ function renderDialog() {
     }
     const startForm = e.target as HTMLFormElement;
     if (
+      operationBusy() ||
       startForm.dataset.submitting ||
       startForm.dataset.settingsSaving ||
       startForm.dataset.pickingFolder ||
@@ -4266,22 +4408,6 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       const owned=store.ownRetainedForWorkspace(w.id);
       const savedBrowse = owned&&sameRetainedConnection(owned.profile,snapshot) ? {local:owned.local,remote:owned.remote} : store.lastBrowse(snapshot);
       store.connectWorkspace(w.id, snapshot);
-      // Establish the initial tree view once. Subsequent navigation and listing
-      // updates preserve every chevron's state.
-      const initialLocal = savedBrowse.local ?? w.localBrowse;
-      const drive = /^[A-Za-z]:[\\/]/.exec(initialLocal)?.[0];
-      if (drive) {
-        let ancestor = drive.replaceAll("/", "\\");
-        w.trees.local.node(ancestor).expanded = true;
-        for (const part of initialLocal
-          .slice(3)
-          .split(/[\\/]/)
-          .filter(Boolean)
-          .slice(0, 40)) {
-          ancestor = childPath("local", ancestor, part);
-          w.trees.local.node(ancestor).expanded = true;
-        }
-      }
       w.remoteBrowse = remotePath(connected.path);
       if (!savedBrowse.remote || savedBrowse.remote === w.remoteBrowse)
         w.navigation.remote.commit(w.remoteBrowse);
@@ -4295,13 +4421,6 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
           .map((e) => e.name),
       );
       tree.record(w.remoteBrowse, connected.entries);
-      tree.node("/").expanded = true;
-      let initialAncestor = "";
-      for (const part of w.remoteBrowse.split("/").filter(Boolean)) {
-        initialAncestor += "/" + part;
-        tree.node(initialAncestor).expanded = true;
-      }
-      tree.node(w.remoteBrowse).expanded = true;
       directoryCache(w, "remote").seed(w.remoteBrowse, connected.entries);
       w.connecting = false;
       connectionViews.delete(w.id);
@@ -4344,4 +4463,5 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
     )
     ?.focus();
 }
+
 

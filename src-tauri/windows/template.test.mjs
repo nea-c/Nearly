@@ -16,7 +16,7 @@ function runDecision(name, { registry = {}, files = [], variables = {}, silent =
   const body = template.match(new RegExp(`Function ${name}\\r?\\n([\\s\\S]*?)FunctionEnd`))?.[1];
   assert.ok(body, `Missing actual NSIS function ${name}`);
   const lines = body.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith(";"));
-  const vars = { INSTDIR: "C:\\Users\\Fixture\\AppData\\Local\\Nearly", SMPROGRAMS: "C:\\Fixture\\Start", DESKTOP: "C:\\Fixture\\Desktop", ...variables };
+  const vars = { INSTDIR: "C:\\Fixture\\AppData\\Local\\Nearly", SMPROGRAMS: "C:\\Fixture\\Start", DESKTOP: "C:\\Fixture\\Desktop", ...variables };
   const constants = { PRODUCTNAME: "Nearly", MAINBINARYNAME: "Nearly", BUNDLEID: "local.nearly.compile.only", UNINSTKEY: "owned-uninstall-key" };
   const expand = text => text.replace(/^"|"$/g, "").replace(/\$\{(\w+)\}/g, (_, key) => constants[key] ?? "").replace(/\$(\w+)/g, (_, key) => String(vars[key] ?? ""));
   const exists = new Set(files.map(file => expand(file).toLowerCase()));
@@ -104,7 +104,7 @@ test("actual upgrade decision preserves manually removed links, fresh reinstall 
 });
 
 test("actual payload ownership decision blocks unknown EXE/uninstaller and mismatched locations", () => {
-  const target = "C:\\Users\\Fixture\\AppData\\Local\\Nearly";
+  const target = "C:\\Fixture\\AppData\\Local\\Nearly";
   for (const file of ["$INSTDIR\\Nearly.exe", "$INSTDIR\\uninstall.exe"]) {
     for (const registry of [{}, { NearlyOwner: "foreign", InstallLocation: target }, { NearlyOwner: "local.nearly.compile.only", InstallLocation: "C:\\Foreign" }, { NearlyOwner: "local.nearly.compile.only" }]) {
       const result = runDecision("NearlyCheckInstallOwnership", { files: [file], registry });

@@ -53,6 +53,7 @@ test("background drive and directory completion preserves drafts and pending sta
   await page.locator("#connect-form .primary").click();
   await expect(page.locator("#connect-form")).toHaveCount(0);
   await expect(page.locator("[data-pane=local]")).toHaveAttribute("aria-busy", "false");
+  await page.locator('[data-tree-toggle=remote][data-tree-path="/"]').click();
   await page.locator('[data-tree-toggle=remote][data-tree-path="/lazy"]').click();
   await expect.poll(() => page.evaluate(() => !!window.releaseLocal)).toBe(true);
   await page.locator("#prepare").click();

@@ -1,27 +1,46 @@
 import type { Store, Side } from "./core.js";
 
 export function applyTreeRatios(store: Store) {
-  for (const side of ["local", "remote"] as const)
-    applyTreeRatio(side, store[`${side}TreeRatio`]);
+  for (const side of ["local", "remote"] as const) {
+    const body = document.querySelector<HTMLElement>(`[data-pane=${side}] .pane-body`);
+    if (!body || !Number.isFinite(body.clientWidth) || body.clientWidth <= 6) continue;
+    const key = `${side}TreeWidth` as const;
+    // Legacy ratios seed an intended pixel width exactly once, before any
+    // center resize. Temporary constraints never overwrite that intention.
+    if (!validWidth(store[key]))
+      store[key] = Math.max(100, Math.min(4096, (body.clientWidth - 6) * preferredRatio(store[`${side}TreeRatio`])));
+    applyTreeWidth(side, store[key]!);
+  }
+}
+const validWidth = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 100 && value <= 4096;
+const preferredRatio = (ratio: number) => Number.isFinite(ratio) ? Math.max(.15, Math.min(.65, ratio)) : .28;
+
+export function applyTreeWidth(side: Side, desired: number) {
+  const body = document.querySelector<HTMLElement>(`[data-pane=${side}] .pane-body`);
+  if (!body || !Number.isFinite(body.clientWidth) || body.clientWidth <= 6) return desired;
+  if (body.dataset?.treeHidden === 'true') {
+    body.style.gridTemplateColumns = 'minmax(0, 1fr)';
+    return desired;
+  }
+  const available = body.clientWidth - 6;
+  const max = Math.max(0, available - 140), min = Math.min(100, max);
+  const actual = Math.max(min, Math.min(max, validWidth(desired) ? desired : 100));
+  body.style.gridTemplateColumns = `${actual}px 6px minmax(0, 1fr)`;
+  const handle = document.querySelector(`#${side}-tree-splitter`);
+  handle?.setAttribute('aria-valuenow', String(Math.round(actual / available * 100)));
+  handle?.setAttribute('aria-valuemin', String(Math.round(min / available * 100)));
+  handle?.setAttribute('aria-valuemax', String(Math.round(max / available * 100)));
+  return actual;
 }
 export function applyTreeRatio(side: Side, ratio: number) {
-  const preferred = Number.isFinite(ratio)
-    ? Math.max(0.15, Math.min(0.65, ratio))
-    : 0.28;
+  const preferred = preferredRatio(ratio);
   const body = document.querySelector<HTMLElement>(
     `[data-pane=${side}] .pane-body`,
   );
   if (!body || !Number.isFinite(body.clientWidth) || body.clientWidth <= 6)
     return preferred;
-  const available = Math.max(1, body.clientWidth - 6);
-  const min = Math.min(0.48, Math.max(0.15, 100 / available));
-  const max = Math.max(min, Math.min(0.65, 1 - 140 / available));
-  const actual = Math.max(min, Math.min(max, preferred));
-  body.style.gridTemplateColumns = `minmax(0, ${actual}fr) 6px minmax(0, ${1 - actual}fr)`;
-  document
-    .querySelector(`#${side}-tree-splitter`)
-    ?.setAttribute("aria-valuenow", String(Math.round(actual * 100)));
-  return actual;
+  const available = body.clientWidth - 6;
+  return applyTreeWidth(side, Math.max(100, Math.min(4096, available * preferred))) / available;
 }
 export function bindTreeSplitters(
   store: Store,
@@ -37,6 +56,7 @@ export function bindTreeSplitters(
     );
     if (!handle) continue;
     const key = `${side}TreeRatio` as const;
+    const widthKey = `${side}TreeWidth` as const;
     const save = () => void persist().catch(report);
     handle.onpointerdown = (event) => {
       if (event.button !== 0 || !canStart()) return;
@@ -50,9 +70,7 @@ export function bindTreeSplitters(
         return;
       event.preventDefault();
       event.stopPropagation();
-      const original = Number.isFinite(store[key])
-        ? Math.max(0.15, Math.min(0.65, store[key]))
-        : 0.28;
+      const original = store[widthKey]!, originalRatio = store[key];
       let current = original,
         dragging = true;
       const finish = (commit: boolean) => {
@@ -65,9 +83,10 @@ export function bindTreeSplitters(
             null;
         if (handle.hasPointerCapture(event.pointerId))
           handle.releasePointerCapture(event.pointerId);
-        store[key] = commit ? current : original;
+        store[widthKey] = commit ? current : original;
+        store[key] = commit ? preferredRatio(current / Math.max(1, handle.parentElement!.clientWidth - 6)) : originalRatio;
         setDragging(false);
-        applyTreeRatio(side, store[key]);
+        applyTreeWidth(side, store[widthKey]!);
         if (commit) save();
       };
       setDragging(true, () => finish(false));
@@ -82,9 +101,9 @@ export function bindTreeSplitters(
           !Number.isFinite(bounds.left)
         )
           return;
-        current = applyTreeRatio(
+        current = applyTreeWidth(
           side,
-          (e.clientX - bounds.left - 3) / Math.max(1, bounds.width - 6),
+          Math.max(100, Math.min(4096, e.clientX - bounds.left - 3)),
         );
       };
       handle.onpointerup = () => finish(true);
@@ -93,16 +112,19 @@ export function bindTreeSplitters(
     };
     handle.onkeydown = (event) => {
       if (!["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+      if (!canStart()) return;
       const width = handle.parentElement?.clientWidth;
       if (width === undefined || !Number.isFinite(width) || width <= 6) return;
       event.preventDefault();
-      store[key] = applyTreeRatio(
+      const available = width - 6;
+      const actual = applyTreeWidth(side, store[widthKey]!);
+      store[widthKey] = Math.max(100, applyTreeWidth(
         side,
         event.key === "Home"
-          ? 0.28
-          : (Number.isFinite(store[key]) ? store[key] : 0.28) +
-              (event.key === "ArrowLeft" ? -0.03 : 0.03),
-      );
+          ? Math.max(100, Math.min(4096, available * .28))
+          : Math.max(100, Math.min(4096, actual + available * (event.key === "ArrowLeft" ? -.03 : .03))),
+      ));
+      store[key] = preferredRatio(store[widthKey]! / available);
       save();
     };
   }

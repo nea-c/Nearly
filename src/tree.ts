@@ -73,7 +73,7 @@ export class FolderTree {
   peek(path: string) {
     return this.nodes.get(this.id(path));
   }
-  invalidateSubtree(path: string) {
+  invalidateSubtree(path: string, clearChildren = false) {
     const root = this.id(path),
       sep = this.side === "local" ? "\\" : "/";
     const expanded: string[] = [];
@@ -83,6 +83,7 @@ export class FolderTree {
       node.loaded = false;
       node.loading = false;
       node.request++;
+      if (clearChildren) { node.children = []; node.error = ""; node.limited = false; }
       if (node.expanded) expanded.push(node.path);
     }
     return expanded;
@@ -171,7 +172,6 @@ export class FolderTree {
       .map((d) => ({ ...d }));
     node.loaded = true;
     node.loading = false;
-    node.expanded = true;
     node.error = "";
   }
   private recordChildren(path: string, entries: Entry[]) {

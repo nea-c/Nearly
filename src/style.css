@@ -1,0 +1,10 @@
+#operation-feedback-root{position:fixed;right:18px;bottom:18px;z-index:1200;display:grid;gap:8px;width:min(460px,calc(100vw - 36px));max-height:45vh;overflow:auto;pointer-events:none}
+.operation-feedback{pointer-events:auto;background:var(--surface-panel,#fff);color:var(--text-main,#222);border:1px solid var(--border-main,#aaa);border-radius:8px;box-shadow:0 4px 20px #0003;padding:12px;max-height:38vh;overflow:auto}
+.operation-feedback .operation-results{max-height:24vh;overflow:auto;overflow-wrap:anywhere}.operation-feedback ul{padding-left:18px}.operation-feedback code{white-space:pre-wrap}.operation-feedback button{margin-top:6px}
+
+.upload-drop-target { outline: 2px solid var(--accent, #208080); outline-offset: -2px; }
+.upload-pointer-drag { cursor: copy; user-select: none; }
+.operation-dialog pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dialog label.transfer-apply-all { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; line-height: 20px; }
+.dialog .transfer-apply-all input[type="checkbox"] { flex: 0 0 14px; width: 14px; margin: 3px 0 0; }
+.transfer-apply-all span { min-width: 0; overflow-wrap: anywhere; }

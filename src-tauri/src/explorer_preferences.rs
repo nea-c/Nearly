@@ -108,13 +108,13 @@ pub struct ExplorerPreferences {
     #[serde(default)]
     pub pane_columns: PaneColumns,
 }
-fn trim_client(value: &str) -> &str {
+pub(crate) fn trim_client(value: &str) -> &str {
     value.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 fn is_control(c: char) -> bool {
     matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}')
 }
-fn clean_text(value: &str, max: usize) -> bool {
+pub(crate) fn clean_text(value: &str, max: usize) -> bool {
     !trim_client(value).is_empty()
         && value.encode_utf16().count() <= max
         && !value.chars().any(is_control)

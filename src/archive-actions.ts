@@ -12,12 +12,11 @@ export function archiveEligibility(
   const compress =
     side === "local" &&
     localCapability === true &&
-    !!entry &&
-    typeof entry.name === "string" &&
-    supportedName(entry.name);
+    selected.length > 0 && selected.length <= 500 &&
+    selected.every(item => typeof item.name === "string" && supportedName(item.name));
   return {
     compress,
-    extract: compress && !entry!.dir && /\.zip$/i.test(entry!.name),
+    extract: compress && !!entry && !entry.dir && /\.zip$/i.test(entry!.name),
   };
 }
 

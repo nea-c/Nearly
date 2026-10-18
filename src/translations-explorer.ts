@@ -1,5 +1,7 @@
 // Application-owned source strings only; interpolated user data is never translated.
 export const explorerTranslations: Record<string, string> = {
+  'フォルダツリーを隠す': 'Hide folder tree',
+  'フォルダツリーを表示': 'Show folder tree',
   後に移動: "Move after",
   グループ内へ: "Move into group",
   " のコピー": " (copy)",
@@ -177,7 +179,7 @@ export const explorerTranslations: Record<string, string> = {
     "Connection organization could not be loaded. Connections are shown flat; the original organization is preserved. Edit and save the organization to rebuild it.",
   接続先を追加: "Add connection",
   接続方式を選択してください: "Select a connection mode.",
-  整理フォルダーを作成: "Create bookmark folder",
+  整理フォルダーを作成: "Add folder",
   整理フォルダーを削除: "Delete bookmark folder",
   新しいタブ: "New tab",
   "新しいタブ (Ctrl+T)": "New tab (Ctrl+T)",

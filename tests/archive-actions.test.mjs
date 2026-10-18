@@ -27,7 +27,6 @@ test("archive eligibility requires local capability and exactly one supported se
   });
   for (const entries of [
     [],
-    [entry("a"), entry("b")],
     [entry("..")],
     [entry("bad/name")],
     [entry("bad\\name")],
