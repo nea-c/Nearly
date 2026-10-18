@@ -12,7 +12,7 @@ impl ExitProof {
     pub(crate) fn nonce(&self)->&str{&self.nonce}
     pub(crate) fn image_path(&self)->&Path{&self.image_path}
 }
-#[cfg(windows)] pub(crate) use native::{LiveInstaller,current_identity};
+#[cfg(windows)] pub(crate) use native::{LiveInstaller,LiveRecoverySupervisor,current_identity};
 #[cfg(not(windows))]
 pub(crate) struct LiveInstaller;
 #[cfg(not(windows))]
@@ -21,6 +21,8 @@ impl LiveInstaller {
     pub(crate) fn signal_healthy(&self)->Result<(),String>{Err("Live installer proof requires Windows".into())}
     pub(crate) fn wait_exit_zero(&self,_:Duration)->Result<ExitProof,String>{Err("Live installer proof requires Windows".into())}
 }
+#[derive(Debug,PartialEq,Eq)]
+pub(crate) enum SupervisorEvent { Success, ExitRequest }
 fn valid_nonce(nonce:&str)->bool{nonce.len()==32&&nonce.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
 #[cfg(windows)]
 mod native {
@@ -112,6 +114,52 @@ mod native {
             if unsafe{GetExitCodeProcess(self.process.0,&mut code)}==0||code!=0{return Err(format!("Installer did not exit successfully ({code}); recovery artifacts retained"));}
             Ok(ExitProof{identity:self.identity.clone(),nonce:self.nonce.clone(),image_path:self.image_path.clone()})
         }
+    }
+    /// Separate from installer exit evidence: this channel retains an exact live
+    /// old-image supervisor and an authenticated root-only snapshot's file guards.
+    pub(crate) struct LiveRecoverySupervisor {
+        process:Handle, healthy:Handle, success:Handle, success_ack:Handle, exit_request:Handle, idle:Handle,
+        snapshot:crate::update_recovery_windows::RecoveryHealthSnapshot,
+    }
+    impl LiveRecoverySupervisor {
+        pub(crate) fn open(snapshot:crate::update_recovery_windows::RecoveryHealthSnapshot)->Result<Self,String>{
+            let expected=snapshot.helper_identity();
+            if !valid_nonce(snapshot.nonce())||expected.pid==0||expected.created==0{return Err("Invalid supervisor identity".into());}
+            snapshot.verify_helper_image()?;
+            let raw=unsafe{OpenProcess(0x00101000,0,expected.pid)};
+            if raw.is_null(){return Err("Supervisor unavailable".into());}
+            let process=Handle(raw);
+            if identity(&process,expected.pid)?!=*expected||image_path(&process)?!=dunce::canonicalize(snapshot.helper_path()).map_err(|_|"Supervisor path unavailable")?||unsafe{WaitForSingleObject(process.0,0)}!=258{return Err("Supervisor identity mismatch".into());}
+            let event=|kind:&str,access:u32|->Result<Handle,String>{
+                let name=wide(OsStr::new(&format!("Local\\NearlyRecovery{kind}-{}",snapshot.nonce())));
+                let h=unsafe{OpenEventW(access,0,name.as_ptr())};
+                if h.is_null(){return Err("Supervisor event unavailable".into());}Ok(Handle(h))
+            };
+            let healthy=event("Healthy",0x00100002)?;
+            let success=event("Success",0x00100000)?;
+            let success_ack=event("SuccessAck",0x00100002)?;
+            let exit_request=event("ExitRequest",0x00100000)?;
+            let idle=event("Idle",0x00100002)?;
+            // A pre-existing Health/Idle signal is a replay, never fresh readiness.
+            if unsafe{WaitForSingleObject(healthy.0,0)}!=258||unsafe{WaitForSingleObject(idle.0,0)}!=258||unsafe{WaitForSingleObject(success_ack.0,0)}!=258{return Err("Stale supervisor channel".into());}
+            Ok(Self{process,healthy,success,success_ack,exit_request,idle,snapshot})
+        }
+        fn verify(&self)->Result<(),String>{
+            let expected=self.snapshot.helper_identity();
+            if identity(&self.process,expected.pid)?!=*expected||image_path(&self.process)?!=self.snapshot.helper_path()||unsafe{WaitForSingleObject(self.process.0,0)}!=258{return Err("Supervisor evidence lost".into());}
+            self.snapshot.verify_helper_image()
+        }
+        pub(crate) fn signal_healthy(&self)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.healthy.0)}==0{return Err("Health signal failed".into());}Ok(())}
+        pub(crate) fn poll_event(&self)->Result<Option<SupervisorEvent>,String>{
+            self.verify()?;
+            let success=unsafe{WaitForSingleObject(self.success.0,0)};
+            let exit=unsafe{WaitForSingleObject(self.exit_request.0,0)};
+            if ![0,258].contains(&success)||![0,258].contains(&exit)||success==0&&exit==0{return Err("Supervisor events uncertain".into());}
+            if success==0{self.snapshot.confirm_succeeded()?;self.verify()?;if unsafe{SetEvent(self.success_ack.0)}==0{return Err("Success acknowledgment failed".into());}return Ok(Some(SupervisorEvent::Success));}
+            if exit==0{return Ok(Some(SupervisorEvent::ExitRequest));}Ok(None)
+        }
+        pub(crate) fn signal_probation_idle(&self,_proof:&crate::HealthIdleProof)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.idle.0)}==0{return Err("Probation idle signal failed".into());}Ok(())}
+        pub(crate) fn signal_idle(&self,_seal:&crate::HealthExitSeal)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.idle.0)}==0{return Err("Idle signal failed".into());}Ok(())}
     }
     #[cfg(test)]mod tests {
         use super::*;

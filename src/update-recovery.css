@@ -4,3 +4,8 @@
  background:var(--surface-input,var(--theme-control-bg,#f8faff));color:var(--text-main,var(--theme-control-fg,#243348));
  box-shadow:0 4px 20px #0003;font:inherit;font-size:13px;line-height:1.6;overflow-wrap:anywhere;
 }
+#update-probation {
+ position:fixed;inset:0;z-index:1199;display:grid;place-items:center;
+ background:var(--surface-input,#f8faff);color:var(--text-main,#243348);font:inherit;
+}
+html[data-update-probation] body>:not(#update-probation):not(#update-recovery-notice){pointer-events:none;}

@@ -1,4 +1,6 @@
 import {repository, sha256, auditBytes} from './release-contract.mjs';
+import {verifyUpdaterProof} from './updater-proof.mjs';
+import {publicKeySha256} from './release-trust.mjs';
 
 const fail = message => {throw Error(message);};
 const releasePath = id => {
@@ -9,26 +11,34 @@ function checkTag(tag, request) {
   if (tag && (tag.object?.type !== 'commit' || tag.object.sha !== request.commit)) fail('Existing tag targets another commit or is not an owned lightweight tag; never retag');
 }
 function checkAssets(release, expected, complete = false) {
-  if (!Array.isArray(release.assets) || release.assets.length > 2) fail('Unexpected existing release assets');
+  if (!Array.isArray(release.assets) || release.assets.length > expected.length) fail('Unexpected existing release assets');
   const seen = new Set();
   for (const a of release.assets) {
     const e = expected.find(x => x.name === a.name);
     if (seen.has(a.name) || !e || a.state !== 'uploaded' || a.size !== e.bytes || a.digest !== `sha256:${e.sha256}`) fail('Existing asset conflicts; never overwrite or delete it');
     seen.add(a.name);
   }
-  if (complete && seen.size !== 2) fail('Release assets are incomplete');
+  if (complete && seen.size !== expected.length) fail('Release assets are incomplete');
 }
-export async function publishRelease({request, bundle, notes, api, download}) {
+export async function publishRelease(args) {return publishCore(args,2,'nearly-manual-release');}
+export async function publishSignedRelease(args) {
+  const {request:r,bundle,publicRaw}=args,m=bundle.manifest,name=`Nearly_${r.tag}_x64-setup.exe`;
+  if(r.mode!=='release'||m.mode!=='release')fail('Only release requests and release artifacts may publish');
+  if(m.kind!=='signed-updater'||m.schemaVersion!==1||m.publicKeySha256!==publicKeySha256||m.runAttempt!==r.runAttempt||bundle.assets.length!==3||bundle.assets.some((a,i)=>a.name!==[name,name+'.sha256',name+'.sig'][i])||!bundle.assets[1].data.equals(Buffer.from(`${sha256(bundle.assets[0].data)}  ${name}\n`)))fail('Invalid signed publication bundle');
+  verifyUpdaterProof(bundle.assets[0].data,bundle.assets[2].data,publicRaw,{version:r.version,file:name,payloadSha256:m.payloadSha256});
+  return publishCore(args,3,'nearly-signed-release');
+}
+async function publishCore({request, bundle, notes, api, download},assetCount,markerName) {
   if (request.mode !== 'release') fail('Validation mode cannot publish');
   const m = bundle.manifest;
-  if (['repository','commit','tag','version','workflowCommit','runId'].some(k => m[k] !== request[k]) || bundle.assets.length !== 2 || bundle.assets.some((a,i) => a.name !== m.assets[i]?.name || a.sha256 !== m.assets[i]?.sha256 || a.bytes !== m.assets[i]?.bytes || a.bytes !== a.data.length || sha256(a.data) !== a.sha256)) fail('Publish request/artifact binding mismatch');
+  if (['repository','commit','tag','version','workflowCommit','runId'].some(k => m[k] !== request[k]) || bundle.assets.length !== assetCount || bundle.assets.some((a,i) => a.name !== m.assets[i]?.name || a.sha256 !== m.assets[i]?.sha256 || a.bytes !== m.assets[i]?.bytes || a.bytes !== a.data.length || sha256(a.data) !== a.sha256)) fail('Publish request/artifact binding mismatch');
   auditBytes(Buffer.from(notes));
   const repo = await api.get('');
   if (repo.full_name !== repository || repo.private !== false) fail('Unexpected repository identity or visibility');
   const source = await api.get(`/git/commits/${request.commit}`);
   const version = await api.get(`/contents/version.json?ref=${request.commit}`);
   if (source.sha !== request.commit || source.tree?.sha !== m.tree || version.encoding !== 'base64' || JSON.parse(Buffer.from(version.content, 'base64')).version !== request.version) fail('GitHub source/version differs from tested artifact');
-  const marker = `<!-- nearly-manual-release ${JSON.stringify(m)} -->`;
+  const marker = `<!-- ${markerName} ${JSON.stringify(m)} -->`;
   const body = `${notes.trim()}\n\n${marker}\n`;
   const name = `Nearly ${request.tag}`;
   let release;
@@ -94,7 +104,7 @@ export function githubApi(token) {
   async function call(method, suffix, body) {
     if (!suffix.startsWith('/') && suffix !== '') fail('Invalid GitHub API path');
     const response = await fetch(base + suffix, {method, redirect: 'error', headers: {...headers, ...(body ? {'Content-Type': 'application/json'} : {})}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(90000)});
-    if (method === 'GET' && response.status === 404 && suffix.startsWith('/git/ref/tags/')) return null;
+    if (method === 'GET' && response.status === 404 && (suffix.startsWith('/git/ref/tags/')||suffix.startsWith('/releases/tags/'))) return null;
     if (!response.ok) fail(`GitHub ${method} failed (${response.status}); inspect state before retrying`);
     return JSON.parse(await bytes(response, 4 * 1024 * 1024));
   }

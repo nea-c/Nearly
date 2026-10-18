@@ -580,6 +580,14 @@ impl Engine {
         }}
         Ok(aggregate(states, ids.iter().any(|id|starts.get(id).is_some_and(|(stop,_)|!stop.load(Ordering::SeqCst)))))
     }
+    /// Read-only strict idle attestation; ownership probation seals admissions.
+    pub(crate) fn probation_idle(&self)->Result<bool,String>{
+        let _gate=self.mutation_gate.lock().map_err(|_|"Engine gate failed")?;
+        let jobs=self.jobs.lock().map_err(|_|"Job lock failed")?;
+        let starts=self.starts.lock().map_err(|_|"Start lock failed")?;
+        let operations=self.operations.lock().map_err(|_|"Operation lock failed")?;
+        Ok(!self.closing.load(Ordering::SeqCst)&&jobs.is_empty()&&starts.is_empty()&&operations.is_empty())
+    }
     pub fn try_begin_close(&self) -> Result<(), String> {
         let _gate = self
             .mutation_gate

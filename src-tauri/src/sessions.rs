@@ -57,6 +57,11 @@ pub struct Connected {
 }
 
 impl Sessions {
+    /// Strict observation used while native probation already blocks admissions.
+    pub(crate) fn probation_idle(&self)->Result<bool,String>{
+        let state=self.state.lock().map_err(|_|"Session lock failed")?;
+        Ok(!state.closing&&state.slots.is_empty()&&state.users==0)
+    }
     pub fn connected_profile(&self,id:&str)->Result<Option<Profile>,String>{let state=self.state.lock().map_err(|_|"Session lock failed")?;Ok(state.slots.get(id).filter(|slot|slot.phase==Phase::Connected).and_then(|slot|slot.credentials.as_ref()).map(|c|c.profile.clone()))}
     pub fn window_busy(&self, ids: &[String]) -> Result<bool, String> {
         let state=self.state.lock().map_err(|_| "Session lock failed")?;

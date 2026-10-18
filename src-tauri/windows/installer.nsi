@@ -76,136 +76,212 @@ Var NearlyParent
 Var NearlyCreated
 Var NearlyReady
 Var NearlyParentHandle
-Var NearlyAbortHandle
-Var NearlyInstalledHandle
-Var NearlyHealthyHandle
 Var NearlyProtocol
 Var NearlyCommitHandle
-Var NearlyWaitTicks
+Var NearlyStageDirectory
+Var NearlyReadyHandle
+Var NearlyMutationHandle
+Var NearlyWorkerPid
+Var NearlyWorkerCreated
 
-; This path performs no mutations before the exact parent exits. The native
-; caller holds a verified sibling EXE lock and only exits after our ready event.
+; Validate canonical unsigned decimal before System converts PID/FILETIME input.
+; Compare equal-length decimal strings digit-by-digit: never parse a possibly
+; overflowing 64-bit string with NSIS's signed 32-bit integer instructions.
+!macro NearlyStageDecimal value maximum label
+  StrLen $1 "${value}"
+  StrLen $2 "${maximum}"
+  IntCmp $1 $2 ${label}_digits ${label}_digits nearly_stage_reject
+  ${label}_digits:
+  StrCmp $1 0 nearly_stage_reject
+  StrCpy $3 "${value}" 1
+  StrCmp $3 "0" nearly_stage_reject
+  StrCpy $3 0
+  ${label}_digit_loop:
+    StrCpy $4 "${value}" 1 $3
+    StrCmp $4 "" ${label}_digits_done
+    StrCpy $5 0
+    ${label}_find_digit:
+      StrCpy $6 "0123456789" 1 $5
+      StrCmp $6 "" nearly_stage_reject
+      StrCmp $4 $6 ${label}_digit_ok
+      IntOp $5 $5 + 1
+      Goto ${label}_find_digit
+    ${label}_digit_ok:
+    IntOp $3 $3 + 1
+    Goto ${label}_digit_loop
+  ${label}_digits_done:
+  IntCmp $1 $2 ${label}_bound_start ${label}_done nearly_stage_reject
+  ${label}_bound_start:
+  StrCpy $3 0
+  ${label}_bound_loop:
+    StrCpy $4 "${value}" 1 $3
+    StrCmp $4 "" ${label}_done
+    StrCpy $5 "${maximum}" 1 $3
+    IntCmp $4 $5 ${label}_bound_equal ${label}_done nearly_stage_reject
+    ${label}_bound_equal:
+    IntOp $3 $3 + 1
+    Goto ${label}_bound_loop
+  ${label}_done:
+!macroend
+
+; Protocol 2 cannot enter ordinary setup in a protocol-3 package.
 Function NearlyWaitUpdateParent
-  StrCpy $NearlyUpdateMode 0
-  StrCpy $NearlyParentHandle 0
-  StrCpy $NearlyAbortHandle 0
-  StrCpy $NearlyCommitHandle 0
-  StrCpy $NearlyInstalledHandle 0
-  StrCpy $NearlyHealthyHandle 0
   ${GetParameters} $0
   ClearErrors
-  ${GetOptions} $0 "/NEARLYUPDATE" $1
+  ${GetOptions} $0 "/NEARLY" $1
+  ${IfNot} ${Errors}
+    SetErrorLevel 8
+    Abort "Unsupported or malformed update mode. No installation changes were made."
+  ${EndIf}
+FunctionEnd
+
+; The helper owns the mutation mutex. Its exact retained identity and fresh
+; authorization event are required before the worker can write staging output.
+Function NearlyStageUpdate
+  StrCpy $NearlyUpdateMode 0
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/NEARLYSTAGE" $1
   ${If} ${Errors}
     Return
   ${EndIf}
-  StrCmp $1 "" 0 nearly_update_reject
-  ClearErrors
+  StrCmp $1 "" 0 nearly_stage_reject
   ${GetOptions} $0 "/NEARLYPROTOCOL=" $NearlyProtocol
-  ${If} ${Errors}
-    Goto nearly_update_reject
-  ${EndIf}
-  StrCmp $NearlyProtocol "2" 0 nearly_update_reject
-  StrCpy $NearlyUpdateMode 1
-  ; Update mode cannot select shortcuts, a new directory or a portable copy.
-  StrCpy $NearlyNoShortcuts 0
-  StrCpy $NearlyPassive 1
-  SetSilent silent
-  StrCmp $NearlyOwnedUpgrade 1 0 nearly_update_reject
-  GetFullPathName $1 "$EXEDIR"
-  StrCmp $1 "$INSTDIR" 0 nearly_update_reject
-  ${GetOptions} $0 "/NEARLYPARENT=" $NearlyParent
+  StrCmp $NearlyProtocol "3" 0 nearly_stage_reject
+  ${GetOptions} $0 "/NEARLYHELPER=" $NearlyParent
   ${GetOptions} $0 "/NEARLYCREATED=" $NearlyCreated
-  ${GetOptions} $0 "/NEARLYREADY=" $NearlyReady
+  ${GetOptions} $0 "/NEARLYNONCE=" $NearlyReady
+  ; Exact ordered grammar rejects duplicates, /D, mixed modes, and extra args.
+  StrCpy $1 "/NEARLYSTAGE /NEARLYPROTOCOL=3 /NEARLYHELPER=$NearlyParent /NEARLYCREATED=$NearlyCreated /NEARLYNONCE=$NearlyReady"
+  StrCmp $0 $1 0 nearly_stage_reject
+  !insertmacro NearlyStageDecimal $NearlyParent "4294967295" nearly_stage_parent
+  !insertmacro NearlyStageDecimal $NearlyCreated "18446744073709551615" nearly_stage_created
   StrLen $1 $NearlyReady
-  StrCmp $1 32 0 nearly_update_reject
+  StrCmp $1 32 0 nearly_stage_reject
   StrCpy $2 0
-  nearly_update_nonce_loop:
+  nearly_stage_nonce_loop:
     StrCpy $3 $NearlyReady 1 $2
-    StrCmp $3 "" nearly_update_nonce_done
+    StrCmp $3 "" nearly_stage_nonce_done
     StrCpy $4 0
-    nearly_update_hex_loop:
+    nearly_stage_hex_loop:
       StrCpy $5 "0123456789abcdef" 1 $4
-      StrCmp $5 "" nearly_update_reject
-      StrCmp $3 $5 nearly_update_hex_ok
+      StrCmp $5 "" nearly_stage_reject
+      StrCmpS $3 $5 nearly_stage_hex_ok
       IntOp $4 $4 + 1
-      Goto nearly_update_hex_loop
-    nearly_update_hex_ok:
+      Goto nearly_stage_hex_loop
+    nearly_stage_hex_ok:
     IntOp $2 $2 + 1
-    Goto nearly_update_nonce_loop
-  nearly_update_nonce_done:
-  ; SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, never termination rights.
+    Goto nearly_stage_nonce_loop
+  nearly_stage_nonce_done:
   System::Call 'kernel32::OpenProcess(i 0x00101000, i 0, i $NearlyParent) p.s'
   Pop $NearlyParentHandle
-  StrCmp $NearlyParentHandle 0 nearly_update_reject
+  StrCmp $NearlyParentHandle 0 nearly_stage_reject
   System::Call 'kernel32::GetProcessTimes(p $NearlyParentHandle, *l .r1, *l .r2, *l .r3, *l .r4) i.r5'
-  StrCmp $5 0 nearly_update_reject
-  StrCmp $1 $NearlyCreated 0 nearly_update_reject
+  StrCmp $5 0 nearly_stage_reject
+  StrCmp $1 $NearlyCreated 0 nearly_stage_reject
   StrCpy $1 ${NSIS_MAX_STRLEN}
   System::Call 'kernel32::QueryFullProcessImageNameW(p $NearlyParentHandle, i 0, w .r2, *i r1) i.r3'
-  StrCmp $3 0 nearly_update_reject
+  StrCmp $3 0 nearly_stage_reject
   GetFullPathName $2 "$2"
-  StrCmp $2 "$INSTDIR\${MAINBINARYNAME}.exe" 0 nearly_update_reject
-  ; Retain cancellation before readiness: late initialization after the native
-  ; timeout cannot start an installation on a later ordinary application exit.
-  System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Local\NearlyUpdateAbort-$NearlyReady") p.s'
-  Pop $NearlyAbortHandle
-  StrCmp $NearlyAbortHandle 0 nearly_update_reject
-  System::Call 'kernel32::WaitForSingleObject(p $NearlyAbortHandle, i 0) i.r1'
-  StrCmp $1 258 0 nearly_update_reject
-  System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Local\NearlyUpdateCommit-$NearlyReady") p.s'
+  StrCmp $2 "$INSTDIR\.Nearly-update-state\$NearlyReady\previous-image.exe" 0 nearly_stage_reject
+  System::Call 'kernel32::WaitForSingleObject(p $NearlyParentHandle, i 0) i.r1'
+  StrCmp $1 258 0 nearly_stage_reject
+  System::Call 'kernel32::GetCurrentProcessId() i.s'
+  Pop $NearlyWorkerPid
+  System::Call 'kernel32::GetCurrentProcess() p.r0'
+  System::Call 'kernel32::GetProcessTimes(p r0, *l .r1, *l .r2, *l .r3, *l .r4) i.r5'
+  StrCmp $5 0 nearly_stage_reject
+  StrCpy $NearlyWorkerCreated $1
+  ; Helper can derive this exact worker identity only after CreateProcess.
+  ; Bound event discovery/authorization without trusting a relayed descendant.
+  StrCpy $7 100
+  nearly_stage_authorize_wait:
+  System::Call 'kernel32::WaitForSingleObject(p $NearlyParentHandle, i 0) i.r1'
+  StrCmp $1 258 0 nearly_stage_reject
+  System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Local\NearlyStageAuthorize-$NearlyReady-$NearlyWorkerPid-$NearlyWorkerCreated") p.s'
   Pop $NearlyCommitHandle
-  StrCmp $NearlyCommitHandle 0 nearly_update_reject
-  ; Hold both phase events before Ready; the old parent may close its copies.
-  System::Call 'kernel32::OpenEventW(i 0x00100002, i 0, w "Local\NearlyUpdateInstalled-$NearlyReady") p.s'
-  Pop $NearlyInstalledHandle
-  StrCmp $NearlyInstalledHandle 0 nearly_update_reject
-  System::Call 'kernel32::WaitForSingleObject(p $NearlyInstalledHandle, i 0) i.r1'
-  StrCmp $1 258 0 nearly_update_reject
-  System::Call 'kernel32::OpenEventW(i 0x00100000, i 0, w "Local\NearlyUpdateHealthy-$NearlyReady") p.s'
-  Pop $NearlyHealthyHandle
-  StrCmp $NearlyHealthyHandle 0 nearly_update_reject
-  System::Call 'kernel32::WaitForSingleObject(p $NearlyHealthyHandle, i 0) i.r1'
-  StrCmp $1 258 0 nearly_update_reject
-  System::Call 'kernel32::OpenEventW(i 2, i 0, w "Local\NearlyUpdateReady-v2-$NearlyReady") p.r1'
-  StrCmp $1 0 nearly_update_reject
-  System::Call 'kernel32::SetEvent(p r1) i.r2'
-  System::Call 'kernel32::CloseHandle(p r1)'
-  StrCmp $2 0 nearly_update_reject
-  StrCpy $NearlyWaitTicks 0
-  nearly_update_wait_loop:
-    System::Call 'kernel32::WaitForSingleObject(p $NearlyAbortHandle, i 0) i.r1'
-    StrCmp $1 258 0 nearly_update_reject
-    System::Call 'kernel32::WaitForSingleObject(p $NearlyParentHandle, i 200) i.r1'
-    StrCmp $1 0 nearly_update_parent_exited
-    StrCmp $1 258 0 nearly_update_reject
-    IntOp $NearlyWaitTicks $NearlyWaitTicks + 1
-    IntCmp $NearlyWaitTicks 300 nearly_update_reject nearly_update_wait_loop nearly_update_reject
-  nearly_update_parent_exited:
-  ; A parent crash before settled-settings commit must not authorize mutation.
+  StrCmp $NearlyCommitHandle 0 nearly_stage_authorize_retry
   System::Call 'kernel32::WaitForSingleObject(p $NearlyCommitHandle, i 0) i.r1'
-  StrCmp $1 0 0 nearly_update_reject
-  System::Call 'kernel32::CloseHandle(p $NearlyParentHandle)'
-  StrCpy $NearlyParentHandle 0
-  StrCmp $1 0 nearly_update_wait_done
-  nearly_update_reject:
-    StrCmp $NearlyParentHandle 0 +2
-      System::Call 'kernel32::CloseHandle(p $NearlyParentHandle)'
-    StrCpy $NearlyParentHandle 0
-    StrCmp $NearlyAbortHandle 0 +2
-      System::Call 'kernel32::CloseHandle(p $NearlyAbortHandle)'
-    StrCpy $NearlyAbortHandle 0
-    StrCmp $NearlyCommitHandle 0 +2
-      System::Call 'kernel32::CloseHandle(p $NearlyCommitHandle)'
-    StrCpy $NearlyCommitHandle 0
-    StrCmp $NearlyInstalledHandle 0 +2
-      System::Call 'kernel32::CloseHandle(p $NearlyInstalledHandle)'
-    StrCpy $NearlyInstalledHandle 0
-    StrCmp $NearlyHealthyHandle 0 +2
-      System::Call 'kernel32::CloseHandle(p $NearlyHealthyHandle)'
-    StrCpy $NearlyHealthyHandle 0
+  StrCmp $1 0 nearly_stage_authorized
+  StrCmp $1 258 0 nearly_stage_reject
+  System::Call 'kernel32::CloseHandle(p $NearlyCommitHandle)'
+  StrCpy $NearlyCommitHandle 0
+  nearly_stage_authorize_retry:
+  IntOp $7 $7 - 1
+  IntCmp $7 0 nearly_stage_reject nearly_stage_reject 0
+  Sleep 50
+  Goto nearly_stage_authorize_wait
+  nearly_stage_authorized:
+  System::Call 'kernel32::OpenEventW(i 0x00100002, i 0, w "Local\NearlyStageReady-$NearlyReady-$NearlyWorkerPid-$NearlyWorkerCreated") p.s'
+  Pop $NearlyReadyHandle
+  StrCmp $NearlyReadyHandle 0 nearly_stage_reject
+  System::Call 'kernel32::WaitForSingleObject(p $NearlyReadyHandle, i 0) i.r1'
+  StrCmp $1 258 0 nearly_stage_reject
+  StrCpy $NearlyStageDirectory "$INSTDIR\.Nearly-update-state\$NearlyReady\candidate"
+  System::Call 'kernel32::GetFileAttributesW(w "$NearlyStageDirectory") i.r5'
+  IntOp $6 $5 & 0x410
+  IntCmp $6 0x10 0 nearly_stage_reject nearly_stage_reject
+  System::Call 'kernel32::SetEvent(p $NearlyReadyHandle) i.r1'
+  StrCmp $1 0 nearly_stage_reject
+  StrCpy $NearlyUpdateMode 3
+  StrCpy $NearlyPassive 1
+  SetSilent silent
+  Return
+  nearly_stage_reject:
     SetErrorLevel 8
-    Abort "Update handoff was rejected or timed out. No installation changes were made. Open Nearly normally and retry the update."
-  nearly_update_wait_done:
+    Abort "Protocol-3 stage authentication failed; live installation was not changed."
+FunctionEnd
+
+; One File instruction produces one archive member, shared by both paths.
+; Callers establish and validate OUTDIR before invoking this function.
+Function NearlyExtractApplication
+  File "/oname=${MAINBINARYNAME}.exe" "${MAINBINARYSRCPATH}"
+FunctionEnd
+
+Function NearlyExtractStage
+  ; Native helper pins every ancestor and verifies exact worker exit and all
+  ; output identities before promotion. This section never touches live files.
+  System::Call 'kernel32::WaitForSingleObject(p $NearlyParentHandle, i 0) i.r0'
+  StrCmp $0 258 0 nearly_stage_extract_reject
+  ClearErrors
+  SetOutPath "$NearlyStageDirectory"
+  ${If} ${Errors}
+    Goto nearly_stage_extract_reject
+  ${EndIf}
+  ClearErrors
+  Call NearlyExtractApplication
+  ${If} ${Errors}
+    Goto nearly_stage_extract_reject
+  ${EndIf}
+  WriteUninstaller "$NearlyStageDirectory\uninstall.exe"
+  ${If} ${Errors}
+    Goto nearly_stage_extract_reject
+  ${EndIf}
+  SetErrorLevel 0
+  Return
+  nearly_stage_extract_reject:
+    SetErrorLevel 6
+    Abort "Staging failed; retained recovery evidence requires inspection."
+FunctionEnd
+
+; Cross-session cooperative exclusion for new setup, uninstall, and helper.
+; One Global application mutex conservatively serializes different users too.
+; Older/external registry writers do not participate in this mutex protocol.
+!macro NearlyAcquireMutationBody
+  System::Call 'kernel32::CreateMutexW(p 0, i 1, w "Global\NearlyInstallMutation-local.syncfiles.native-v3") p.s'
+  Pop $NearlyMutationHandle
+  System::Call 'kernel32::GetLastError() i.r0'
+  ${If} $NearlyMutationHandle P= 0
+  ${OrIf} $0 = 183
+    SetErrorLevel 8
+    Abort "Another Nearly installation transaction is active."
+  ${EndIf}
+!macroend
+Function NearlyAcquireMutation
+  !insertmacro NearlyAcquireMutationBody
+FunctionEnd
+Function un.NearlyAcquireMutation
+  !insertmacro NearlyAcquireMutationBody
 FunctionEnd
 
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
@@ -534,6 +610,12 @@ Function .onInit
   ; Deliberately override /D= and any saved path: settings are EXE-adjacent and
   ; this installer supports only the fixed, writable per-user location.
   GetFullPathName $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
+  Call NearlyStageUpdate
+  ${If} $NearlyUpdateMode = 3
+    Return
+  ${EndIf}
+  Call NearlyWaitUpdateParent
+  Call NearlyAcquireMutation
   StrCpy $NearlyPassive 0
   StrCpy $NearlyNoShortcuts 0
   ${GetParameters} $0
@@ -583,35 +665,21 @@ Function NearlyRun
 FunctionEnd
 
 Function .onInstSuccess
-  ; Manual setup behavior is unchanged. Update success additionally requires the
-  ; restarted app's authenticated native health and a bounded live handshake.
-  ${If} $NearlyUpdateMode = 1
-    System::Call 'kernel32::SetEvent(p $NearlyInstalledHandle) i.r0'
-    StrCmp $0 0 nearly_update_health_failed
-    nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "--nearly-update-health=$NearlyReady"
-    System::Call 'kernel32::WaitForSingleObject(p $NearlyHealthyHandle, i 30000) i.r0'
-    StrCmp $0 0 nearly_update_health_complete
-    nearly_update_health_failed:
-      SetErrorLevel 9
-      DetailPrint "Update restart health was not confirmed. RecoveryRequired: verified recovery artifacts were retained. Open Nearly normally or repair Setup manually."
-      Return
-    nearly_update_health_complete:
-      SetErrorLevel 0
+  ${If} $NearlyUpdateMode = 3
+    Return
   ${EndIf}
 FunctionEnd
 
 Function .onGUIEnd
-  ; Close only handles. Never remove staged installers or recovery artifacts.
-  StrCmp $NearlyInstalledHandle 0 +2
-    System::Call 'kernel32::CloseHandle(p $NearlyInstalledHandle)'
-  StrCmp $NearlyHealthyHandle 0 +2
-    System::Call 'kernel32::CloseHandle(p $NearlyHealthyHandle)'
-  StrCmp $NearlyAbortHandle 0 +2
-    System::Call 'kernel32::CloseHandle(p $NearlyAbortHandle)'
+  StrCmp $NearlyParentHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyParentHandle)'
   StrCmp $NearlyCommitHandle 0 +2
     System::Call 'kernel32::CloseHandle(p $NearlyCommitHandle)'
+  StrCmp $NearlyReadyHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyReadyHandle)'
+  StrCmp $NearlyMutationHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyMutationHandle)'
 FunctionEnd
-
 !macro NearlyApplyShortcut path enabled
   ${If} ${FileExists} "${path}"
     !insertmacro NearlyIsShortcutTarget "${path}"
@@ -629,12 +697,9 @@ FunctionEnd
 !macroend
 
 Section Install
-  ${If} $NearlyUpdateMode = 1
-    System::Call 'kernel32::WaitForSingleObject(p $NearlyAbortHandle, i 0) i.r0'
-    ${If} $0 != 258
-      SetErrorLevel 8
-      Abort "Update was cancelled before installation. No installation changes were made."
-    ${EndIf}
+  ${If} $NearlyUpdateMode = 3
+    Call NearlyExtractStage
+    Return
   ${EndIf}
   GetFullPathName $0 "$LOCALAPPDATA\${PRODUCTNAME}"
   ${If} $INSTDIR != $0
@@ -655,7 +720,7 @@ Section Install
   System::Call 'kernel32::CloseHandle(p r9)'
   SetOutPath "$INSTDIR"
   ClearErrors
-  File "/oname=${MAINBINARYNAME}.exe" "${MAINBINARYSRCPATH}"
+  Call NearlyExtractApplication
   ${If} ${Errors}
     SetErrorLevel 6
     Abort "$(NearlyPayloadError)"
@@ -702,6 +767,7 @@ Section Install
 SectionEnd
 
 Function un.onInit
+  Call un.NearlyAcquireMutation
   !insertmacro NearlyContext
   GetFullPathName $0 "$LOCALAPPDATA\${PRODUCTNAME}"
   GetFullPathName $1 "$INSTDIR"

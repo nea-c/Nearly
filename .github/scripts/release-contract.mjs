@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {verifyBootstrapTrust} from './release-trust.mjs';
 
 export const repository = 'nea-c/Nearly';
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -58,17 +59,19 @@ export function auditGitObjects(raw) {
   }
   return count;
 }
-export async function verifyVersionAndGates(root, request) {
+export async function verifyVersionAndGates(root, request, {profile='legacy'}={}) {
   const v = JSON.parse(await fs.readFile(path.join(root, 'version.json'), 'utf8'));
   if (JSON.stringify(Object.keys(v)) !== '["version"]' || v.version !== request.version) fail('Requested release and source version differ');
+  if(profile==='signed-bootstrap'){await verifyBootstrapTrust(root);return;}
+  if(profile!=='legacy')fail('Unknown release trust profile');
   const key = await fs.readFile(path.join(root, 'src-tauri/src/update_package.rs'), 'utf8');
   const gate = await fs.readFile(path.join(root, 'src-tauri/src/startup_update.rs'), 'utf8');
   if (!/production_key\(\)\s*->\s*Option<TrustedKey>\s*\{\s*None\s*\}/.test(key) || !/HANDOFF_RELEASE_VALIDATED\s*:\s*bool\s*=\s*false/.test(gate)) fail('Production updater must remain disabled');
 }
-export async function auditSource(root, request) {
+export async function auditSource(root, request, options={}) {
   if (git(root, ['rev-parse', 'HEAD']).toString().trim() !== request.commit || git(root, ['status', '--porcelain', '--untracked-files=all']).length) fail('Source checkout is not clean at the exact requested commit');
   git(root, ['merge-base', '--is-ancestor', request.commit, 'refs/remotes/origin/main']);
-  await verifyVersionAndGates(root, request);
+  await verifyVersionAndGates(root, request, options);
   const names = git(root, ['ls-files', '-z']).toString('utf8').split('\0').filter(Boolean);
   for (const name of names) assertSafeSourcePath(name);
   const identities = git(root, ['log', '--format=%ae%n%ce', request.commit]).toString('utf8').trim().split(/\r?\n/);

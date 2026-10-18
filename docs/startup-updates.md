@@ -2,7 +2,7 @@
 
 The native process checks the latest stable `nea-c/Nearly` release once per launch. Draft, prerelease and beta versions are excluded. Canonical public `rX.Y` tags map to internal `X.Y.0`; numeric SemVer precedence handles multi-digit versions. Patch, prerelease and build aliases are rejected (see versioning.md). Metadata requests use HTTPS, reject redirects, and have an eight-second/128 KiB budget. Offline failures leave the app usable.
 
-The localized Update now/Later UI, verified package staging and native handoff coordinator are implemented. **Self-update remains disabled in this build:** `production_key()` returns None and `HANDOFF_RELEASE_VALIDATED` is false. A newer release shows a clear signing explanation with Update now disabled. Install IPC rejects these missing prerequisites before settings changes or process launch. Later is process-only; no snooze setting is saved.
+The localized Update now/Later UI, verified package staging and native handoff coordinator are implemented. **Self-update remains disabled in this build:** the registered public key is embedded but `HANDOFF_RELEASE_VALIDATED` is false. Update now remains disabled. Install IPC rejects the unqualified installation gate before settings changes or process launch. Later is process-only; no snooze setting is saved.
 
 ## Trust and staging
 
@@ -18,15 +18,27 @@ Installation reserves the whole native process and refuses active jobs, starts, 
 
 Only owned transient stopped-tab contexts are removed before exit. Profiles, folder history, mappings, presets, trust, foreign records and shortcut choices remain. Launch, readiness or commit failure restores captured context against the latest settings and releases the seal. A portable copy cannot silently migrate into the registered installation.
 
-The installer receives only native-generated PID, creation time and a strict 32-character nonce through the version 2 protocol. NSIS opens cancellation and commit handles before READY, waits up to 60 seconds for the exact parent without killing, checks cancellation before mutation, and requires explicit commit after parent exit. Native readiness wait is ten seconds. Timeout and pre-commit crashes fail closed. After commit, a crash may continue the already-authorized installation. After replacement, NSIS starts the new application with the nonce and waits for native settings loading plus main UI readiness. The restarted app reauthenticates the signed running payload and exact live installer, signals health, then requires that same installer to exit with code zero before cleanup. Restart never restores tabs, authentication or syncs.
+Safe retry is narrower than settings rollback. A native launch failure can abandon
+its prepared transaction only with nonce-bound proof that the installer was never
+spawned. The durable Abandoned state permits a fresh verified attempt and does not
+authorize deletion of recovery material. Existing journal admission precedes backup
+creation. Once a child was spawned, readiness, binding, commit or uncertain failures
+remain fenced; cancelling a child is not proof that it exited or cannot mutate.
+No ordinary startup or renderer flag can reset an incomplete transaction.
+
+Authenticated `updater-protocol:3` is mandatory. A verified copy of the old application starts as a restricted helper before Tauri or settings initialization. Helper readiness precedes the parent's durable binding and explicit commit. The helper waits for that exact parent to exit before acquiring the mutation lease and reloading the bound transaction. NSIS receives only native-generated helper PID, creation time and nonce; its protocol3 branch writes two candidates into the transaction directory and performs no live installation. The helper validates the candidate application and uninstaller before replacing the registered installation.
+
+The helper owns a strict schema2, root-bound DPAPI journal. It records intent and observation for each file rename and registry mutation. Its narrow installation tuple is Nearly.exe, uninstall.exe, DisplayVersion, NearlyInternalVersion and EstimatedSize. Settings, shortcuts and unrelated registry values are preserved. A Global application mutex coordinates the new manual installer, uninstaller and helper across sessions; legacy installers and external registry writers do not participate. Registry comparison is not atomic CAS.
+
+The new application starts under a native probation gate. Settings load and UI readiness provide an initial idle proof; they do not release the gate. The helper durably records Succeeded, sends authenticated Success and waits for SuccessAck. The child verifies the exact helper and fresh durable success before admitting normal work. Restart never restores tabs, authentication or syncs.
 
 ## Limits and release prerequisites
 
-Pre-exit settings rollback is implemented and tested. Native restart health and bounded cleanup are now connected behind both disabled production gates. **Automatic post-exit binary or registry rollback is not implemented.** Missing evidence, process failure, timeout, or exhausted cleanup retries retain the installer and previous application and show RecoveryRequired. Interrupted installation may require manual repair using a trusted setup. No journal flag alone authorizes cleanup.
+Pre-exit settings rollback and a conditional post-exit binary/registry inverse are implemented behind the disabled installation gate. Restoration requires exact owned file/value proofs and no unknown users. A live failed child may receive a cooperative exit request only after atomic admission sealing, idle checks and settled settings; it is never killed. Busy, unknown, timed-out or conflicting state retains recovery material for manual repair. Succeeded is irreversible. Old-version restart additionally requires fresh restoration proof, unchanged compatible actual settings and a durable at-most-once attempt. External `SYNCFILES_CONFIG_DIR` locations are unsupported by this updater.
 
-A fully authenticated healthy restart followed by exact installer exit zero permits deletion of only that transaction’s nonce-named setup file, using the same verified native handle and at most three attempts. The previous executable backup remains. Cancellation and ordinary pre-handoff failures delete only handle-owned staging files. A failed read-only reopen can leave a file rather than risk deleting an unknown replacement. There is no wildcard cleanup.
+Cleanup requires fresh native ownership and process-exit evidence; persisted flags alone never authorize it. Unknown files are retained and no wildcard cleanup is used. Offline recovery without retained live worker/helper exit proofs conservatively reports uncertainty rather than continuing or restarting. The generated tests do not establish recovery from arbitrary power loss or qualify actual NSIS execution.
 
-Before production enablement: separately approve signing-key creation/storage; embed the reviewed public key; produce compatible signed stable artifacts; validate actual install, cancellation, upgrade, uninstall, interrupted recovery, settings/shortcuts and restart health in disposable Windows; then review the release-validation gate. No production key, ACL change, host installation, Git push or Release publication occurred here.
+Production key registration and public-key embedding are complete in the isolated source. Before production enablement: produce compatible signed stable artifacts; validate actual install, cancellation, upgrade, uninstall, interrupted recovery, settings/shortcuts and restart health in disposable Windows; then review the release-validation gate. This implementation follow-up did not generate another key, access secrets, change ACLs, install software, push Git or publish a Release.
 
 Tests use ephemeral in-memory fixture keys, an upstream minisign vector, loopback HTTP servers and harmless owned test-runner processes. NSIS is compiled without executing setup. See [the design](update-installer-design.md) and [native handoff](../src-tauri/windows/UPDATE-HANDOFF.md).
 

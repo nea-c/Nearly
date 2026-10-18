@@ -1,53 +1,55 @@
 # Native update handoff
 
-`update_handoff::launch_verified_sibling` accepts only a native staged path. Its
-caller retains `StagedInstaller`'s verified file and ancestor-directory locks,
-reverifies that handle immediately before launch, and holds the global idle seal.
-The native current executable must match both the owned HKCU registration and
-the fixed Windows Known Folder LocalAppData/Nearly/Nearly.exe location.
+Production installation remains disabled: the registered public key is embedded but
+`HANDOFF_RELEASE_VALIDATED` is false. This describes protocol3 code, not
+qualification of a real signed installer.
 
-The fixed silent command includes this process's PID, native creation FILETIME,
-and a fresh 128-bit nonce. No renderer or release-supplied command is accepted.
-Setup opens that PID with query/synchronize rights, validates creation time and
-the exact installed image path, and opens both nonce events before signaling
-ready. Rust waits at most ten seconds. Setup waits at most sixty seconds for the
-identified process handle to signal, polling cancellation every 200 milliseconds.
-It also retains a third commit event before readiness and requires that event to
-be signaled after parent exit. A crash before explicit commit cannot install.
-No process is terminated. Setup repeats the running-file guard before mutation.
+The coordinator retains the verified sibling installer and ancestor locks,
+seals global work admission and settles settings. Only the fixed registered
+LocalAppData/Nearly installation with adjacent settings is supported. A portable
+D: copy or external SYNCFILES_CONFIG_DIR cannot silently switch installations.
 
-Dropping an uncommitted `LaunchedInstaller` signals cancellation. Missing or
-signaled cancellation events reject setup, including a setup which initializes
-after the native timeout. Setup checks cancellation again before its install
-section. After successful sealed settings/session cleanup only, the coordinator
-calls fallible `commit()` immediately before controlled application exit. Commit
-signals the third event; a later process crash is past this deliberate commit
-point and installation may proceed. A commit signaling failure cancels setup.
-The caller must
-retain the staged locks until process exit; dropping staging early could mark
-the running setup image for deletion.
+A verified immutable old-image copy dispatches as a restricted helper before
+Tauri, settings initialization or ordinary single-instance handling. It signals
+Ready without holding the mutation lease. The parent durably binds Armed under
+the lease, releases it, signals Commit and exits. The helper waits for that exact
+retained parent identity to exit, acquires the lease and reloads the bound record.
+Cancellation is not proof of child exit. No process is forcibly terminated.
 
-Update mode keeps the fixed install directory and loads both persisted shortcut
-preferences, including false. Existing missing shortcuts remain absent. Settings
-and backups are neither payloads nor deletion targets. Only `.onInstSuccess`
-restarts an update; timeout, cancellation, rejected ownership, busy-app checks,
-replacement errors, registration errors and shortcut errors do not restart.
+The signed package must authenticate exactly one updater-protocol:3 field.
+The NSIS worker accepts only fixed canonical helper PID, creation FILETIME and
+nonce arguments. Worker-specific authorization events bind its exact PID and
+creation time. Its bounded stage branch writes candidate Nearly.exe and
+uninstall.exe into the exclusive transaction directory, with no live files,
+registration, shortcuts, settings or restart effects. The helper verifies both
+candidates before applying them.
 
-## Recovery and validation boundary
+The helper is the sole schema2 root-bound DPAPI journal writer. It records intent
+and observation for each file rename and for the three raw registry values
+DisplayVersion, NearlyInternalVersion and EstimatedSize. Together with Nearly.exe
+and uninstall.exe these form the narrow installation tuple. New cooperating
+manual installers, uninstallers and helpers share the Global application mutation
+mutex across sessions. Legacy installers and external registry writers do not;
+registry comparison is not atomic CAS.
 
-Before parent exit, every launch/handshake/cleanup failure leaves Nearly open;
-the coordinator releases its idle seal and setup is cancelled. Retry is explicit.
-After parent exit, a failed replacement may leave a partially replaced EXE or
-registration. The installer reports recovery instructions to open Nearly directly
-or retry a trusted setup, with settings left adjacent. There is **no transactional
-binary/registration rollback or health-confirmed restart**. A production signing
-key remains absent, so the application must continue to fail closed on installation.
+New application health runs behind a native probation gate. Initial settings/UI
+readiness supplies an idle proof, not permission to connect or write. The helper
+publishes durable Succeeded and sends Success; the child verifies the exact live
+helper and fresh success, sends SuccessAck and releases admission. Durable success
+is irreversible even if a subsequent acknowledgment or process is lost.
 
-Native tests exercise temporary fixture layouts and owned fake child processes:
-readiness success, early child exit, timeout without killing, delayed setup
-cancellation, and an exact process-handle wait through natural child exit.
-Template tests inspect ownership, all shortcut combinations, wait/cancel ordering
-and success-only restart. Cached NSIS compilation validates syntax without
-executing the generated installer. Actual install/cancel/upgrade/uninstall,
-registry/shortcut effects, interrupted replacement and restart health require an
-isolated Windows VM and remain unverified. No host installer is run by these tests.
+On failure, restoration requires exact owned objects and no conflicting users.
+A live child can receive cooperative exit only after atomic admission sealing,
+idle checks and settings settlement. Busy, unknown or timed-out child state
+requires manual repair. Settings and shortcuts are never restored. Old restart
+requires a fresh consumed restoration proof, unchanged compatible actual settings
+and a durable at-most-once attempt. Offline recovery without retained live exit
+proofs reports uncertainty rather than inferring safety from persisted flags.
+Cleanup likewise requires fresh native proofs and never uses wildcard deletion.
+
+Tests use generated owned files, isolated registry keys and harmless copied test
+children. Source interpreters and cached NSIS compilation do not execute setup.
+Real NSIS self-extraction, installation, upgrade, uninstall, power interruption
+and settings/shortcut preservation still require separately approved disposable
+Windows qualification. Key creation, ACL changes and secret registration are
+separate approvals; key approval alone does not enable installation.

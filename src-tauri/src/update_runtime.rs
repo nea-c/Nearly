@@ -69,6 +69,12 @@ fn matching_active(active: Option<&str>, nonce: &str) -> bool {
     active == Some(nonce)
 }
 type Notice = Arc<dyn Fn(Report) + Send + Sync>;
+pub(crate) struct HealthActions {
+    pub release:Arc<dyn Fn()->Result<(),String>+Send+Sync>,
+    pub seal_exit:Arc<dyn Fn()->Result<crate::HealthExitSeal,String>+Send+Sync>,
+    pub attest_idle:Arc<dyn Fn()->Result<crate::HealthIdleProof,String>+Send+Sync>,
+    pub exit:Arc<dyn Fn()+Send+Sync>,
+}
 struct Inner {
     report: Report,
     flags: HealthFlags,
@@ -76,6 +82,7 @@ struct Inner {
     active: Option<String>,
     sink: Option<Notice>,
     started: bool,
+    actions:Option<HealthActions>,
 }
 struct Shared {
     inner: Mutex<Inner>,
@@ -111,7 +118,7 @@ impl Runtime {
         Self(Arc::new(Shared {
             inner: Mutex::new(Inner {
                 report: Report {
-                    phase: "idle",
+                    phase: if enabled&&matches!(&startup,Startup::Health(_)){"waitingForUi"}else{"idle"},
                     reason: None,
                     revision: 0,
                 },
@@ -120,6 +127,7 @@ impl Runtime {
                 active,
                 sink: None,
                 started: false,
+                actions:None,
             }),
             changed: Condvar::new(),
             cancelled: AtomicBool::new(false),
@@ -209,7 +217,7 @@ impl Runtime {
     }
     /// Called during native setup, before the main renderer bootstraps. Disabled
     /// production performs no discovery and emits no status notification.
-    pub(crate) fn start(&self, sink: Notice) {
+    pub(crate) fn start(&self, sink: Notice, actions:HealthActions) {
         if !self.0.enabled {
             return;
         }
@@ -222,6 +230,7 @@ impl Runtime {
             }
             s.started = true;
             s.sink = Some(sink);
+            s.actions=Some(actions);
             s.startup.clone()
         };
         let runtime = self.clone();
@@ -270,6 +279,48 @@ impl Runtime {
         }
     }
     #[cfg(windows)]
+    fn run_supervisor_health(&self,nonce:&str)->Result<(), &'static str>{
+        use crate::update_restart::{LiveRecoverySupervisor,SupervisorEvent};
+        let snapshot=crate::update_recovery_windows::authenticate_health(nonce).map_err(|_|"supervisorAuthenticationFailed")?;
+        let live=LiveRecoverySupervisor::open(snapshot).map_err(|_|"liveSupervisorMissing")?;
+        self.publish("waitingForUi",None);
+        // Supervisor allows 30s health plus 5s cooperative exit. Keep the
+        // authenticated listener alive beyond both bounded intervals.
+        let deadline=Instant::now()+Duration::from_secs(45);
+        let mut signalled=false;
+        let mut idle_attested=false;
+        loop {
+            if self.0.cancelled.load(Ordering::Acquire){return Err("restartInterrupted");}
+            match live.poll_event().map_err(|_|"supervisorEvidenceLost")? {
+                Some(SupervisorEvent::Success)=>{
+                    let s=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?;
+                    (s.actions.as_ref().ok_or("runtimeUnavailable")?.release)().map_err(|_|"probationReleaseFailed")?;
+                    drop(s);self.publish("succeeded",None);return Ok(());
+                },
+                Some(SupervisorEvent::ExitRequest)=>{
+                    let s=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?;
+                    let actions=s.actions.as_ref().ok_or("runtimeUnavailable")?;
+                    let seal=(actions.seal_exit)().map_err(|_|"healthShutdownBusy")?;
+                    live.signal_idle(&seal).map_err(|_|"supervisorEvidenceLost")?;
+                    (actions.exit)();return Ok(());
+                },
+                None=>(),
+            }
+            let settings_ready=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?.flags.settings;
+            if !idle_attested&&settings_ready{
+                let s=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?;
+                // Settings initialization can still be returning while holding
+                // its writer lock. Retry boundedly; never assume settlement.
+                if let Ok(proof)=(s.actions.as_ref().ok_or("runtimeUnavailable")?.attest_idle)(){
+                    live.signal_probation_idle(&proof).map_err(|_|"supervisorEvidenceLost")?;idle_attested=true;
+                }
+            }
+            if !signalled&&idle_attested&&self.native_health(){live.signal_healthy().map_err(|_|"supervisorEvidenceLost")?;signalled=true;self.publish("awaitingSuccess",None);}
+            if Instant::now()>=deadline{return Err("supervisorHealthTimeout");}
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    #[cfg(windows)]
     fn run_native(&self, startup: Startup) -> Result<(), &'static str> {
         use crate::update_transaction::{Error, NativeContext, TransactionStore};
         // Both real release gates are checked again immediately before the first
@@ -277,12 +328,15 @@ impl Runtime {
         if !crate::startup_update::HANDOFF_RELEASE_VALIDATED {
             return Ok(());
         }
-        let Some(key) = crate::update_package::production_key() else {
+        let Some(_key) = crate::update_package::production_key() else {
             return Ok(());
         };
         if startup == Startup::Invalid {
             return Err("invalidHealthArguments");
         }
+        // Protocol3 health is observation-only; never enter the protocol2 writer
+        // route, even for a legacy health argument with a matching nonce.
+        if let Startup::Health(nonce)=&startup{return self.run_supervisor_health(nonce);}
         self.publish("checking", None);
         let context =
             NativeContext::capture_current_install().map_err(|_| "installedContextUnavailable")?;
@@ -304,208 +358,13 @@ impl Runtime {
         };
         // A persisted Cleaned state is terminal metadata, never cleanup authority.
         if startup == Startup::Ordinary {
-            if record.receipt.state == crate::update_cleanup::codec::State::Cleaned {
+            if matches!(record.receipt.state, crate::update_cleanup::codec::State::Cleaned | crate::update_cleanup::codec::State::Abandoned) {
                 self.publish("idle", None);
                 return Ok(());
             }
             return Err("liveRestartEvidenceMissing");
         }
-        let Startup::Health(nonce) = startup else {
-            return Err("invalidHealthArguments");
-        };
-        if nonce != record.receipt.binding.nonce {
-            return Err("transactionMismatch");
-        }
-        if record.receipt.state != crate::update_cleanup::codec::State::HandoffCommitted {
-            return Err("liveRestartEvidenceMissing");
-        }
-        let mut session = NativeSession::open(context, store, record, key, self.clone())?;
-        self.publish("waitingForUi", None);
-        self.waiting_ui(Duration::from_secs(20))?;
-        session.complete(self, Duration::from_secs(30))
-    }
-}
-#[cfg(windows)]
-struct NativeSession {
-    context: crate::update_transaction::NativeContext,
-    store: crate::update_transaction::TransactionStore,
-    lifecycle: crate::update_cleanup::engine::Lifecycle,
-    evidence: RestartEvidence,
-}
-#[cfg(windows)]
-struct RestartEvidence {
-    record: crate::update_transaction::TransactionRecord,
-    key: crate::update_package::TrustedKey,
-    live: crate::update_restart::LiveInstaller,
-    exit: Option<crate::update_restart::ExitProof>,
-    runtime: Runtime,
-}
-#[cfg(windows)]
-impl crate::update_transaction::NativeEvidence for RestartEvidence {
-    fn verify(
-        &mut self,
-        context: &crate::update_transaction::NativeContext,
-        record: &crate::update_transaction::TransactionRecord,
-        evidence: crate::update_cleanup::engine::Evidence,
-    ) -> Result<(), String> {
-        use crate::update_cleanup::engine::Evidence;
-        if self.runtime.0.cancelled.load(Ordering::Acquire)
-            || record.receipt.binding != self.record.receipt.binding
-        {
-            return Err("Restart fenced".into());
-        }
-        let proof = crate::update_transaction::authenticate_record(context, record, &self.key)
-            .map_err(|_| "Package authentication failed")?;
-        crate::update_transaction::verify_running_payload(context, &proof)
-            .map_err(|_| "Running image authentication failed")?;
-        if record.restart_process.as_ref() != Some(&crate::update_restart::current_identity()?) {
-            return Err("Restart process identity mismatch".into());
-        }
-        let expected = record
-            .installer_process
-            .as_ref()
-            .ok_or("Installer identity unavailable")?;
-        if self.live.process_identity() != expected
-            || self.live.nonce() != record.receipt.binding.nonce
-            || self.live.image_path()
-                != context
-                    .root_path()
-                    .join(&record.receipt.binding.installer.basename)
-        {
-            return Err("Installer binding mismatch".into());
-        }
-        if let Some(exit) = &self.exit {
-            if exit.process_identity() != expected
-                || exit.nonce() != record.receipt.binding.nonce
-                || exit.image_path() != self.live.image_path()
-            {
-                return Err("Installer exit proof mismatch".into());
-            }
-        } else {
-            self.live.verify_installed()?;
-        }
-        if evidence == Evidence::Healthy && !self.runtime.native_health() {
-            return Err("Native application health unavailable".into());
-        }
-        Ok(())
-    }
-}
-#[cfg(windows)]
-impl NativeSession {
-    fn open(
-        context: crate::update_transaction::NativeContext,
-        mut store: crate::update_transaction::TransactionStore,
-        record: crate::update_transaction::TransactionRecord,
-        key: crate::update_package::TrustedKey,
-        runtime: Runtime,
-    ) -> Result<Self, &'static str> {
-        let proof = crate::update_transaction::authenticate_record(&context, &record, &key)
-            .map_err(|_| "packageAuthenticationFailed")?;
-        crate::update_transaction::verify_running_payload(&context, &proof)
-            .map_err(|_| "runningImageMismatch")?;
-        let id = record
-            .installer_process
-            .as_ref()
-            .ok_or("liveInstallerMissing")?;
-        let live = crate::update_restart::LiveInstaller::open(
-            &record.receipt.binding.nonce,
-            id,
-            &context
-                .root_path()
-                .join(&record.receipt.binding.installer.basename),
-        )
-        .map_err(|_| "liveInstallerMissing")?;
-        // Persist the first authenticated native restart identity. A subsequent
-        // process after a crash cannot reattach to this transaction by nonce.
-        let record = store
-            .claim_current_restart(&record.receipt)
-            .map_err(|_| "restartAlreadyClaimed")?;
-        let lifecycle = crate::update_cleanup::engine::Lifecycle::recover(
-            &crate::update_cleanup::codec::encode(&record.receipt)
-                .map_err(|_| "journalUncertain")?,
-        )
-        .map_err(|_| "journalUncertain")?;
-        Ok(Self {
-            context,
-            store,
-            lifecycle,
-            evidence: RestartEvidence {
-                record,
-                key,
-                live,
-                exit: None,
-                runtime,
-            },
-        })
-    }
-    fn advance(&mut self, target: crate::update_cleanup::codec::State) -> Result<(), &'static str> {
-        if target == crate::update_cleanup::codec::State::CleanupPending
-            && self.evidence.exit.is_none()
-        {
-            return Err("installerExitEvidenceMissing");
-        }
-        let record = self.evidence.record.clone();
-        let mut authority = crate::update_transaction::EvidenceAdapter {
-            context: &self.context,
-            record: &record,
-            native: &mut self.evidence,
-        };
-        self.lifecycle
-            .advance(target, &mut authority, &mut self.store)
-            .map_err(|_| "transitionEvidenceLost")
-    }
-    fn complete(&mut self, runtime: &Runtime, timeout: Duration) -> Result<(), &'static str> {
-        use crate::update_cleanup::{codec::State, engine::Outcome};
-        use crate::update_transaction::NativeEvidence;
-        self.advance(State::InstallationSucceeded)?;
-        self.advance(State::RestartHealthy)?;
-        // A fresh reauthentication immediately before the external health event.
-        let record = self.evidence.record.clone();
-        self.evidence
-            .verify(
-                &self.context,
-                &record,
-                crate::update_cleanup::engine::Evidence::Healthy,
-            )
-            .map_err(|_| "restartEvidenceLost")?;
-        self.evidence
-            .live
-            .signal_healthy()
-            .map_err(|_| "healthSignalFailed")?;
-        runtime.publish("waitingForInstaller", None);
-        self.evidence.exit = Some(
-            self.evidence
-                .live
-                .wait_exit_zero(timeout)
-                .map_err(|_| "installerExitNotConfirmed")?,
-        );
-        self.advance(State::CleanupPending)?;
-        let start = Instant::now();
-        let mut files = crate::update_transaction::NativeFiles::new(&self.context);
-        loop {
-            let now = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            let record = self.evidence.record.clone();
-            let mut authority = crate::update_transaction::EvidenceAdapter {
-                context: &self.context,
-                record: &record,
-                native: &mut self.evidence,
-            };
-            match self
-                .lifecycle
-                .cleanup(now, &mut authority, &mut self.store, &mut files)
-                .map_err(|_| "cleanupEvidenceLost")?
-            {
-                Outcome::Cleaned | Outcome::AlreadyCleaned => {
-                    runtime.publish("cleaned", None);
-                    return Ok(());
-                }
-                Outcome::RetryExhausted => return Err("cleanupLocked"),
-                Outcome::Deferred { until_ms } => {
-                    let delay = until_ms.saturating_sub(start.elapsed().as_millis() as u64);
-                    std::thread::sleep(Duration::from_millis(delay.min(200)));
-                }
-            }
-        }
+        Err("liveRestartEvidenceMissing")
     }
 }
 #[cfg(test)]
@@ -547,6 +406,20 @@ mod tests {
 mod health_tests {
     use super::*;
     #[test]
+    fn probation_readiness_does_not_admit_work_or_release_from_renderer_ack(){
+        let runtime=Runtime::create(Startup::Health("a".repeat(32)),true);
+        let mut registry=crate::window_ownership::Registry::default();
+        registry.register_native_window("main").unwrap();registry.enter_health_probation();
+        registry.bootstrap("main").unwrap();registry.settings_registered("main").unwrap();
+        assert_eq!(runtime.status().phase,"waitingForUi");
+        assert!(registry.claim("main","premature").is_err());
+        runtime.settings_loaded();runtime.ack_ready();
+        assert_eq!(runtime.waiting_ui(Duration::ZERO),Ok(()));
+        assert!(registry.claim("main","still-premature").is_err());
+        assert!(registry.settings_mutable("main").is_err());
+        assert_eq!(runtime.status().phase,"waitingForUi");
+    }
+    #[test]
     fn native_settings_and_renderer_ack_are_independently_required() {
         let mut f = HealthFlags::default();
         assert!(!f.ready());
@@ -568,7 +441,7 @@ mod health_tests {
     #[test]
     fn real_production_gates_remain_disabled() {
         assert!(!crate::startup_update::HANDOFF_RELEASE_VALIDATED);
-        assert!(crate::update_package::production_key().is_none());
+        assert!(crate::update_package::production_key().is_some());
     }
 }
 
@@ -588,7 +461,7 @@ mod coordinator_tests {
             let notices = count.clone();
             rt.start(Arc::new(move |_| {
                 notices.fetch_add(1, Ordering::SeqCst);
-            }));
+            }),HealthActions{release:Arc::new(||Ok(())),seal_exit:Arc::new(||Err("test has no native authority".into())),attest_idle:Arc::new(||Err("test has no native authority".into())),exit:Arc::new(||panic!("unexpected native exit"))});
             rt.settings_loaded();
             rt.ack_ready();
             assert!(!rt.route_second(Startup::Ordinary));

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import {createHash} from 'node:crypto';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
@@ -144,7 +145,7 @@ test("running checks block instead of terminating, before installer mutations", 
   assert.ok((guard.match(/SetErrorLevel 2\s+Abort/g) ?? []).length >= 3);
   const install = template.slice(template.indexOf("Section Install"), template.indexOf("Function un.onInit"));
   assert.ok(install.indexOf("!insertmacro NearlyRequireClosed") < install.indexOf("CreateDirectory"));
-  assert.ok(install.indexOf("CreateFileW") < install.indexOf('File "/oname='));
+  assert.ok(install.indexOf("CreateFileW") < install.indexOf('Call NearlyExtractApplication'));
 });
 
 test("per-user fixed writable install, manual WebView prerequisite, no userdata removal", () => {
@@ -163,28 +164,9 @@ test("per-user fixed writable install, manual WebView prerequisite, no userdata 
   assert.match(template, /Existing foreign shortcut left unchanged/);
 });
 
-test("updater handshake waits for exact parent before mutation and restarts only on install success", () => {
-  const wait = template.match(/Function NearlyWaitUpdateParent\r?\n([\s\S]*?)FunctionEnd/)[1];
-  for (const required of ["OpenProcess(i 0x00101000", "GetProcessTimes", "StrCmp $1 $NearlyCreated", "QueryFullProcessImageNameW", 'StrCmp $2 "$INSTDIR\\${MAINBINARYNAME}.exe"', "OpenEventW", "SetEvent", "WaitForSingleObject(p $NearlyParentHandle, i 200)", "IntCmp $NearlyWaitTicks 300", "CloseHandle(p $NearlyParentHandle)", "NearlyUpdateAbort-", "WaitForSingleObject(p $NearlyAbortHandle, i 0)"])
-    assert.ok(wait.includes(required), `Missing handoff invariant: ${required}`);
-  assert.ok(wait.indexOf("GetProcessTimes") < wait.indexOf("SetEvent"));
-  assert.ok(wait.indexOf("QueryFullProcessImageNameW") < wait.indexOf("SetEvent"));
-  assert.ok(wait.indexOf("NearlyUpdateAbort-") < wait.indexOf("SetEvent"));
-  assert.ok(wait.indexOf("NearlyUpdateCommit-") < wait.indexOf("SetEvent"));
-  assert.ok(wait.indexOf("WaitForSingleObject(p $NearlyCommitHandle, i 0)") > wait.indexOf("nearly_update_parent_exited:"));
-  assert.doesNotMatch(wait, /WriteReg|CreateDirectory|CreateShortcut|Delete |File \"|TerminateProcess/);
-  const init = template.match(/Function \.onInit\r?\n([\s\S]*?)FunctionEnd/)[1];
-  assert.ok(init.indexOf("Call NearlyWaitUpdateParent") > init.indexOf("SemverCompare"));
-  assert.ok(init.indexOf("!insertmacro NearlyRequireClosed") > init.indexOf("Call NearlyWaitUpdateParent"));
-  const success=template.match(/Function \.onInstSuccess\r?\n([\s\S]*?)FunctionEnd/)[1];
-  assert.match(success,/\$NearlyUpdateMode = 1/);
-  assert.ok(success.includes('"--nearly-update-health=$NearlyReady"'));
-  assert.doesNotMatch(template,/Function \.onInstFailed[\s\S]*?RunAsUser/);
-});
-
 test("cached NSIS compiles both installer and automatic uninstaller without executing either", { skip: process.platform !== "win32" }, () => {
   const nsisRoot = process.env.NEARLY_NSIS_ROOT ?? path.join(process.env.LOCALAPPDATA, "tauri", "NSIS");
-  const compiler = path.join(nsisRoot, "Bin", "makensis.exe");
+  const compiler = fs.existsSync(path.join(nsisRoot, "Bin", "makensis.exe")) ? path.join(nsisRoot, "Bin", "makensis.exe") : path.join(nsisRoot, "makensis.exe");
   assert.ok(fs.existsSync(compiler), "The existing cached NSIS compiler is required; do not install one in this test");
   const output = path.join(root, "test-results", "nsis-template-compile");
   fs.mkdirSync(output, { recursive: true });
@@ -216,65 +198,18 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   const bytes = fs.readFileSync(exe);
   assert.equal(bytes.subarray(0, 2).toString(), "MZ");
   assert.ok(bytes.length > 20_000);
-});
-
-
-test("protocol v2 holds phase handles before readiness and rejects older setup handshakes", () => {
-  const wait=template.match(/Function NearlyWaitUpdateParent\r?\n([\s\S]*?)FunctionEnd/)[1];
-  assert.ok(wait.includes('${GetOptions} $0 "/NEARLYPROTOCOL=" $NearlyProtocol'));
-  assert.ok(wait.includes('StrCmp $NearlyProtocol "2" 0 nearly_update_reject'));
-  const ready=wait.indexOf('NearlyUpdateReady-v2-');
-  assert.ok(ready>0);
-  assert.equal(wait.includes('NearlyUpdateReady-$NearlyReady'),false,"old setups cannot signal the version-2 readiness event");
-  for(const phase of ['Installed','Healthy']){
-    assert.ok(wait.indexOf('NearlyUpdate'+phase+'-')<ready);
-    assert.ok(wait.includes('WaitForSingleObject(p $Nearly'+phase+'Handle, i 0)'));
-  }
-  const success=template.match(/Function \.onInstSuccess\r?\n([\s\S]*?)FunctionEnd/)[1];
-  assert.ok(success.indexOf('SetEvent(p $NearlyInstalledHandle)')<success.indexOf('RunAsUser'));
-  assert.ok(success.indexOf('RunAsUser')<success.indexOf('WaitForSingleObject(p $NearlyHealthyHandle, i 30000)'));
-  assert.match(success,/SetErrorLevel 9/);
-  assert.match(success,/RecoveryRequired/);
-  assert.doesNotMatch(success,/Delete |RmDir|WriteReg|TerminateProcess/);
-  const handoff=fs.readFileSync(path.join(root,'src-tauri','src','update_handoff.rs'),'utf8');
-  assert.ok(handoff.includes('fresh_event("Ready-v2",nonce)'));
-  assert.ok(handoff.includes('"/NEARLYPROTOCOL=2"'));
-});
-
-// Execute the actual callback with modeled kernel return values. Unknown
-// instructions fail. This does not execute any generated setup program.
-function runUpdateSuccess({updateMode=1,setInstalled=1,waitResult=0}={}) {
-  const body=template.match(/Function \.onInstSuccess\r?\n([\s\S]*?)FunctionEnd/)[1];
-  const lines=body.split(/\r?\n/).map(s=>s.trim()).filter(s=>s&&!s.startsWith(';'));
-  let enabled=true,pc=0,budget=100,errorLevel=0,launched=0,installedSignals=0,waits=0;
-  const vars={};
-  const value=s=>s.startsWith('$')?String(vars[s.slice(1)]??''):s.replace(/^"|"$/g,'');
-  while(pc<lines.length){
-    assert.ok(budget--,'bounded callback control flow');const line=lines[pc];
-    if(line==='${If} $NearlyUpdateMode = 1'){enabled=updateMode===1;pc++;continue;}
-    if(line==='${EndIf}'){enabled=true;pc++;continue;}
-    if(!enabled||line.endsWith(':')){pc++;continue;}
-    if(line.startsWith('System::Call ')){
-      if(line.includes('SetEvent(p $NearlyInstalledHandle)')){vars['0']=setInstalled;installedSignals++;}
-      else if(line.includes('WaitForSingleObject(p $NearlyHealthyHandle, i 30000)')){vars['0']=waitResult;waits++;}
-      else assert.fail('Unknown modeled kernel operation: '+line);
-      pc++;continue;
-    }
-    if(line.startsWith('nsis_tauri_utils::RunAsUser ')){assert.ok(line.includes('"--nearly-update-health=$NearlyReady"'));launched++;pc++;continue;}
-    if(line.startsWith('StrCmp ')){
-      const args=line.match(/"[^"]*"|\S+/g).slice(1);const target=value(args[0])===value(args[1])?args[2]:args[3];
-      pc=target&&target!=='0'?lines.indexOf(target+':')+1:pc+1;continue;
-    }
-    if(line.startsWith('SetErrorLevel ')){errorLevel=Number(line.slice(14));pc++;continue;}
-    if(line.startsWith('DetailPrint ')){pc++;continue;}
-    if(line==='Return')break;
-    assert.fail('Unknown success callback operation: '+line);
-  }
-  return {errorLevel,launched,installedSignals,waits};
-}
-test("actual success callback requires Installed then Healthy; failures preserve recovery and never kill", () => {
-  assert.deepEqual(runUpdateSuccess(),{errorLevel:0,launched:1,installedSignals:1,waits:1});
-  assert.deepEqual(runUpdateSuccess({updateMode:0}),{errorLevel:0,launched:0,installedSignals:0,waits:0});
-  assert.deepEqual(runUpdateSuccess({setInstalled:0}),{errorLevel:9,launched:0,installedSignals:1,waits:0});
-  for(const waitResult of [258,0xffffffff])assert.deepEqual(runUpdateSuccess({waitResult}),{errorLevel:9,launched:1,installedSignals:1,waits:1});
+  // Inspect generated bytes with a reviewed reader; NEVER launch setup/uninstall.
+  const reader=process.env.NEARLY_UPDATER_EXTRACTOR||'C:\\Program Files\\7-Zip\\7z.exe';
+  const digest=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const pair=[digest(reader),digest(path.join(path.dirname(reader),'7z.dll'))].join(':');
+  assert.ok([
+    '254cf6411d38903b2440819f7e0a847f0cfee7f8096cfad9e90fea62f42b0c23:73578f14d50f747efa82527a503f1ad542f9db170e2901eddb54d6bce93fc00e',
+    '95fff19b73eff77c87c0d7bd32822e43fb90dd2932459f962eb532d8dfb6ba53:899cd73d7fc60e1c1c35c7de0f5bed3dc69bfe2cecbd48014d868a347970a0b1',
+  ].includes(pair),'reviewed coherent archive-reader pair');
+  const listing=spawnSync(reader,['l','-slt','-bd','--',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
+  assert.equal(listing.status,0,listing.stderr);
+  const members=listing.stdout.split(/\r?\n/).filter(l=>l.startsWith('Path = ')).map(l=>l.slice(7)).filter(n=>n.replaceAll('\\','/').split('/').at(-1).toLowerCase()==='nearly.exe');
+  assert.deepEqual(members,['Nearly.exe'],'single exact member matches the signing-plan contract');
+  const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'Nearly.exe'],{windowsHide:true,timeout:30000});
+  assert.equal(extracted.status,0);assert.ok(extracted.stdout.equals(fs.readFileSync(payload)));
 });

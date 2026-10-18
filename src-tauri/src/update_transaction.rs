@@ -226,7 +226,7 @@ impl<E: NativeEvidence> engine::Authority for EvidenceAdapter<'_, E> {
 
 #[cfg(windows)]
 #[path = "update_transaction_windows.rs"]
-mod windows_impl;
+pub(crate) mod windows_impl;
 #[cfg(windows)]
 pub(crate) use windows_impl::{
     authenticate_record, verify_running_payload, prepare_transaction, NativeFiles, TransactionStore,
