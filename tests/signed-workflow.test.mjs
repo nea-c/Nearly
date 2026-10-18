@@ -44,3 +44,10 @@ test('portable tools are pinned before use and the downloaded distribution is ne
   const ps=fs.readFileSync(path.join(root,'.github/scripts/prepare-signing-tools.ps1'),'utf8');assert.match(ps,/bootstrapSha256/);assert.match(ps,/archiveSha256/);assert.match(ps,/7z\.exe.*7z\.dll/);assert.match(ps,/& \$bootstrap e -t7z -spd/);assert.doesNotMatch(ps,/& \$archive|Start-Process|choco|winget|Set-Acl|Remove-Item/);
   const lock=JSON.parse(fs.readFileSync(path.join(root,'.github/signing-dependencies.json'),'utf8'));assert.equal(lock.version,'26.04');for(const h of [lock.archiveSha256,lock.bootstrapSha256,...Object.values(lock.files)])assert.match(h,/^[a-f0-9]{64}$/);
 });
+
+test('runner paths are resolved only in permitted step contexts and both native invocations use the pinned reader',()=>{
+  for(const job of Object.values(w.jobs))assert.doesNotMatch(JSON.stringify(job.env||{}),/\$\{\{\s*runner\./);
+  const native=w.jobs.sign.steps.filter(s=>s.run?.includes('nearly-updater-signer.exe'));
+  assert.equal(native.length,2);
+  for(const step of native)assert.equal(step.env.NEARLY_UPDATER_EXTRACTOR,'${{ runner.temp }}/nearly-tools/7z.exe');
+});
