@@ -4136,9 +4136,12 @@ try {
     if(incomingTransfer?.phase === "pending")await finishIncomingTransfer(incomingTransfer);
     else if(incomingTransfer?.phase !== "dragging" && incomingTransfer?.phase !== "committed")throw Error("Workspace transfer did not commit");
   } else {
-    await initializeUpdateRestart(windowRegistration?.label,()=>settingsAvailable&&!startupFailed&&!previewBootstrap&&!incomingTransfer);
+    const installerQa=await initializeUpdateRestart(windowRegistration?.label,()=>settingsAvailable&&!startupFailed&&!previewBootstrap&&!incomingTransfer);
     await Promise.all(store.workspaces.map(w => registerWorkspace(w.id)));
     initialized = true;
+    // Post-bootstrap acknowledgement is distinct from update probation's
+    // pre-admission health proof. Only opt-in native QA uses this extra signal.
+    if(installerQa&&native&&windowRegistration?.label==="main")await invoke("ack_update_restart_ready",{bootstrap:true});
     openConnection(workspace());
     for (const w of store.workspaces) if (w.connection) {
       void Promise.all([refresh("local", {}, w), refresh("remote", {}, w)]).catch(message);

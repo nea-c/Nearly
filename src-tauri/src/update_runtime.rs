@@ -101,8 +101,8 @@ impl Runtime {
     pub(crate) fn new(startup: Startup) -> Self {
         Self::create(
             startup,
-            crate::startup_update::HANDOFF_RELEASE_VALIDATED
-                && crate::update_package::production_key().is_some(),
+            crate::startup_update::handoff_validated()
+                && crate::update_package::runtime_key().is_some(),
         )
     }
     fn create(startup: Startup, enabled: bool) -> Self {
@@ -322,13 +322,12 @@ impl Runtime {
     }
     #[cfg(windows)]
     fn run_native(&self, startup: Startup) -> Result<(), &'static str> {
-        use crate::update_transaction::{Error, NativeContext, TransactionStore};
         // Both real release gates are checked again immediately before the first
         // native filesystem/process effect. No runtime flag can open this gate.
-        if !crate::startup_update::HANDOFF_RELEASE_VALIDATED {
+        if !crate::startup_update::handoff_validated() {
             return Ok(());
         }
-        let Some(_key) = crate::update_package::production_key() else {
+        let Some(_key) = crate::update_package::runtime_key() else {
             return Ok(());
         };
         if startup == Startup::Invalid {
@@ -337,34 +336,9 @@ impl Runtime {
         // Protocol3 health is observation-only; never enter the protocol2 writer
         // route, even for a legacy health argument with a matching nonce.
         if let Startup::Health(nonce)=&startup{return self.run_supervisor_health(nonce);}
-        self.publish("checking", None);
-        let context =
-            NativeContext::capture_current_install().map_err(|_| "installedContextUnavailable")?;
-        let store = match TransactionStore::open_existing(&context) {
-            Ok(store) => store,
-            Err(Error::Missing) if startup == Startup::Ordinary => {
-                self.publish("idle", None);
-                return Ok(());
-            }
-            Err(_) => return Err("transactionUnavailable"),
-        };
-        let record = store.recovery_hint().map_err(|_| "journalUncertain")?;
-        let Some(record) = record else {
-            if startup == Startup::Ordinary {
-                self.publish("idle", None);
-                return Ok(());
-            }
-            return Err("transactionMissing");
-        };
-        // A persisted Cleaned state is terminal metadata, never cleanup authority.
-        if startup == Startup::Ordinary {
-            if matches!(record.receipt.state, crate::update_cleanup::codec::State::Cleaned | crate::update_cleanup::codec::State::Abandoned) {
-                self.publish("idle", None);
-                return Ok(());
-            }
-            return Err("liveRestartEvidenceMissing");
-        }
-        Err("liveRestartEvidenceMissing")
+        crate::update_recovery_windows::ordinary_startup_allowed().map_err(|_|"transactionUnavailable")?;
+        self.publish("idle", None);
+        Ok(())
     }
 }
 #[cfg(test)]

@@ -36,6 +36,8 @@ mod window_ownership;
 mod window_size;
 mod tab_drag;
 mod startup_update;
+#[cfg(any(test, feature="installer-qa"))]
+mod installer_qa;
 mod version;
 mod update_package;
 mod update_handoff;
@@ -1867,8 +1869,8 @@ fn perform_update_handoff(app:&tauri::AppHandle,label:&str)->Result<(),String>{
 async fn install_startup_update(window:tauri::WebviewWindow,app:tauri::AppHandle)->startup_update::Report{
     let label=window.label().to_string();let state=app.state::<AppState>();
     // Missing trust must fail before any seal, settings cleanup or child launch.
-    if update_package::production_key().is_none(){return state.startup_update.fail(&label,"signingNotConfigured")}
-    if !startup_update::HANDOFF_RELEASE_VALIDATED{return state.startup_update.fail(&label,"installationNotValidated")}
+    if update_package::runtime_key().is_none(){return state.startup_update.fail(&label,"signingNotConfigured")}
+    if !startup_update::handoff_validated(){return state.startup_update.fail(&label,"installationNotValidated")}
     let labels=match begin_native_update(&state){Ok(labels)=>labels,Err(_)=>return state.startup_update.fail(&label,"workInProgress")};
     let token=match state.startup_update.begin_settle(&label,labels){Ok(token)=>token,Err(code)=>{cancel_native_update(&app);return state.startup_update.fail(&label,code)}};
     if app.emit("startup-update-settle",serde_json::json!({"token":token})).is_err(){cancel_native_update(&app);return state.startup_update.fail(&label,"settingsNotSettled")}
@@ -1909,16 +1911,24 @@ fn abort_workspace_transfer(window:tauri::WebviewWindow,app:tauri::AppHandle,tok
 #[tauri::command]
 fn window_taskbar_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<String,String>{let ids=state.ownership.lock().map_err(|_|"Ownership lock failed")?.job_ids(window.label());Ok(format!("{:?}",state.engine.taskbar_state_for(&ids)?).to_lowercase())}
 #[tauri::command]
-fn update_restart_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
+fn update_restart_status(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<serde_json::Value,String>{
     if window.label()!="main"{return Err("Update restart status is main-window only".into());}
     state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_registered(window.label())?;
-    Ok(state.update_restart.status())
+    let value=serde_json::to_value(state.update_restart.status()).map_err(|_|"Update status unavailable")?;
+    #[cfg(all(feature="installer-qa",windows))]
+    {let mut value=value;value["installerQa"]=true.into();return Ok(value)}
+    #[cfg(not(all(feature="installer-qa",windows)))]
+    Ok(value)
 }
 #[tauri::command]
-fn ack_update_restart_ready(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<update_runtime::Report,String>{
+fn ack_update_restart_ready(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<AppState>,bootstrap:Option<bool>)->Result<update_runtime::Report,String>{
     if window.label()!="main"{return Err("Update restart health is main-window only".into());}
     state.ownership.lock().map_err(|_|"Ownership lock failed")?.settings_registered(window.label())?;
-    state.update_restart.ack_ready();Ok(state.update_restart.status())
+    #[cfg(all(feature="installer-qa",windows))]
+    {if !installer_qa::suppress_health(){state.update_restart.ack_ready();}installer_qa::on_ready(window,app,bootstrap==Some(true));}
+    #[cfg(not(all(feature="installer-qa",windows)))]
+    {let _=(app,bootstrap);state.update_restart.ack_ready();}
+    Ok(state.update_restart.status())
 }
 /// Native-only proof created after admission sealing and global idle/settings
 /// drain checks. Renderer commands cannot obtain the private Idle authority.
@@ -1991,6 +2001,9 @@ fn seal_health_shutdown(state:&AppState)->Result<HealthExitSeal,String>{
     Ok(HealthExitSeal{_private:()})
 }
 fn main() {
+    #[cfg(feature="installer-qa")]
+    {#[cfg(windows)] if !installer_qa::authorized(){std::process::exit(78);}
+     #[cfg(not(windows))] std::process::exit(78);}
     #[cfg(windows)]
     if let update_recovery_windows::HelperDispatch::Terminal(code)=update_recovery_windows::dispatch_helper(std::env::args_os()){std::process::exit(code);}
     // Parse native argv before the single-instance plugin can route a launch.
@@ -1999,9 +2012,9 @@ fn main() {
     // get forwarded to a normal instance's renderer.
     if startup==update_runtime::Startup::Invalid{return;}
     let probation=matches!(startup,update_runtime::Startup::Health(_));
-    if probation&&(!startup_update::HANDOFF_RELEASE_VALIDATED||update_package::production_key().is_none()){return;}
+    if probation&&(!startup_update::handoff_validated()||update_package::runtime_key().is_none()){return;}
     #[cfg(windows)]
-    if !probation&&startup_update::HANDOFF_RELEASE_VALIDATED&&update_package::production_key().is_some()
+    if !probation&&startup_update::handoff_validated()&&update_package::runtime_key().is_some()
         &&update_recovery_windows::ordinary_startup_allowed().is_err(){return;}
     #[cfg(windows)]
     if let update_runtime::Startup::Health(nonce)=&startup{

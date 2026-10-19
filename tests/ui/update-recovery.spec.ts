@@ -1,6 +1,6 @@
 import {test,expect,type Page} from '@playwright/test';
 
-async function boot(page:Page,options:{language?:string;label?:string;failSettings?:boolean;holdStatus?:boolean;phase?:string}={}){
+async function boot(page:Page,options:{language?:string;label?:string;failSettings?:boolean;holdStatus?:boolean;phase?:string;installerQa?:boolean}={}){
  await page.addInitScript(options=>{
   window.recovery={calls:[],listeners:{}};
   window.__TAURI__={event:{listen:async(name,callback)=>{window.recovery.listeners[name]=callback;return()=>{};}},core:{invoke:async(cmd,args)=>{
@@ -11,7 +11,7 @@ async function boot(page:Page,options:{language?:string;label?:string;failSettin
    if(cmd==='list_local'||cmd==='list_remote'||cmd==='list_drives')return[];
    if(cmd==='update_restart_status'){
     if(options.holdStatus)return new Promise(resolve=>window.recovery.resolveStatus=resolve);
-    return{phase:options.phase||'idle',revision:0};
+    return{phase:options.phase||'idle',revision:0,...(options.installerQa?{installerQa:true}:{})};
    }
   }}};
  },options);
@@ -47,4 +47,13 @@ test('settings failure never acknowledges restart health',async({page})=>{
 test('secondary windows do not report main restart health',async({page})=>{
  await boot(page,{label:'window-fixture'});await page.waitForTimeout(100);
  expect(await page.evaluate(()=>window.recovery.calls.filter(c=>['ack_update_restart_ready','update_restart_status'].includes(c.cmd)))).toEqual([]);
+});
+test('QA bootstrap acknowledgement follows workspace registration and is separate from health',async({page})=>{
+ await boot(page,{installerQa:true});
+ await expect.poll(()=>page.evaluate(()=>window.recovery.calls.filter(c=>c.cmd==='ack_update_restart_ready').length)).toBe(2);
+ const calls=await page.evaluate(()=>window.recovery.calls);
+ const health=calls.findIndex(c=>c.cmd==='ack_update_restart_ready'&&!c.args);
+ const registered=calls.findIndex(c=>c.cmd==='register_workspace');
+ const bootstrap=calls.findIndex(c=>c.cmd==='ack_update_restart_ready'&&c.args?.bootstrap===true);
+ expect(health).toBeGreaterThan(-1);expect(registered).toBeGreaterThan(health);expect(bootstrap).toBeGreaterThan(registered);
 });

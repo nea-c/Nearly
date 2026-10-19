@@ -58,8 +58,8 @@ impl PinnedRoot {
     }
 }
 pub(crate) fn capture_registered_root() -> Result<PinnedRoot> {
-    if !crate::update_handoff::HANDOFF_RELEASE_VALIDATED
-        || crate::update_package::production_key().is_none()
+    if !crate::startup_update::handoff_validated()
+        || crate::update_package::runtime_key().is_none()
     {
         return Err(Error::Disabled);
     }
@@ -1492,7 +1492,7 @@ fn authenticate_installer(
     if captured != record.installer {
         return Err(Error::Unsafe);
     }
-    let key = crate::update_package::production_key().ok_or(Error::Disabled)?;
+    let key = crate::update_package::runtime_key().ok_or(Error::Disabled)?;
     let proof = crate::update_package::authenticate_snapshot(
         &mut file,
         record.package_signature.as_bytes(),
@@ -1541,6 +1541,14 @@ fn observed_startup_admission(root: &PinnedRoot) -> Result<()> {
         return Err(Error::Busy);
     }
     Ok(())
+}
+#[cfg(feature="installer-qa")]
+pub(crate) fn qa_restored()->bool{
+    (||->Result<bool>{
+        let root=capture_registered_root()?;
+        observed_startup_admission(&root)?;
+        Ok(observe_record(&root)?.is_some_and(|r|!r.abandoned&&r.engine.phase==RecoveryPhase::Restored))
+    })().unwrap_or(false)
 }
 
 struct LivePeer {

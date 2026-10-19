@@ -1,0 +1,70 @@
+name: Manual isolated Windows installer QA
+run-name: Installer QA / ${{ inputs.controller_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      controller_sha:
+        description: Exact reviewed controller SHA, matching this workflow commit
+        type: string
+        required: true
+      confirmation:
+        description: Type installer-qa followed by a space and the exact controller SHA
+        type: string
+        required: true
+permissions: {}
+concurrency:
+  group: nearly-manual-installer-qa
+  cancel-in-progress: false
+jobs:
+  guest:
+    name: Fresh guest / ${{ matrix.scenario }}
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [success, health-failure]
+    permissions:
+      contents: read
+      actions: read
+    env:
+      QA_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      QA_CONFIRMATION: ${{ inputs.confirmation }}
+      QA_SCENARIO: ${{ matrix.scenario }}
+      RUSTUP_TOOLCHAIN: 1.97.1
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require exact manual confirmation before guest preparation
+        run: |
+          node --input-type=module -e "import {validateContext,validateScenario} from './scripts/installer-qa.mjs'; validateContext(process.env); validateScenario(process.env.QA_SCENARIO);"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Safe orchestration unit tests
+        run: node --test tests/installer-qa.test.mjs
+      - name: Prepare pinned cached NSIS tools without installing any runtime
+        run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
+      - name: Prepare locked build dependencies in this fresh guest
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 fetch --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Qualify pinned signed setup and ephemeral QA update/restart/recovery fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/installer-qa.mjs run
+      # Deliberately no upload, release, cache, deployment, or secret-bearing step.
+      # Public summaries contain case status only; fixture binaries and run token
+      # live exclusively on this disposable guest and must never be distributed.

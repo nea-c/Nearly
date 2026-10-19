@@ -56,6 +56,25 @@ impl ReleaseCandidate {
 pub struct TrustedKey { bytes: [u8;42] }
 const PRODUCTION_KEY_BYTES:[u8;42]=[69,100,204,60,239,74,226,200,249,50,76,211,219,189,45,171,194,223,151,77,145,136,167,90,146,246,161,87,252,110,169,52,0,234,165,86,42,84,149,211,117,49];
 pub fn production_key() -> Option<TrustedKey> { Some(TrustedKey{bytes:PRODUCTION_KEY_BYTES}) }
+pub(crate) fn runtime_key()->Option<TrustedKey>{
+    #[cfg(all(feature="installer-qa",windows))]
+    {crate::installer_qa::context().map(|c|TrustedKey{bytes:c.key})}
+    #[cfg(not(all(feature="installer-qa",windows)))]
+    {production_key()}
+}
+#[cfg(all(feature="installer-qa",windows))]
+pub(crate) fn qa_stage()->std::result::Result<(ReleaseCandidate,StagedInstaller),&'static str>{
+    let c=crate::installer_qa::context().ok_or("qaContext")?;
+    let (bytes,signature)=crate::installer_qa::fixture()?;
+    let url="https://github.com/nea-c/Nearly/releases/download/r2.0/";
+    let metadata=serde_json::to_vec(&serde_json::json!({"tag_name":"r2.0","draft":false,"prerelease":false,"html_url":"https://github.com/nea-c/Nearly/releases/tag/r2.0","assets":[{"name":c.plan.target_file,"size":bytes.len(),"browser_download_url":format!("{url}{}",c.plan.target_file)},{"name":c.plan.signature_file,"size":signature.len(),"browser_download_url":format!("{url}{}",c.plan.signature_file)}]})).map_err(|_|"qaMetadata")?;
+    let candidate=ReleaseCandidate::from_github_metadata(&metadata,&c.plan.source_version,Architecture::current().map_err(|e|e.code())?).map_err(|e|e.code())?.ok_or("qaMetadata")?;
+    let key=runtime_key().ok_or("qaKey")?;
+    let parent=crate::update_handoff::installed_executable().map_err(|_|"qaImage")?;
+    let staged=win::stage_in(parent.parent().ok_or("qaImage")?,&bytes,signature,&candidate,&key,&AtomicBool::new(false)).map_err(|e|e.code())?;
+    if staged.proof.as_ref().ok_or("qaPayload")?.payload_sha256()!=c.plan.payload_sha256{return Err("qaPayload")}
+    Ok((candidate,staged))
+}
 
 /// Constructed only after both minisign signatures and every binding verify.
 /// Journal deserialization must never manufacture this trusted type.
@@ -272,10 +291,22 @@ mod win {
         Ok(guards)
     }
     pub(super) fn stage_in(parent:&Path,bytes:&[u8],signature:Vec<u8>,candidate:&ReleaseCandidate,key:&TrustedKey,cancel:&AtomicBool)->Result<StagedInstaller> {
-        let guards=directories(parent)?;
+        // Recovery authenticates the canonical signed asset name. Exclusive
+        // creation keeps an existing/foreign file from being overwritten.
+        let name=format!("Nearly_{}_{}-setup.exe",candidate.display_version(),candidate.arch.label());
+        stage_named(parent,&name,bytes,signature,candidate,key,cancel)
+    }
+    // Retired protocol2 unit fixtures still explicitly exercise their old
+    // nonce-named contract. Production and protocol3 use stage_in above.
+    #[cfg(test)]
+    pub(super) fn legacy_fixture_stage(parent:&Path,bytes:&[u8],signature:Vec<u8>,candidate:&ReleaseCandidate,key:&TrustedKey,cancel:&AtomicBool)->Result<StagedInstaller>{
         let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|_|PackageError::Staging)?;
         let nonce:String=nonce.iter().map(|b|format!("{b:02x}")).collect();
-        let path=parent.join(format!("Nearly-update-{}-{nonce}-setup.exe",candidate.version));
+        stage_named(parent,&format!("Nearly-update-{}-{nonce}-setup.exe",candidate.version),bytes,signature,candidate,key,cancel)
+    }
+    fn stage_named(parent:&Path,name:&str,bytes:&[u8],signature:Vec<u8>,candidate:&ReleaseCandidate,key:&TrustedKey,cancel:&AtomicBool)->Result<StagedInstaller>{
+        let guards=directories(parent)?;
+        let path=parent.join(name);
         cancelled(cancel)?;
         let mut file=OpenOptions::new().read(true).write(true).access_mode(0xc0000000|DELETE_ACCESS).share_mode(1).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).create_new(true).open(&path).map_err(|_|PackageError::Staging)?;
         let owned=match identity(&file) {Ok(id)=>id,Err(error)=>{remove(&file);return Err(error)}};
@@ -329,7 +360,7 @@ mod tests {
             signature:Url::parse(&format!("https://github.com/nea-c/Nearly/releases/download/{tag}/{name}.sig")).unwrap(),size:bytes.len()};
         let comment=format!("version:{version}\tfile:{name}\tpayload-sha256:{payload_hash}\tupdater-protocol:3");
         let (key,signature)=signed_document(&bytes,&comment,true);
-        let stage=win::stage_in(parent,&bytes,signature,&candidate,&key,&AtomicBool::new(false)).unwrap();
+        let stage=win::legacy_fixture_stage(parent,&bytes,signature,&candidate,&key,&AtomicBool::new(false)).unwrap();
         (stage,candidate,key)
     }
     #[test]
@@ -623,7 +654,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let mut random=[0u8;8];getrandom::fill(&mut random).unwrap();let dir=std::env::temp_dir().join(format!("Nearly-package-test-{:x}",u64::from_le_bytes(random)));std::fs::create_dir(&dir).unwrap();
         let sentinel=dir.join("settings.json");std::fs::write(&sentinel,b"preserve").unwrap();let c=candidate();let bytes=pe();let(k,s)=signed(&bytes,"version:0.3.0",true);
-        let mut staged=win::stage_in(&dir,&bytes,s.clone(),&c,&k,&AtomicBool::new(false)).unwrap();let path=staged.path().to_owned();assert_eq!(path.parent(),Some(dir.as_path()));staged.reverify(&c,&k).unwrap();
+        let mut staged=win::stage_in(&dir,&bytes,s.clone(),&c,&k,&AtomicBool::new(false)).unwrap();let path=staged.path().to_owned();assert_eq!(path.parent(),Some(dir.as_path()));assert_eq!(path.file_name().unwrap(),"Nearly_r0.3_x64-setup.exe");staged.reverify(&c,&k).unwrap();
         {
             let snapshot=staged.transaction_snapshot(&c,&k).unwrap();
             assert_eq!(snapshot.path(),path);assert_eq!(snapshot.package().payload_sha256(),sha256(fixture_payload()));
@@ -640,6 +671,9 @@ mod tests {
         // Match NSIS exehead myOpenFile: GENERIC_READ, FILE_SHARE_READ only.
         let mut nsis_read=std::fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();let mut check=Vec::new();nsis_read.read_to_end(&mut check).unwrap();assert_eq!(check,bytes);drop(nsis_read);
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());assert!(std::fs::remove_file(&path).is_err());assert!(std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_err());drop(staged);assert!(!path.exists());
+        std::fs::write(&path,b"foreign retained package").unwrap();
+        assert!(matches!(win::stage_in(&dir,&bytes,s.clone(),&c,&k,&AtomicBool::new(false)),Err(PackageError::Staging)));
+        assert_eq!(std::fs::read(&path).unwrap(),b"foreign retained package");std::fs::remove_file(&path).unwrap();
         assert!(matches!(win::stage_in(&dir,&bytes,s,&c,&k,&AtomicBool::new(true)),Err(PackageError::Cancelled)));assert_eq!(std::fs::read(&sentinel).unwrap(),b"preserve");std::fs::remove_file(sentinel).unwrap();std::fs::remove_dir(dir).unwrap();
     }
     #[cfg(windows)]

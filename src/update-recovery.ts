@@ -27,16 +27,18 @@ function accept(value:UpdateRestartReport|undefined){
  // dismiss evidence loss. Native code also fences all later cleanup transitions.
  if(value.phase==='recoveryRequired'){recovery=true;render();settled?.(Error('Update confirmation requires repair'));}
 }
-export async function initializeUpdateRestart(label:string|undefined,ready:()=>boolean):Promise<void>{
- if(started||label!=='main'||!window.__TAURI__)return;
+export async function initializeUpdateRestart(label:string|undefined,ready:()=>boolean):Promise<boolean>{
+ if(started||label!=='main'||!window.__TAURI__)return false;
+ let installerQa=false;
  started=true;
  window.addEventListener('pagehide',()=>{disposed=true;stop?.();observer?.disconnect();},{once:true});
  observer=new MutationObserver(render);observer.observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
  try{
   stop=await window.__TAURI__.event?.listen<UpdateRestartReport>('update-restart-status',event=>accept(event.payload));
-  if(disposed){stop?.();return;}
+  if(disposed){stop?.();return false;}
   // Subscribe first: the revision check protects a newer event from this read.
-  accept(await invoke('update_restart_status'));
+  const status=await invoke('update_restart_status');
+  installerQa=status?.installerQa===true;accept(status);
   // Background windows may suspend animation frames. Only actual update
   // probation needs a painted readiness proof; ordinary startup must progress.
   if(probation)await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
@@ -49,4 +51,5 @@ export async function initializeUpdateRestart(label:string|undefined,ready:()=>b
  // or opened a connection. Only a native authenticated Success releases this.
  if(recovery)throw Error('Update confirmation requires repair');
  if(probation)await new Promise<void>((resolve,reject)=>{settled=error=>{settled=undefined;error?reject(error):resolve();};});
+ return installerQa;
 }
