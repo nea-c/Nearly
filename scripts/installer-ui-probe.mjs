@@ -1,4 +1,4 @@
-// Disposable hosted UI diagnosis with an invalid mock image. Never qualification.
+// Disposable hosted UI diagnosis with plain-text mock bytes. Never qualification.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -23,8 +23,8 @@ function safePath(value){
   return value;
 }
 export function mockPayload(){
-  // No sections, optional header, entry point or executable code: not launchable.
-  const bytes=Buffer.alloc(80);bytes.writeUInt16LE(0x5a4d,0);bytes.writeUInt32LE(64,60);bytes.writeUInt32LE(0x4550,64);bytes.writeUInt16LE(0x8664,68);return bytes;
+  // Fixed shell-link control: no executable header, entry point or code.
+  return Buffer.from('non-executable generated shell-link control','utf8');
 }
 export function renderProbeTemplate(template,{runRoot,tools,icon}){
   for(const value of [runRoot,tools,icon])safePath(value);
