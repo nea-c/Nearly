@@ -1,5 +1,93 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
+
+fn retained_test_peer() -> LivePeer {
+    let path = std::env::current_exe().unwrap();
+    let proof = FileProof::open(&path, false).unwrap().1;
+    LivePeer::open(&current_process_identity().unwrap(), &path, &proof).unwrap()
+}
+
+#[test]
+fn live_retained_child_waits_for_an_observed_clean_foreign_set() {
+    let fixture = Fixture::new();
+    let root = PinnedRoot::fixture(&fixture.0).unwrap();
+    let peer = retained_test_peer();
+    let calls = Cell::new(0);
+    let pauses = Cell::new(0);
+    let result = settled_no_file_users_with(&root, Some(&peer), |root, peer| {
+        root.verify()?;
+        assert_eq!(peer.unwrap().exited()?, None);
+        calls.set(calls.get() + 1);
+        Ok(calls.get() == 3)
+    }, || Duration::from_millis(pauses.get() * 25), || pauses.set(pauses.get() + 1));
+    assert!(result.unwrap());
+    assert_eq!(calls.get(), 3);
+    assert_eq!(pauses.get(), 2);
+}
+
+#[test]
+fn persistent_foreign_users_exhaust_one_fixed_deadline_and_refuse() {
+    let fixture = Fixture::new();
+    let root = PinnedRoot::fixture(&fixture.0).unwrap();
+    let peer = retained_test_peer();
+    let now = Cell::new(0);
+    let calls = Cell::new(0);
+    let result = settled_no_file_users_with(&root, Some(&peer), |_, _| {
+        calls.set(calls.get() + 1); Ok(false)
+    }, || Duration::from_millis(now.get()), || now.set(now.get() + 25));
+    assert!(!result.unwrap());
+    assert_eq!(now.get(), 2000);
+    assert_eq!(calls.get(), 81);
+    assert_eq!(std::fs::read(fixture.0.join("Nearly.exe")).unwrap(), b"old image");
+}
+
+#[test]
+fn uncertain_file_users_refuse_without_waiting_or_authorizing_effects() {
+    let fixture = Fixture::new();
+    let root = PinnedRoot::fixture(&fixture.0).unwrap();
+    let peer = retained_test_peer();
+    let result = settled_no_file_users_with(&root, Some(&peer), |_, _| Err(Error::Uncertain),
+        || Duration::ZERO, || panic!("uncertainty must not be retried"));
+    assert!(matches!(result, Err(Error::Uncertain)));
+    assert_eq!(std::fs::read(fixture.0.join("Nearly.exe")).unwrap(), b"old image");
+}
+
+#[test]
+fn no_retained_child_does_not_grant_an_observation_wait() {
+    let fixture = Fixture::new();
+    let root = PinnedRoot::fixture(&fixture.0).unwrap();
+    assert!(!settled_no_file_users_with(&root, None, |_, _| Ok(false),
+        || Duration::ZERO, || panic!("no retained child")).unwrap());
+}
+
+#[test]
+fn file_user_hints_are_fixed_and_cannot_exclude_foreign_identities() {
+    let own = ProcessIdentity { pid: 1, created: 100 };
+    let child = ProcessIdentity { pid: 2, created: 200 };
+    let mut entry: RmInfo = unsafe { std::mem::zeroed() };
+    entry.process.pid = child.pid;
+    entry.process.created.dwLowDateTime = child.created as u32;
+    assert!(rm_identity_allowed(&entry, &own, Some(&child)));
+    entry.process.created.dwLowDateTime += 1;
+    assert!(!rm_identity_allowed(&entry, &own, Some(&child)));
+    assert_eq!(file_user_hint(&entry, Some(&child)), "childIdentityMismatch");
+    entry.process.pid = 3;
+    let fill = |entry: &mut RmInfo, name: &str| {
+        entry.application.fill(0);
+        for (a, b) in entry.application.iter_mut().zip(name.encode_utf16()) { *a = b; }
+    };
+    fill(&mut entry, "MsMpEng.exe");
+    assert_eq!(file_user_hint(&entry, Some(&child)), "scannerHint");
+    assert!(!rm_identity_allowed(&entry, &own, Some(&child)));
+    fill(&mut entry, "msedgewebview2.exe");
+    assert_eq!(file_user_hint(&entry, Some(&child)), "webviewHint");
+    assert!(!rm_identity_allowed(&entry, &own, Some(&child)));
+    fill(&mut entry, "C:\\private\\unknown-token.exe");
+    assert_eq!(file_user_hint(&entry, Some(&child)), "unknown");
+    assert!(!rm_identity_allowed(&entry, &own, Some(&child)));
+}
+
 static NEXT: AtomicUsize = AtomicUsize::new(1);
 struct Fixture(PathBuf);
 impl Fixture {

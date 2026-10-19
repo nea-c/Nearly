@@ -111,6 +111,16 @@ test('QA trace bounds and incomplete final-line handling fail closed',()=>{
   assert.throws(()=>qa.decodeQaTrace(Buffer.from((row+'\n').repeat(65)),42));
   assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{}\n'),42));
 });
+test('QA file-user hints accept four fixed codes and reject raw process, service and path names',()=>{
+  for(const code of ['scannerHint','webviewHint','childIdentityMismatch','unknown']){
+    const row={event:'fileUserHint',code,version:'2.0.0',pid:42};
+    assert.deepEqual(qa.decodeQaTrace(Buffer.from(JSON.stringify(row)+'\n'),42),[row]);
+  }
+  for(const code of ['MsMpEng','WinDefend','msedgewebview2','C:\\Windows\\System32\\scanner.exe','scanner.exe','scannerHint\n','a'.repeat(65)]){
+    assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event:'fileUserHint',code,version:'2.0.0',pid:42})+'\n'),42));
+  }
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event:'fileUserHint',code:'scannerHint',version:'2.0.0',pid:42,process:'scanner.exe'})+'\n'),42));
+});
 test('QA trace collection reads at most eight exact PID files with a fixed size limit',async()=>{
   assert.equal(typeof qa.collectQaTraces,'function');
   const files=['authorization.json','qa-trace-0.jsonl','qa-trace-01.jsonl','qa-trace-4294967296.jsonl','qa-trace-42.jsonl\n','../qa-trace-42.jsonl',...Array.from({length:10},(_,i)=>`qa-trace-${i+1}.jsonl`)];

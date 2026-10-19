@@ -2155,6 +2155,42 @@ struct RmInfo {
     session: u32,
     restartable: i32,
 }
+fn rm_identity_allowed(entry: &RmInfo, supervisor: &ProcessIdentity, child: Option<&ProcessIdentity>) -> bool {
+    [Some(supervisor), child].into_iter().flatten().any(|identity| {
+        identity.pid == entry.process.pid
+            && identity.created == ((entry.process.created.dwHighDateTime as u64) << 32
+                | entry.process.created.dwLowDateTime as u64)
+    })
+}
+// Diagnostic hints only: never consulted by authorization or file effects.
+#[cfg(any(test, feature="installer-qa"))]
+fn file_user_hint(entry: &RmInfo, child: Option<&ProcessIdentity>) -> &'static str {
+    if child.is_some_and(|identity| identity.pid == entry.process.pid
+        && identity.created != ((entry.process.created.dwHighDateTime as u64) << 32
+            | entry.process.created.dwLowDateTime as u64)) {
+        return "childIdentityMismatch";
+    }
+    let text = |s: &[u16]| String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())]).to_ascii_lowercase();
+    let application = text(&entry.application);
+    let service = text(&entry.service);
+    if matches!(application.as_str(), "msmpeng.exe" | "antimalware service executable" | "microsoft defender antivirus service") || service == "windefend" {
+        "scannerHint"
+    } else if matches!(application.as_str(), "msedgewebview2.exe" | "msedgewebview2" | "microsoft edge webview2") {
+        "webviewHint"
+    } else {
+        "unknown"
+    }
+}
+#[cfg(feature="installer-qa")]
+fn trace_foreign_file_user(entry: &RmInfo, child: Option<&ProcessIdentity>) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static REPORTED: AtomicU8 = AtomicU8::new(0);
+    let hint = file_user_hint(entry, child);
+    let bit = match hint { "scannerHint" => 1, "webviewHint" => 2, "childIdentityMismatch" => 4, _ => 8 };
+    if REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        crate::installer_qa::trace("fileUserHint", hint);
+    }
+}
 #[link(name = "rstrtmgr")]
 unsafe extern "system" {
     fn RmStartSession(session: *mut u32, flags: u32, key: *mut u16) -> u32;
@@ -2280,34 +2316,42 @@ fn no_file_users(root: &PinnedRoot, allowed: Option<&LivePeer>) -> Result<bool> 
     // enters before Tauri/normal operations, so only this exact native process
     // and (during probation) its exact retained child may be excluded.
     let supervisor = current_process_identity()?;
-    Ok(information[..count as usize].iter().all(|p| {
-        [Some(&supervisor), allowed.map(|p| &p.identity)]
-            .into_iter()
-            .flatten()
-            .any(|a| {
-                a.pid == p.process.pid
-                    && a.created
-                        == ((p.process.created.dwHighDateTime as u64) << 32
-                            | p.process.created.dwLowDateTime as u64)
-            })
-    }))
+    let mut clean = true;
+    for entry in &information[..count as usize] {
+        if !rm_identity_allowed(entry, &supervisor, allowed.map(|p| &p.identity)) {
+            clean = false;
+            #[cfg(feature="installer-qa")]
+            trace_foreign_file_user(entry, allowed.map(|p| &p.identity));
+        }
+    }
+    Ok(clean)
 }
-// Restart Manager may briefly retain an exited process or report a scanner.
+// Restart Manager may briefly retain an exited process or report a scanner,
+// including while the exact retained child is still starting.
 // Only observation is retried; every effect still requires an empty foreign set.
 fn settled_no_file_users(root: &PinnedRoot, allowed: Option<&LivePeer>) -> Result<bool> {
-    let may_wait = allowed
-        .map(|p| p.exited())
-        .transpose()?
-        .is_some_and(|exit| exit.is_some());
     let start = Instant::now();
+    settled_no_file_users_with(root, allowed, no_file_users, || start.elapsed(), || {
+        std::thread::sleep(Duration::from_millis(25));
+    })
+}
+fn settled_no_file_users_with(
+    root: &PinnedRoot,
+    allowed: Option<&LivePeer>,
+    mut observe: impl FnMut(&PinnedRoot, Option<&LivePeer>) -> Result<bool>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut pause: impl FnMut(),
+) -> Result<bool> {
+    if let Some(peer) = allowed { peer.exited()?; }
+    let may_wait = allowed.is_some();
     loop {
-        if no_file_users(root, allowed)? {
+        if observe(root, allowed)? {
             return Ok(true);
         }
-        if !may_wait || start.elapsed() >= Duration::from_secs(2) {
+        if !may_wait || elapsed() >= Duration::from_secs(2) {
             return Ok(false);
         }
-        std::thread::sleep(Duration::from_millis(25));
+        pause();
     }
 }
 impl RecoverySession {
