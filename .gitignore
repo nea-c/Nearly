@@ -136,3 +136,4 @@ Thumbs.db
 !/scripts/production-build-policy.mjs
 !/scripts/installer-qa-ui.ps1
 !/scripts/installer-qa-evidence.mjs
+!/scripts/installer-ui-probe.mjs

@@ -1,0 +1,74 @@
+name: Manual mock-payload installer UI diagnosis
+run-name: Installer UI diagnosis / ${{ inputs.controller_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      controller_sha:
+        description: Exact reviewed controller SHA matching this workflow commit
+        type: string
+        required: true
+      confirmation:
+        description: Type installer-qa followed by a space and the exact controller SHA
+        type: string
+        required: true
+permissions: {}
+concurrency:
+  group: nearly-manual-installer-ui-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    name: Mock UI diagnosis / ${{ matrix.navigation }}
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        navigation: [Click, Command]
+    permissions:
+      contents: read
+    env:
+      QA_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      QA_CONFIRMATION: ${{ inputs.confirmation }}
+      QA_SCENARIO: success
+      QA_DESTINATION: custom
+      QA_UI_PROBE: navigation-only
+      QA_PROBE_NAVIGATION: ${{ matrix.navigation }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require exact manual authorization
+        id: authorized
+        run: |
+          node --input-type=module -e "import {validateContext} from './scripts/installer-qa.mjs'; import {validateNavigation} from './scripts/installer-ui-probe.mjs'; validateContext(process.env); validateNavigation(process.env.QA_PROBE_NAVIGATION);"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pure diagnostic renderer and workflow regression checks
+        run: node --test tests/installer-probe.test.mjs
+      - name: Prepare checksum-pinned cached NSIS build tools
+        run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
+      - name: Diagnose actual installer template using a nonlaunchable mock payload
+        run: node scripts/installer-ui-probe.mjs run
+      - name: Export sanitized diagnostic evidence only
+        id: evidence
+        if: always() && steps.authorized.outcome == 'success'
+        run: node scripts/installer-qa-evidence.mjs
+      - name: Retain diagnostic screenshots and bounded public records
+        if: always() && steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nearly-mock-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.navigation }}
+          path: ${{ runner.temp }}/nearly-installer-qa-${{ github.run_id }}-${{ github.run_attempt }}/public-evidence/
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+      # This is UI diagnosis only. No app build, app launch, signing, historical
+      # artifact download, or installer/update qualification is performed.
