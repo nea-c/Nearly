@@ -122,12 +122,12 @@ test('QA file-user hints accept four fixed codes and reject raw process, service
   assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event:'fileUserHint',code:'scannerHint',version:'2.0.0',pid:42,process:'scanner.exe'})+'\n'),42));
 });
 test('QA peer and supervisor diagnostics accept only their fixed event-specific codes',()=>{
-  const mapping={peerObservation:['pathQueryFailed','exitAfterPathFailure'],supervisorError:['parent','commit','child','worker','fileUsers','idle','tuple','exitRequest']};
+  const mapping={peerObservation:['pathQueryFailed','exitAfterPathFailure','pathFailureStillLive','identityQueryFailed'],supervisorError:['parent','commit','child','worker','fileUsers','idle','tuple','exitRequest']};
   for(const [event,codes]of Object.entries(mapping))for(const code of codes){
     const row={event,code,version:'2.0.0',pid:42};
     assert.deepEqual(qa.decodeQaTrace(Buffer.from(JSON.stringify(row)+'\n'),42),[row]);
   }
-  for(const [event,code]of [['peerObservation','parent'],['supervisorError','pathQueryFailed'],['peerObservation','unknown'],['supervisorError','ERROR_ACCESS_DENIED'],['supervisorError','C:\\private\\Nearly.exe'],['peerObservation','app.exe'],['supervisorError','a'.repeat(65)]]){
+  for(const [event,code]of [['peerObservation','parent'],['supervisorError','pathQueryFailed'],['supervisorError','pathFailureStillLive'],['supervisorError','identityQueryFailed'],['peerObservation','unknown'],['supervisorError','ERROR_ACCESS_DENIED'],['supervisorError','C:\\private\\Nearly.exe'],['peerObservation','app.exe'],['supervisorError','a'.repeat(65)]]){
     assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event,code,version:'2.0.0',pid:42})+'\n'),42));
   }
 });

@@ -55,8 +55,9 @@ hints once per process (scanner, WebView, child identity mismatch, unknown).
 Hints never authorize exclusions and never contain raw process/service names.
 
 If a retained process exits between the live wait and a failed image-path query,
-exit is accepted only after the same held handle again proves its exact creation
-identity, signaled termination and a valid exit code. A live query failure,
+one wait with a one-second timeout on the same held handle allows teardown to
+finish. Exit is accepted only after signaled termination, revalidated exact
+creation identity and a valid exit code. A still-live query failure,
 mismatching successful path, changed identity or uncertain result still refuses.
 QA diagnostics include fixed failure-site and exit-race codes. This handling
 does not bypass file-user, root, snapshot or mutation checks.

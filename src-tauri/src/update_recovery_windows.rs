@@ -1608,7 +1608,7 @@ impl LivePeer {
     fn exited(&self) -> Result<Option<u32>> {
         observe_retained_exit(&self.identity, &self.path,
             || process_identity(self.process.0, self.identity.pid),
-            || match unsafe { WaitForSingleObject(self.process.0, 0) } {
+            |milliseconds| match unsafe { WaitForSingleObject(self.process.0, milliseconds) } {
                 0 => Ok(true), 258 => Ok(false), _ => Err(Error::Uncertain),
             },
             || process_path(self.process.0),
@@ -1626,13 +1626,22 @@ fn observe_retained_exit(
     expected: &ProcessIdentity,
     expected_path: &Path,
     mut identity: impl FnMut() -> Result<ProcessIdentity>,
-    mut signaled: impl FnMut() -> Result<bool>,
+    mut signaled: impl FnMut(u32) -> Result<bool>,
     path: impl FnOnce() -> Result<PathBuf>,
     mut exit_code: impl FnMut() -> Result<u32>,
 ) -> Result<Option<u32>> {
-    if identity()? != *expected { return Err(Error::Uncertain); }
+    let verify_identity = |observed: Result<ProcessIdentity>| -> Result<()> {
+        let observed = observed.map_err(|error| {
+            #[cfg(feature="installer-qa")]
+            crate::installer_qa::trace("peerObservation", "identityQueryFailed");
+            error
+        })?;
+        if observed != *expected { return Err(Error::Uncertain); }
+        Ok(())
+    };
+    verify_identity(identity())?;
     let mut exited_after_path_failure = false;
-    if !signaled()? {
+    if !signaled(0)? {
         match path() {
             Ok(observed) => {
                 if observed != expected_path { return Err(Error::Uncertain); }
@@ -1641,11 +1650,15 @@ fn observe_retained_exit(
             Err(error) => {
                 #[cfg(feature="installer-qa")]
                 crate::installer_qa::trace("peerObservation", "pathQueryFailed");
-                // The retained object can terminate between the live wait and
-                // path query. Recheck that same handle; never reopen by PID or
-                // accept a failed/mismatching path as proof of a live peer.
-                if identity()? != *expected { return Err(Error::Uncertain); }
-                if !signaled()? { return Err(error); }
+                // Image queries can fail while the retained object is still
+                // tearing down. Wait once on that same handle, then revalidate
+                // its identity. A timeout/error never authorizes a live peer.
+                if !signaled(1000)? {
+                    #[cfg(feature="installer-qa")]
+                    crate::installer_qa::trace("peerObservation", "pathFailureStillLive");
+                    return Err(error);
+                }
+                verify_identity(identity())?;
                 exited_after_path_failure = true;
             }
         }
@@ -2156,7 +2169,7 @@ fn await_parent_exit(parent: &LivePeer, events: &RecoveryEvents, timeout: Durati
         if events.abort.is_set()? {
             return Err(Error::Unsafe);
         }
-        if parent.exited()?.is_some() {
+        if supervisor_observation(parent.exited(), "parent")?.is_some() {
             return if events.commit.is_set()? {
                 Ok(())
             } else {
