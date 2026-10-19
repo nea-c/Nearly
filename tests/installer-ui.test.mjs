@@ -5,6 +5,93 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+test('failure inventory emits only bounded IDs and known control kinds, never window text',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public sealed class WindowChangedException:Exception{}
+ public static string Class(IntPtr h,int pid){if(h==(IntPtr)3)throw new WindowChangedException();return h==(IntPtr)2?"Button":"sensitive arbitrary class";}
+ public static int GetDlgCtrlID(IntPtr h){return h==(IntPtr)2?1001:int.MaxValue;}
+ public static bool IsWindowEnabled(IntPtr h){return true;}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Failure-ControlSnapshot'},$true)
+Invoke-Expression $fn[0].Extent.Text
+function Controls {return @([IntPtr]2,[IntPtr]3,[IntPtr]4)}
+$ownedProcess=[pscustomobject]@{Id=7}
+$records=@(Failure-ControlSnapshot ([IntPtr]1))
+if($records.Count -ne 2 -or $records[0].kind -cne 'button' -or $records[0].id -ne 1001 -or $records[1].kind -cne 'other' -or $null -ne $records[1].id){throw 'Unsafe or incorrect control inventory'}
+$json=ConvertTo-Json -InputObject $records -Compress
+if($json.Contains('sensitive') -or $json.Contains('text')){throw 'Arbitrary control text leaked'}
+'Bounded control inventory passed'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Bounded control inventory passed/);
+});
+test('UI wait distinguishes Boolean readiness, zero handles and transition records',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Wait-Ui'},$true)
+Invoke-Expression $fn[0].Extent.Text
+function Assert-Process {}
+$ready=Wait-Ui {$true} 1
+if($ready -isnot [bool] -or !$ready){throw 'Boolean true was not accepted'}
+$script:probes=0
+$handle=Wait-Ui {$script:probes++;if($script:probes -eq 1){return [IntPtr]::Zero};return [IntPtr]7} 1
+if($handle -ne [IntPtr]7 -or $script:probes -ne 2){throw 'Zero handle was accepted'}
+$script:probes=0
+$ready=Wait-Ui {$script:probes++;return $script:probes -gt 1} 1
+if(!$ready -or $script:probes -ne 2){throw 'Boolean false was accepted'}
+$transition=Wait-Ui {@{kind='accepted'}} 1
+if($transition.kind -cne 'accepted'){throw 'Transition record was lost'}
+$rejected=$false;try{Wait-Ui {'unexpected string'} 1}catch{$rejected=$_.Exception.Message -match 'Unsupported owned UI wait result type'}
+if(!$rejected){throw 'Unexpected wait result type was accepted'}
+'Typed UI wait readiness passed'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Typed UI wait readiness passed/);
+});
+test('read-only UI waits re-enumerate a control that expires during page transition',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public sealed class WindowChangedException:Exception{}
+ public static int Queries=0;
+ public static string Class(IntPtr h,int pid){Queries++;if(Queries==1)throw new WindowChangedException();return "Button";}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Wait-Ui'},$true)
+Invoke-Expression $fn[0].Extent.Text
+function Assert-Process {}
+function Controls {return [IntPtr]2}
+$ownedProcess=[pscustomobject]@{Id=7};$main=[IntPtr]1
+Wait-Ui { $all=@(Controls $main | Where-Object {[NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button'});if($all.Count -eq 1){return $true} } | Out-Null
+if([NearlyOwnedUi]::Queries -lt 2){throw 'Expired control was not re-enumerated'}
+$rejected=$false;try{Wait-Ui {throw 'Unrelated failure'} 1}catch{$rejected=$_.Exception.Message -match 'Unrelated failure'}
+if(!$rejected){throw 'Unrelated errors must not be retried or swallowed'}
+$rejected=$false;try{Wait-Ui {throw [NearlyOwnedUi+WindowChangedException]::new()} 1}catch{$rejected=$_.Exception.Message -match 'Bounded owned installer UI wait timed out'}
+if(!$rejected){throw 'Persistent ownership loss must time out, never pass'}
+'Page-transition control lifetime contract passed'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Page-transition control lifetime contract passed/);
+});
 test('owned visibility avoids the initial hidden startup override without repositioning windows',{skip:process.platform!=='win32'},()=>{
   // Exercise the actual C# wrapper with native declarations replaced by a
   // pure API-contract model. No user32 method or desktop is invoked.
