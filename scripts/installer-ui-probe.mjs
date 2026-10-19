@@ -3,11 +3,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
-import {validateContext,createPlan} from './installer-qa.mjs';
+import {validateContext,createPlan,settingsFixture} from './installer-qa.mjs';
 import {requireCachedTools} from './build-installer.mjs';
+import {instrumentProbeTemplate} from './installer-probe-codes.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const fail=message=>{throw Error(message);};
 export function validateNavigation(value){if(!['Click','Command'].includes(value))fail('Select exactly Click or Command');return value;}
+export function validateProbeKind(kind,navigation){
+  validateNavigation(navigation);
+  if(!['lifecycle','boundary'].includes(kind)||(kind==='boundary'&&navigation!=='Command'))fail('Select lifecycle or the Command-only boundary diagnostic');
+  return kind;
+}
 function safePath(value){
   if(typeof value!=='string'||!/^[A-Za-z]:\\/.test(value)||/[\x00-\x1f$"<>|?*]/.test(value)||value.includes('/')||value.slice(2).includes(':')||path.win32.normalize(value)!==value||value.split('\\').some(part=>part==='.'||part==='..'||/[. ]$/.test(part)))fail('Unsafe NSIS probe path');
   return value;
@@ -32,14 +38,15 @@ export function renderProbeTemplate(template,{runRoot,tools,icon}){
   if(rendered.includes('{{')||rendered.includes('}}')||Object.keys(values).some(field=>seen.get(field)!==(field==='installer_icon'?2:1)))fail('Missing or unsupported installer placeholder');
   return rendered;
 }
-export function probeSummary(context,navigation,uiSucceeded){
-  validateNavigation(navigation);
-  return {schemaVersion:2,controllerSha:context.controllerSha,scenario:'success',destinationKind:'custom',passed:false,cases:[{case:`diagnostic-mock-${navigation.toLowerCase()}-not-qualification`,passed:uiSucceeded===true}]};
+export function probeSummary(context,navigation,uiSucceeded,lifecycleSucceeded=false,kind='lifecycle'){
+  validateProbeKind(kind,navigation);
+  const label=kind==='boundary'?'-boundary':'';
+  return {schemaVersion:2,controllerSha:context.controllerSha,scenario:'success',destinationKind:'custom',passed:false,cases:[{case:`diagnostic-mock-${navigation.toLowerCase()}${label}-not-qualification`,passed:uiSucceeded===true&&(kind==='boundary'||lifecycleSucceeded===true)}]};
 }
 export function createProbeContext(e,platform=process.platform){
-  const context=validateContext(e,platform),navigation=validateNavigation(e.QA_PROBE_NAVIGATION);
+  const context=validateContext(e,platform),navigation=validateNavigation(e.QA_PROBE_NAVIGATION),kind=validateProbeKind(e.QA_PROBE_KIND,navigation);
   if(e.QA_DESTINATION!=='custom'||e.QA_SCENARIO!=='success'||e.QA_UI_PROBE!=='navigation-only')fail('Diagnostic requires the explicitly marked custom fresh guest');
-  return {context,navigation,plan:createPlan(context,'custom')};
+  return {context,navigation,kind,plan:createPlan(context,'custom')};
 }
 async function execute(command,args,{env=process.env,timeoutMs=120000}={}){
   await new Promise((resolve,reject)=>{
@@ -50,13 +57,13 @@ async function execute(command,args,{env=process.env,timeoutMs=120000}={}){
   });
 }
 export async function runProbe(e=process.env){
-  const {context,navigation,plan}=createProbeContext(e);
+  const {context,navigation,kind,plan}=createProbeContext(e);
   const env={...e};for(const key of Object.keys(env))if(/^(?:GH_TOKEN|GITHUB_TOKEN|TAURI_(?:SIGNING_|PRIVATE_KEY|WINDOWS_CERTIFICATE)|NEARLY_QA_)/.test(key))delete env[key];
   const guest=path.join(root,'scripts','installer-qa-guest.ps1');
   // The existing guard checks fresh filesystem/registry/desktop and exact SHA
   // before either the owned run directory or candidate parent is created.
   await execute('pwsh',['-NoProfile','-NonInteractive','-File',guest,'-Action','preflight','-RunRoot',plan.runRoot],{env});
-  await fs.mkdir(plan.runRoot);let uiSucceeded=false;
+  await fs.mkdir(plan.runRoot);let uiSucceeded=false,lifecycleSucceeded=false;
   try{
     await execute('git',['diff','--exit-code','HEAD','--','src-tauri/windows/installer.nsi'],{env});
     await execute('pwsh',['-NoProfile','-NonInteractive','-Command','if ((git rev-parse HEAD) -cne $env:QA_CONTROLLER_SHA) { throw "Checkout differs from exact controller" }'],{env});
@@ -65,16 +72,28 @@ export async function runProbe(e=process.env){
     const template=await fs.readFile(path.join(root,'src-tauri','windows','installer.nsi'),'utf8');
     const rendered=renderProbeTemplate(template,{runRoot:plan.runRoot,tools,icon:path.join(root,'src-tauri','icons','icon.ico')});
     await fs.writeFile(path.join(plan.runRoot,'mock-payload.exe'),mockPayload(),{flag:'wx'});
-    const source=path.join(plan.runRoot,'diagnostic.nsi');await fs.writeFile(source,rendered,{flag:'wx'});
+    if(kind==='lifecycle'){
+      await fs.mkdir(path.join(plan.runRoot,'settings'));
+      for(const [name,bytes] of Object.entries(settingsFixture()))await fs.writeFile(path.join(plan.runRoot,'settings',name),bytes,{flag:'wx'});
+    }
+    // Mock-only fixed rejection subcodes locate the existing resolver failure.
+    // All product guard instructions remain unchanged; never qualification.
+    const source=path.join(plan.runRoot,'diagnostic.nsi');await fs.writeFile(source,instrumentProbeTemplate(rendered),{flag:'wx'});
     await execute(path.join(tools,'makensis.exe'),['/INPUTCHARSET','UTF8','/V2',source],{env:{...env,NSISDIR:tools}});
     // Only the deterministic parent is created; destination stays absent so
     // production directory admission sees a genuinely fresh installation.
-    await fs.mkdir(path.dirname(plan.installRoot),{recursive:true});
-    await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-qa-ui.ps1'),'-RunRoot',plan.runRoot,'-Setup',path.join(plan.runRoot,'diagnostic-setup.exe'),'-InstallRoot',plan.installRoot,'-Language','en','-Start','0','-Desktop','0','-CaseName',`probe-${navigation.toLowerCase()}`,'-Mode','Install','-NavigationMode',navigation],{env,timeoutMs:240000});
+    if(kind==='lifecycle')await fs.mkdir(path.dirname(plan.installRoot),{recursive:true});
+    await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-qa-ui.ps1'),'-RunRoot',plan.runRoot,'-Setup',path.join(plan.runRoot,'diagnostic-setup.exe'),'-InstallRoot',kind==='boundary'?plan.destinations.drive:plan.installRoot,'-Language','en','-Start','0','-Desktop','0','-CaseName',kind==='boundary'?'probe-drive':`probe-${navigation.toLowerCase()}`,'-Mode',kind==='boundary'?'Drive':'Install','-NavigationMode',navigation],{env,timeoutMs:240000});
+    if(kind==='boundary')await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-ui-probe-guest.ps1'),'-RunRoot',plan.runRoot,'-Boundary'],{env,timeoutMs:30000});
     uiSucceeded=true;
+    if(kind==='lifecycle'){
+      await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-ui-probe-guest.ps1'),'-RunRoot',plan.runRoot],{env,timeoutMs:360000});
+      lifecycleSucceeded=true;
+    }
   }finally{
-    await fs.writeFile(path.join(plan.runRoot,'qa-summary.json'),JSON.stringify(probeSummary(context,navigation,uiSucceeded),null,2)+'\n',{flag:'wx'});
-    if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,`Mock-payload UI diagnostic (${navigation}): UI ${uiSucceeded?'completed':'did not complete'}. This run is not installer/update qualification; its public qualification status is always false.\n`);
+    await fs.writeFile(path.join(plan.runRoot,'qa-summary.json'),JSON.stringify(probeSummary(context,navigation,uiSucceeded,lifecycleSucceeded,kind),null,2)+'\n',{flag:'wx'});
+    const result=kind==='boundary'?`boundary UI ${uiSucceeded?'completed':'did not complete'}`:`UI ${uiSucceeded?'completed':'did not complete'}; settings/reinstall/uninstall lifecycle ${lifecycleSucceeded?'completed':'did not complete'}`;
+    if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,`Mock-payload diagnostic (${navigation}, ${kind}): ${result}. This run is not installer/update qualification; its public qualification status is always false.\n`);
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

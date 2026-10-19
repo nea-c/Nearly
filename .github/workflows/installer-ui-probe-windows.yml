@@ -17,14 +17,23 @@ concurrency:
   cancel-in-progress: false
 jobs:
   probe:
-    name: Mock UI diagnosis / ${{ matrix.navigation }}
+    name: ${{ matrix.label }}
     if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        navigation: [Click, Command]
+        include:
+          - navigation: Click
+            kind: lifecycle
+            label: Click / mock reinstall and uninstall
+          - navigation: Command
+            kind: lifecycle
+            label: Command / mock reinstall and uninstall
+          - navigation: Command
+            kind: boundary
+            label: Command / isolated D drive boundary
     permissions:
       contents: read
     env:
@@ -34,6 +43,7 @@ jobs:
       QA_DESTINATION: custom
       QA_UI_PROBE: navigation-only
       QA_PROBE_NAVIGATION: ${{ matrix.navigation }}
+      QA_PROBE_KIND: ${{ matrix.kind }}
     defaults:
       run:
         shell: pwsh
@@ -49,13 +59,13 @@ jobs:
       - name: Require exact manual authorization
         id: authorized
         run: |
-          node --input-type=module -e "import {validateContext} from './scripts/installer-qa.mjs'; import {validateNavigation} from './scripts/installer-ui-probe.mjs'; validateContext(process.env); validateNavigation(process.env.QA_PROBE_NAVIGATION);"
+          node --input-type=module -e "import {createProbeContext} from './scripts/installer-ui-probe.mjs'; createProbeContext(process.env);"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Pure diagnostic renderer and workflow regression checks
-        run: node --test tests/installer-probe.test.mjs
+        run: node --test tests/installer-probe.test.mjs tests/installer-probe-codes.test.mjs tests/installer-ui.test.mjs
       - name: Prepare checksum-pinned cached NSIS build tools
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
-      - name: Diagnose actual installer template using a nonlaunchable mock payload
+      - name: Run the selected isolated mock lifecycle or D drive boundary diagnostic
         run: node scripts/installer-ui-probe.mjs run
       - name: Export sanitized diagnostic evidence only
         id: evidence
@@ -65,10 +75,10 @@ jobs:
         if: always() && steps.evidence.outcome == 'success'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: nearly-mock-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.navigation }}
+          name: nearly-mock-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.navigation }}-${{ matrix.kind }}
           path: ${{ runner.temp }}/nearly-installer-qa-${{ github.run_id }}-${{ github.run_attempt }}/public-evidence/
           overwrite: false
           if-no-files-found: error
           retention-days: 7
-      # This is UI diagnosis only. No app build, app launch, signing, historical
+      # This is mock installer diagnosis only. No app build, app launch, signing, historical
       # artifact download, or installer/update qualification is performed.

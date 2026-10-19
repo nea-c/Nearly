@@ -144,6 +144,8 @@ Function ${prefix}NearlyRejectRoot
   nearly_reject_all_guards:
   Call ${prefix}NearlyReleaseGuards
   SetErrorLevel 5
+  IfSilent +2
+    MessageBox MB_ICONSTOP|MB_OK "$(NearlyCannotWrite)"
   Abort "$(NearlyCannotWrite)"
 FunctionEnd
 
@@ -1318,6 +1320,9 @@ Section Install
   ${If} $NearlyPassive = 1
     SetAutoClose true
   ${EndIf}
+  ; A corrected destination may have left a prior admission error level.
+  ; Only this fully completed path may report successful installation.
+  SetErrorLevel 0
 SectionEnd
 
 ; NSIS normally executes a byte-for-byte Temp self-copy. INSTDIR alone is not

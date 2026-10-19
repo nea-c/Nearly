@@ -137,3 +137,5 @@ Thumbs.db
 !/scripts/installer-qa-ui.ps1
 !/scripts/installer-qa-evidence.mjs
 !/scripts/installer-ui-probe.mjs
+!/scripts/installer-ui-probe-guest.ps1
+!/scripts/installer-probe-codes.mjs

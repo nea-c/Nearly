@@ -5,6 +5,29 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+// Bound cold PowerShell/C# startup on shared hosted Windows independently of
+// the actual installer's 30/120-second UI waits and all model assertions.
+const modelTimeoutMs=60_000;
+test('ordinary cancellation keeps exit1 while an observed destination refusal preserves exit5',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Cancel-Setup'},$true)
+Invoke-Expression $fn[0].Extent.Text
+$main=[IntPtr]1;$ownedProcess=[pscustomobject]@{HasExited=$true;ExitCode=1}
+function Click-Id {param($parent,$id)if($parent -ne [IntPtr]1 -or $id -ne 2){throw 'Unexpected fake cancel target'}}
+Cancel-Setup
+$ownedProcess.ExitCode=5;$rejected=$false;try{Cancel-Setup}catch{$rejected=$true}
+if(!$rejected){throw 'Ordinary cancellation wrongly accepted refusal code'}
+Cancel-Setup -ExpectedExitCode 5
+$ownedProcess.ExitCode=0;$rejected=$false;try{Cancel-Setup -ExpectedExitCode 5}catch{$rejected=$true}
+if(!$rejected){throw 'Refusal must not accept success exit'}
+'Distinct cancellation outcomes passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Distinct cancellation outcomes passed/);
+});
 test('completed installation advances with Next only after progress and localized enabled navigation',{skip:process.platform!=='win32'},()=>{
  const source=String.raw`
 $ErrorActionPreference='Stop'
@@ -39,7 +62,7 @@ if((Get-InstallNavigation).kind -cne 'next'){throw 'Japanese Next not accepted'}
 if((Get-InstallNavigation).kind -cne 'finish'){throw 'Japanese Finish not accepted'}
 'Completed installation navigation model passed'
 `;
- const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Completed installation navigation model passed/);
 });
 test('install transition requires a visible progress control or localized Finish, not absent shortcuts',{skip:process.platform!=='win32'},()=>{
@@ -68,7 +91,7 @@ if(Test-InstallTransition){throw 'Absence alone must not prove page transition'}
 [NearlyOwnedUi]::Kind='Button';[NearlyOwnedUi]::Caption='&Finish';if(!(Test-InstallTransition)){throw 'Fast completion fingerprint missing'}
 'Positive page transition model passed'
 `;
- const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Positive page transition model passed/);
 });
 test('navigation command probe targets only an enabled owned direct dialog button',{skip:process.platform!=='win32'},()=>{
@@ -99,7 +122,7 @@ $rejected=$false;try{[NearlyOwnedUi]::Command([IntPtr]1,[IntPtr]2,7,1)}catch{$re
 if(!$rejected){throw 'Queue failure ignored'}
 'Owned navigation command model passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Owned navigation command model passed/);
 });
 test('failure inventory emits only bounded IDs and known control kinds, never window text',{skip:process.platform!=='win32'},()=>{
@@ -127,7 +150,7 @@ $json=ConvertTo-Json -InputObject $records -Compress
 if($json.Contains('sensitive') -or $json.Contains('text')){throw 'Arbitrary control text leaked'}
 'Bounded control inventory passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Bounded control inventory passed/);
 });
@@ -154,7 +177,7 @@ $rejected=$false;try{Wait-Ui {'unexpected string'} 1}catch{$rejected=$_.Exceptio
 if(!$rejected){throw 'Unexpected wait result type was accepted'}
 'Typed UI wait readiness passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Typed UI wait readiness passed/);
 });
@@ -185,7 +208,7 @@ $rejected=$false;try{Wait-Ui {throw [NearlyOwnedUi+WindowChangedException]::new(
 if(!$rejected){throw 'Persistent ownership loss must time out, never pass'}
 'Page-transition control lifetime contract passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Page-transition control lifetime contract passed/);
 });
@@ -220,7 +243,7 @@ try{[NearlyOwnedUi]::Show([IntPtr]1,7)}catch{$rejected=$true}
 if(!$rejected){throw 'Native visibility failure was ignored'}
 'Owned visibility API contract passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Owned visibility API contract passed/);
 });
@@ -251,7 +274,7 @@ Invoke-Expression $assignment[0].Extent.Text
 if($combo -ne [IntPtr]2 -or [NearlyOwnedUi]::Queries -lt 2){throw 'Transient owned control was not awaited'}
 'Transient owned combo awaited'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Transient owned combo awaited/);
 });
@@ -286,7 +309,7 @@ Must-Reject { Assert-UiSelection @(2,1) @(2,1) }
 Must-Reject { Assert-UiSelection @(1) @(1) }
 'Pure UI policy and parse checks passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Pure UI policy and parse checks passed/);
 });
@@ -302,7 +325,7 @@ if($commands.Count -ne 2) {throw 'Expected only drawing loader and owned interop
 foreach($command in $commands) {Invoke-Expression $command.Extent.Text}
 'Interop compiled without desktop calls'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Interop compiled without desktop calls/);
 });
@@ -317,7 +340,7 @@ Invoke-Expression $fn[0].Extent.Text
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 @{en=(Get-UiCaptions 'en');ja=(Get-UiCaptions 'ja')} | ConvertTo-Json -Compress
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   const actual=JSON.parse(r.stdout);
   const template=fs.readFileSync(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
