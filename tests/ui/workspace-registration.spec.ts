@@ -27,7 +27,20 @@ async function fixture(context:BrowserContext){
     return undefined;
   });
   await context.addInitScript(()=>{const w=window as any;w.__TAURI__={core:{invoke:(cmd:string,args:any)=>w.ownershipInvoke(cmd,args)},event:{listen:async()=>()=>{}}};});
-  return {owners,calls,holdNext(){hold=true;},failNext(){fail=true;},release(){release?.();},async open(label='main'){const p=await context.newPage();pages.set(p,label);await p.goto('/');await expect(p.locator('#add-tab')).toBeEnabled();return p;}};
+  return {
+    owners,calls,holdNext(){hold=true;},failNext(){fail=true;},release(){release?.();},
+    async open(label='main'){
+      const p=await context.newPage();pages.set(p,label);await p.goto('/');
+      await expect(p.locator('#add-tab')).toBeEnabled();
+      // A painted add button precedes the initial native claim. Fault injection
+      // must target the next new workspace, not consume that startup claim.
+      await expect.poll(async()=>{
+        const initial=await ids(p);
+        return initial.length>0&&initial.every(id=>owners.get(id)===label);
+      }).toBe(true);
+      return p;
+    },
+  };
 }
 const ids=(p:Page)=>p.locator('[data-tab]').evaluateAll(nodes=>nodes.map(n=>(n as HTMLElement).dataset.tab!));
 async function create(p:Page){const old=await ids(p);await p.locator('#add-tab').click();await expect(p.locator('[data-tab]')).toHaveCount(old.length+1);return (await ids(p)).find(id=>!old.includes(id))!;}
