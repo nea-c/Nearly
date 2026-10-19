@@ -24,5 +24,7 @@ test('UI evidence requires known labels and state assertions rather than arbitra
  assert.deepEqual(evidence.validateUiEvidence(record),record);
  const failure={...record,result:'failed',lastStage:'shortcuts',events:[{stage:'failure',screenshot:'failure.png'}]};
  assert.deepEqual(evidence.validateUiEvidence(failure),failure);
+ const completed={...record,events:[{stage:'install-complete',screenshot:'install-complete.png'}]};
+ assert.deepEqual(evidence.validateUiEvidence(completed),completed);
  for(const patch of [{token:'secret'},{events:[{stage:'directory',screenshot:'../secret.png'}]},{events:[{stage:'shortcut-assertions',captions:['private text','secret'],defaults:[1,0],selected:[0,1],independentToggle:true}]}])assert.throws(()=>evidence.validateUiEvidence({...record,...patch}));
 });
