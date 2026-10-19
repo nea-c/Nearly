@@ -2004,6 +2004,8 @@ fn main() {
     #[cfg(feature="installer-qa")]
     {#[cfg(windows)] if !installer_qa::authorized(){std::process::exit(78);}
      #[cfg(not(windows))] std::process::exit(78);}
+    #[cfg(all(feature="installer-qa",windows))]
+    installer_qa::trace("startup",if std::env::current_exe().ok().is_some_and(|p|p.file_name().is_some_and(|n|n=="previous-image.exe")){"helper"}else if env!("CARGO_PKG_VERSION")=="1.9.0"{"source"}else{"target"});
     #[cfg(windows)]
     if let update_recovery_windows::HelperDispatch::Terminal(code)=update_recovery_windows::dispatch_helper(std::env::args_os()){std::process::exit(code);}
     // Parse native argv before the single-instance plugin can route a launch.
@@ -2015,7 +2017,9 @@ fn main() {
     if probation&&(!startup_update::handoff_validated()||update_package::runtime_key().is_none()){return;}
     #[cfg(windows)]
     if !probation&&startup_update::handoff_validated()&&update_package::runtime_key().is_some()
-        &&update_recovery_windows::ordinary_startup_allowed().is_err(){return;}
+        &&update_recovery_windows::ordinary_startup_allowed().is_err(){
+            #[cfg(feature="installer-qa")] installer_qa::trace_runtime("recoveryRequired",Some("transactionUnavailable"));return;
+        }
     #[cfg(windows)]
     if let update_runtime::Startup::Health(nonce)=&startup{
         // Helper binds the exact CreateProcess child immediately after spawn.

@@ -2113,8 +2113,8 @@ where
         HelperParse::Ordinary => HelperDispatch::NotHelper,
         HelperParse::Invalid => HelperDispatch::Terminal(2),
         HelperParse::Helper(args) => HelperDispatch::Terminal(match run_helper(args) {
-            Ok(_) => 0,
-            Err(_) => 8,
+            Ok(_) => {#[cfg(feature="installer-qa")] crate::installer_qa::trace("helper","succeeded");0},
+            Err(error) => {#[cfg(feature="installer-qa")] {crate::installer_qa::trace("helper","failed");crate::installer_qa::trace_error(&error);}let _=error;8},
         }),
     }
 }
@@ -2888,6 +2888,10 @@ fn supervise_with<I: SupervisorIo>(
     let mut child: Option<(Child, LivePeer)> = None;
     let (mut failed, mut candidates, mut restored) = (false, false, false);
     let (mut health_started, mut close_requested) = (None, None);
+    #[cfg(feature="installer-qa")]
+    let mut previous_child=None;
+    #[cfg(feature="installer-qa")]
+    crate::installer_qa::trace("helper","started");
     loop {
         if parent.exited()?.is_none() || !events.commit.is_set()? {
             return Err(Error::Unsafe);
@@ -2905,6 +2909,10 @@ fn supervise_with<I: SupervisorIo>(
                 }
             },
         };
+        #[cfg(feature="installer-qa")]
+        if previous_child!=Some(child_state){
+            crate::installer_qa::trace("supervisorChild",match child_state{ChildState::NotStarted=>"NotStarted",ChildState::LiveUnhealthy=>"LiveUnhealthy",ChildState::LiveHealthy=>"LiveHealthy",ChildState::Exited=>"Exited",ChildState::Uncertain=>"Uncertain"});previous_child=Some(child_state);
+        }
         if child_state == ChildState::LiveUnhealthy
             && health_started.is_some_and(|t: Instant| t.elapsed() > io.health_timeout())
             && !matches!(
@@ -2946,7 +2954,20 @@ fn supervise_with<I: SupervisorIo>(
             old_restart_attempted: session.record.old_restart_attempted,
         };
         let observed = session.inspect_tuple()?;
-        match model::next_action(&session.record.engine, &observed, &facts) {
+        let action=model::next_action(&session.record.engine, &observed, &facts);
+        #[cfg(feature="installer-qa")]
+        {
+            use model::InstallObject as O;
+            let code=match &action{
+                A::Wait|A::Publish(_)=>None,A::StartStaging=>Some("StartStaging"),A::VerifyCandidates=>Some("VerifyCandidates"),
+                A::Mutate{object,direction}=>Some(match(direction,object){(Direction::Apply,O::Image)=>"ApplyImage",(Direction::Apply,O::Uninstaller)=>"ApplyUninstaller",(Direction::Apply,_)=>"ApplyRegistration",(Direction::Restore,O::Image)=>"RestoreImage",(Direction::Restore,O::Uninstaller)=>"RestoreUninstaller",(Direction::Restore,_)=>"RestoreRegistration"}),
+                A::LaunchNew=>Some("LaunchNew"),A::RequestChildExit=>Some("RequestChildExit"),A::RestartOld=>Some("RestartOld"),A::Complete=>Some("Complete"),A::ManualRepair=>Some("ManualRepair")};
+            if let Some(code)=code{crate::installer_qa::trace("supervisorAction",code)}
+            if matches!(action,A::ManualRepair){
+                for (failed,code) in [(!facts.root_and_lease_verified,"rootLeaseInvalid"),(!facts.snapshots_verified,"snapshotsChanged"),(!facts.no_other_users,"otherFileUsers"),(!facts.child_idle_and_settings_settled,"childNotIdle"),(facts.child_exit_timed_out,"childExitTimedOut"),(!facts.settings_compatible,"settingsChanged")]{if failed{crate::installer_qa::trace("supervisorBlock",code)}}
+            }
+        }
+        match action {
             A::Wait => std::thread::sleep(Duration::from_millis(25)),
             A::Publish(record) => {
                 let succeeded = record.phase == RecoveryPhase::Succeeded;
@@ -2961,6 +2982,8 @@ fn supervise_with<I: SupervisorIo>(
                 // Failed/uncertain journal publication is terminal uncertainty;
                 // never guess that Succeeded failed and roll back afterwards.
                 session.publish()?;
+                #[cfg(feature="installer-qa")]
+                crate::installer_qa::trace("supervisorPhase",match session.record.engine.phase{RecoveryPhase::Prepared=>"Prepared",RecoveryPhase::Armed=>"Armed",RecoveryPhase::Staging=>"Staging",RecoveryPhase::CandidatesVerified=>"CandidatesVerified",RecoveryPhase::Applying=>"Applying",RecoveryPhase::AwaitingHealth=>"AwaitingHealth",RecoveryPhase::Succeeded=>"Succeeded",RecoveryPhase::Restoring=>"Restoring",RecoveryPhase::Restored=>"Restored",RecoveryPhase::ManualRepair=>"ManualRepair"});
                 if is_restored {
                     restored = true;
                 }
@@ -3067,7 +3090,9 @@ fn supervise_with<I: SupervisorIo>(
             }
             A::RestartOld => {
                 let proof = session.verify_restored_tuple(allowed)?;
+                #[cfg(feature="installer-qa")] crate::installer_qa::trace("restoration","verified");
                 let _child = session.restart_previous(proof)?;
+                #[cfg(feature="installer-qa")] crate::installer_qa::trace("restoration","restartIssued");
                 return Ok(());
             }
             A::Complete => return Ok(()),

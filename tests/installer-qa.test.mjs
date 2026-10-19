@@ -91,6 +91,38 @@ test('wait deadline fails closed with inert injected clock and no setup executio
   await assert.rejects(qa.waitForOutcome('unused','success',{timeoutMs:30,now:()=>now,sleep:async()=>{now+=10;},read:async()=>{throw Object.assign(Error(),{code:'ENOENT'});}}),/timed out/);
   await assert.rejects(qa.waitForOutcome('unused','success',{timeoutMs:30,read:async()=>Buffer.alloc(9000)}),/bounded/);
 });
+test('QA trace decoding accepts fixed fields and never returns credential or unknown values',()=>{
+  assert.equal(typeof qa.decodeQaTrace,'function');
+  const row={event:'startup',code:'source',version:'1.9.0',pid:42};
+  const encode=value=>Buffer.from(JSON.stringify(value)+'\n');
+  assert.deepEqual(qa.decodeQaTrace(encode(row),42),[row]);
+  for(const change of [{event:'ghp_exampleCredential'},{code:'a'.repeat(64)},{token:'secret'},{path:'C:\\secret'},{version:'3.0.0'},{pid:0},{pid:4294967296},{pid:43},{event:'unknownEvent'},{code:'unknownCode'}])assert.throws(()=>qa.decodeQaTrace(encode({...row,...change}),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from('{"event":"startup","event":"frontendReady","version":"1.9.0","pid":42}\n'),42));
+});
+test('QA trace bounds and incomplete final-line handling fail closed',()=>{
+  const row=JSON.stringify({event:'startup',version:'2.0.0',pid:42});
+  assert.deepEqual(qa.decodeQaTrace(Buffer.from(row+'\n{"event":"start'),42),[JSON.parse(row)]);
+  assert.deepEqual(qa.decodeQaTrace(Buffer.from(row),42),[JSON.parse(row)]);
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"event":"start\n'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\nnotJson'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"event" false'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"token":"secret'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.alloc(16385),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from((row+'\n').repeat(65)),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{}\n'),42));
+});
+test('QA trace collection reads at most eight exact PID files with a fixed size limit',async()=>{
+  assert.equal(typeof qa.collectQaTraces,'function');
+  const files=['authorization.json','qa-trace-0.jsonl','qa-trace-01.jsonl','qa-trace-4294967296.jsonl','qa-trace-42.jsonl\n','../qa-trace-42.jsonl',...Array.from({length:10},(_,i)=>`qa-trace-${i+1}.jsonl`)];
+  const read=[];
+  const records=await qa.collectQaTraces('owned-root',{list:async()=>files,read:async(file,limit)=>{read.push({file,limit});const pid=Number(/qa-trace-([0-9]+)\.jsonl$/.exec(file)[1]);return Buffer.from(JSON.stringify({event:'startup',version:'1.9.0',pid})+'\n');}});
+  assert.equal(records.length,8);assert.equal(read.length,8);assert.ok(read.every(r=>r.limit===16384));
+  const rejected=await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl'],read:async()=>Buffer.from('{"token":"neverLogThis"}\n')});
+  assert.deepEqual(rejected,[]);
+  let unexpectedReads=0;
+  assert.deepEqual(await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl\n','authorization.json','../qa-trace-42.jsonl','qa-trace-042.jsonl'],read:async()=>{unexpectedReads++;throw Error('must not read');}}),[]);
+  assert.equal(unexpectedReads,0);
+});
 test('workflow remains manual, read-only, pinned and publishes no QA artifact',async()=>{
   const text=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
   assert.match(text,/workflow_dispatch:/);assert.match(text,/controller_sha:/);assert.match(text,/confirmation:/);

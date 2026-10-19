@@ -41,6 +41,8 @@ mod guest {
     pub(crate) struct Context {pub root:PathBuf,pub plan:Plan,pub key:[u8;42],pub scenario:String}
     static CONTEXT:OnceLock<Option<Context>>=OnceLock::new();
     static STARTED:AtomicBool=AtomicBool::new(false);
+    struct Trace {file:std::fs::File,count:usize}
+    static TRACE:OnceLock<Option<std::sync::Mutex<Trace>>>=OnceLock::new();
     fn regular_chain(path:&Path)->Result<(),&'static str>{
         for part in path.ancestors(){let m=std::fs::symlink_metadata(part).map_err(|_|"qaPath")?;if m.file_attributes()&0x400!=0||m.file_type().is_symlink(){return Err("qaPath")}}
         Ok(())
@@ -69,8 +71,32 @@ mod guest {
     }
     pub(crate) fn context()->Option<&'static Context>{CONTEXT.get_or_init(||load().ok()).as_ref()}
     pub(crate) fn authorized()->bool{context().is_some()}
+    pub(crate) fn trace(event:&'static str,code:&'static str){
+        if event.len()>64||code.len()>64||!event.bytes().chain(code.bytes()).all(|b|b.is_ascii_alphanumeric()){return}
+        let Some(lock)=TRACE.get_or_init(||{
+            let c=context()?;regular_chain(&c.root).ok()?;
+            let file=OpenOptions::new().write(true).create_new(true).share_mode(1).custom_flags(0x00200000).open(c.root.join(format!("qa-trace-{}.jsonl",std::process::id()))).ok()?;
+            Some(std::sync::Mutex::new(Trace{file,count:0}))
+        })else{return};
+        let Ok(mut t)=lock.lock()else{return};if t.count>=64{return}
+        let Ok(mut bytes)=serde_json::to_vec(&serde_json::json!({"event":event,"code":code,"version":env!("CARGO_PKG_VERSION"),"pid":std::process::id()}))else{return};
+        bytes.push(b'\n');if bytes.len()>256{return}t.count+=1;let _=t.file.write_all(&bytes);
+    }
+    pub(crate) fn trace_error(error:&crate::update_transaction::Error){
+        use crate::update_transaction::Error::*;
+        trace("nativeError",match error{Disabled=>"Disabled",Invalid=>"Invalid",Unsafe=>"Unsafe",Busy=>"Busy",Missing=>"Missing",Io=>"Io",Protection=>"Protection",Uncertain=>"Uncertain"});
+    }
+    pub(crate) fn trace_runtime(phase:&'static str,reason:Option<&'static str>){
+        if matches!(phase,"idle"|"waitingForUi"|"checking"|"awaitingSuccess"|"succeeded"|"recoveryRequired"){trace("runtime",phase)}
+        if let Some(code)=reason{trace("runtimeError",if matches!(code,"supervisorAuthenticationFailed"|"liveSupervisorMissing"|"restartInterrupted"|"supervisorEvidenceLost"|"runtimeUnavailable"|"probationReleaseFailed"|"healthShutdownBusy"|"supervisorHealthTimeout"|"transactionUnavailable"|"unsupportedPlatform"|"invalidHealthArguments"){code}else{"other"});}
+    }
     pub(crate) fn suppress_health()->bool{context().is_some_and(|c|c.scenario=="health-failure"&&env!("CARGO_PKG_VERSION")==c.plan.target_version)}
     fn outcome(c:&Context,phase:&str,error:Option<&str>)->Result<(),&'static str>{
+        let result=publish_outcome(c,phase,error);
+        trace("outcome",if result.is_err(){"writeFailed"}else{match phase{"succeeded"=>"succeeded","rolledBack"=>"rolledBack",_=>"failed"}});
+        result
+    }
+    fn publish_outcome(c:&Context,phase:&str,error:Option<&str>)->Result<(),&'static str>{
         let path=c.root.join(format!("outcome-{}.json",c.scenario));
         regular_chain(&c.root)?;
         let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|_|"qaOutcome")?;
@@ -92,19 +118,22 @@ mod guest {
             if !bootstrap||app.state::<crate::AppState>().ownership.lock().map(|r|r.owned(window.label()).is_empty()).unwrap_or(true){return}
         }
         if STARTED.swap(true,Ordering::AcqRel){return}
+        trace("bootstrap",if env!("CARGO_PKG_VERSION")==c.plan.source_version{"source"}else{"target"});
         if env!("CARGO_PKG_VERSION")==c.plan.source_version{
             let marker=c.root.join(format!("attempt-{}",c.scenario));
             match OpenOptions::new().write(true).create_new(true).share_mode(1).open(&marker){
-                Ok(mut f)=>{if f.write_all(b"1").and_then(|_|f.sync_all()).is_err(){let _=outcome(c,"failed",Some("qaMarker"));return}},
-                Err(e)if e.kind()==std::io::ErrorKind::AlreadyExists=>{if read(&marker,1).as_deref()==Ok(b"1")&&crate::update_recovery_windows::qa_restored(){let _=outcome(c,"rolledBack",None);}else{let _=outcome(c,"failed",Some("qaRestoration"));}return},
+                Ok(mut f)=>{trace("marker","created");if f.write_all(b"1").and_then(|_|f.sync_all()).is_err(){let _=outcome(c,"failed",Some("qaMarker"));return}},
+                Err(e)if e.kind()==std::io::ErrorKind::AlreadyExists=>{trace("marker","existing");if read(&marker,1).as_deref()==Ok(b"1")&&crate::update_recovery_windows::qa_restored(){trace("restoration","confirmed");let _=outcome(c,"rolledBack",None);}else{trace("restoration","rejected");let _=outcome(c,"failed",Some("qaRestoration"));}return},
                 Err(_)=>{let _=outcome(c,"failed",Some("qaMarker"));return}
             }
             tauri::async_runtime::spawn(async move{
-                let prepared=app.state::<crate::AppState>().startup_update.qa_prepare(window.label());
+                trace("fixture","staging");let prepared=app.state::<crate::AppState>().startup_update.qa_prepare(window.label());
                 if let Err(code)=prepared{let _=outcome(c,"failed",Some(code));return}
+                trace("fixture","ready");
                 let result=crate::install_startup_update(window,app).await;
                 // A committed handoff exits the source process. Any return with an
                 // error is a failed case, never a synthetic success.
+                trace("handoff",if result.error_code.is_some(){"failed"}else{"returned"});
                 if let Some(code)=result.error_code{let _=outcome(c,"failed",Some(code));}
             });
         }else{
