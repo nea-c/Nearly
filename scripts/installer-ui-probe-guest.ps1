@@ -11,7 +11,7 @@ function Write-ProbeEvent([string]$Phase,[string]$Event,[int]$Code=-1) {
   Write-Host ('Mock lifecycle: ' + (ConvertTo-Json -InputObject (New-ProbeEvent $Phase $Event $Code) -Compress))
 }
 function New-ProbeGate([string]$Stage,[string]$Event) {
-  if ($Stage -cnotin @('context','fixture','payload','registration','preferences','start-link','desktop-link','wide-reader','wsh-reader','identity-reader') -or $Event -cnotin @('start','finished','verified','failure')) { throw 'Unsupported mock diagnostic gate' }
+  if ($Stage -cnotin @('context','fixture','payload','registration','preferences','start-link','desktop-link','desktop-path','desktop-leaf','wide-reader','wsh-reader','identity-reader') -or $Event -cnotin @('start','finished','verified','failure')) { throw 'Unsupported mock diagnostic gate' }
   return [ordered]@{stage=$Stage;event=$Event}
 }
 function Write-ProbeGate([string]$Stage,[string]$Event) {
@@ -32,6 +32,37 @@ function Assert-Regular([string]$Path,[long]$Maximum=67108864) {
   Assert-Path $Path
   $item=Get-Item -LiteralPath $Path -Force
   if ($item.PSIsContainer -or $item.Length -le 0 -or $item.Length -gt $Maximum) { throw 'Invalid lifecycle file' }
+}
+function Get-ShortcutPathObservation([string]$Path) {
+  $record=[ordered]@{absoluteLocal=$false;canonicalExact=$false;hasForwardSlash=$false;hasExtraColon=$false;exists=$false;leafRegular=$false;leafReparse=$false;ancestorsSafe=$false;lengthPositive=$false;lengthBounded=$false}
+  try {
+    $record.absoluteLocal=[bool]($Path -cmatch '\A[A-Za-z]:\\')
+    $record.hasForwardSlash=[bool]$Path.Contains('/')
+    $record.hasExtraColon=[bool]($Path.Length -ge 2 -and $Path.Substring(2).Contains(':'))
+    $record.canonicalExact=[bool]([IO.Path]::GetFullPath($Path) -ceq $Path)
+  } catch { return $record }
+  if (!$record.absoluteLocal -or !$record.canonicalExact -or $record.hasForwardSlash -or $record.hasExtraColon) { return $record }
+  try {
+    $record.exists=[bool](Test-Path -LiteralPath $Path)
+    if ($record.exists) {
+      $item=Get-Item -LiteralPath $Path -Force
+      $record.leafRegular=[bool](!$item.PSIsContainer)
+      $record.leafReparse=[bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+      [long]$length=$item.Length
+      $record.lengthPositive=[bool]($length -gt 0)
+      $record.lengthBounded=[bool]($length -le 67108864)
+    }
+  } catch {}
+  try {
+    $safe=$true;$cursor=$Path
+    while ($cursor) {
+      if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { $safe=$false;break }
+      $parent=Split-Path -Parent $cursor
+      if ($parent -eq $cursor) { break };$cursor=$parent
+    }
+    $record.ancestorsSafe=[bool]$safe
+  } catch {}
+  return $record
 }
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_REPOSITORY -cne 'nea-c/Nearly' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/main') { throw 'Manual hosted lifecycle guest required' }
 if ($env:QA_CONTROLLER_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_SHA -cne $env:QA_CONTROLLER_SHA -or $env:GITHUB_WORKFLOW_SHA -cne $env:QA_CONTROLLER_SHA -or $env:QA_CONFIRMATION -cne "installer-qa $env:QA_CONTROLLER_SHA") { throw 'Exact lifecycle SHA confirmation required' }
@@ -138,11 +169,14 @@ function Assert-Choices([bool]$Installed=$true) {
   Write-ProbeGate 'start-link' 'start'
   Assert-Path $startShortcut;if (Test-Path -LiteralPath $startShortcut) { throw 'Unselected mock shortcut exists' }
   Write-ProbeGate 'start-link' 'verified'
-  Write-ProbeGate 'desktop-link' 'start'
+  Write-ProbeGate 'desktop-path' 'start'
+  Write-Host ('Mock shortcut path: '+(ConvertTo-Json -InputObject (Get-ShortcutPathObservation $desktopShortcut) -Compress))
   Assert-Path $desktopShortcut
-  if ($Installed -and $expectedDesktop -eq 1) { Assert-Regular $desktopShortcut;Write-ProbeGate 'desktop-link' 'verified';Observe-Shortcut }
+  Write-ProbeGate 'desktop-path' 'verified'
+  Write-ProbeGate 'desktop-leaf' 'start'
+  if ($Installed -and $expectedDesktop -eq 1) { Assert-Regular $desktopShortcut;Write-ProbeGate 'desktop-leaf' 'verified';Observe-Shortcut }
   elseif (Test-Path -LiteralPath $desktopShortcut) { throw 'Removed or unselected mock shortcut exists' }
-  else { Write-ProbeGate 'desktop-link' 'verified' }
+  else { Write-ProbeGate 'desktop-leaf' 'verified' }
 }
 function Assert-Installed {
   Write-ProbeGate 'payload' 'start'
