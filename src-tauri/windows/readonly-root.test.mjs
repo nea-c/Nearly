@@ -14,6 +14,7 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
  const declarations=source.match(/^Var .+$/gm).join('\n');
  const macro=source.match(/!macro NearlyRootFunctions prefix\r?\n([\s\S]*?)!macroend/)[1];
  for(const [name,mode,mask,sddl,expected] of [
+  ['existing-payload-metadata','payload',0,'',0],
   ['pinned-ancestors','path',0,'',0],
   ['private-root','acl','0x500D0156','O:SYD:(A;;FA;;;SY)',0],
   ['foreign-inherit-only-root','acl','0x500D0156','O:SYD:(A;OICIIO;FA;;;WD)(A;;FA;;;SY)',5],
@@ -39,12 +40,21 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
   StrCpy $NearlyDacl $2
   StrCpy $0 0`);
   let target='';
+  if(mode==='payload'){
+   target=path.join(output,'generated-existing-payload-READONLY.bin');
+   fs.writeFileSync(target,Buffer.from('Generated metadata fixture; never executable.'));
+   // Isolate the real existing-file metadata ABI from this checkout's ACL.
+   // The production ACL function is unchanged and tested independently above.
+   const acl=/Function \$\{prefix\}NearlyCheckAcl\r?\n[\s\S]*?FunctionEnd/;
+   assert.match(functions,acl);
+   functions=functions.replace(acl,'Function ${prefix}NearlyCheckAcl\n  StrCpy $R8 1\n  Return\nFunctionEnd');
+  }
   if(mode==='image'){
    target=name==='image-current'?exe:path.join(output,name+'-comparison-READONLY.bin');
    const imageFunctions=source.slice(source.indexOf('Function un.NearlyImageCleanup'),source.indexOf('Function un.onInit')).replaceAll('un.Nearly','Nearly').replace('StrCpy $NearlyPayload "$INSTDIR\\uninstall.exe"', 'StrCpy $NearlyPayload "'+target+'"');
    functions+='\n'+imageFunctions;
   }
-  const section=mode==='image'?'  Call NearlyVerifyUninstallerImage\n  Call NearlyImageCleanup':mode==='path'?String.raw`  StrCpy $INSTDIR "C:\Windows\Nearly-readonly-root-test-nonexistent"
+  const section=mode==='payload'?`  StrCpy $NearlyPayload "${target}"\n  StrCpy $R8 0\n  Call NearlyValidatePayload\n  StrCmp $R8 1 +3\n    SetErrorLevel 9\n    Quit`:mode==='image'?'  Call NearlyVerifyUninstallerImage\n  Call NearlyImageCleanup':mode==='path'?String.raw`  StrCpy $INSTDIR "C:\Windows\Nearly-readonly-root-test-nonexistent"
   Call NearlyPinRoot
   StrCmp $NearlyRootMissing 1 +3
     SetErrorLevel 9

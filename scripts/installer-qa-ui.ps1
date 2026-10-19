@@ -305,7 +305,7 @@ function Get-InstallNavigation {
   $progress=@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'msctls_progress32' })
   if ($progress.Count -eq 1 -and (($Language -eq 'en' -and $text -match 'Next') -or ($Language -eq 'ja' -and $text -match '次へ'))) { return @{kind='next'} }
 }
-function Cancel-Setup {
+function Cancel-Setup([ValidateSet(1,5)][int]$ExpectedExitCode=1) {
   Click-Id $main 2
   # Welcome/finish implementations may exit immediately; otherwise answer the
   # owned confirmation only. IDYES=6; no arbitrary dialog receives this input.
@@ -320,7 +320,7 @@ function Cancel-Setup {
     Start-Sleep -Milliseconds 150
   }
   if (!$ownedProcess.HasExited) { throw 'Owned setup cancellation timed out' }
-  if ($ownedProcess.ExitCode -ne 1) { throw 'Unexpected cancelled installer exit code' }
+  if ($ownedProcess.ExitCode -ne $ExpectedExitCode) { throw 'Unexpected cancelled installer exit code' }
 }
 try {
   $ownedProcess=Start-Process -FilePath $Setup -PassThru -WindowStyle Hidden
@@ -383,7 +383,9 @@ try {
     Screenshot 'destination-rejected' $modal
     Click-Id $modal 1
     Wait-Ui { [NearlyOwnedUi]::IsWindowEnabled($main) } | Out-Null
-    Cancel-Setup
+    # A confirmed admission rejection retains the installer's error level 5.
+    # Ordinary cancellation elsewhere still requires the distinct code 1.
+    Cancel-Setup -ExpectedExitCode 5
     $result='rejected'
   } else {
     $stage='shortcuts'
