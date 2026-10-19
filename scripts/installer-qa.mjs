@@ -28,20 +28,27 @@ export function validateContext(e,platform=process.platform){
   for(const k of ['GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'])if(!exact(/[1-9][0-9]*/,e[k])||!Number.isSafeInteger(Number(e[k])))fail('Canonical run identity required');
   return Object.freeze({controllerSha:sha,runId:e.GITHUB_RUN_ID,runAttempt:e.GITHUB_RUN_ATTEMPT,runnerTemp:canonicalWindows(e.RUNNER_TEMP),localAppData:canonicalWindows(e.LOCALAPPDATA)});
 }
-export function createPlan(c){return {schemaVersion:1,controllerSha:c.controllerSha,runId:c.runId,runAttempt:c.runAttempt,runRoot:path.win32.join(c.runnerTemp,`nearly-installer-qa-${c.runId}-${c.runAttempt}`),installRoot:path.win32.join(c.localAppData,'Nearly'),sourceVersion:'1.9.0',targetVersion:'2.0.0',...SOURCE};}
-export function validatePlan(p,c){
-  const wanted=createPlan(c);
-  if(!p||JSON.stringify(Object.keys(p).sort())!==JSON.stringify(Object.keys(wanted).sort())||Object.entries(wanted).some(([k,v])=>p[k]!==v))fail('QA plan/provenance/path mismatch');
+export function validateDestination(value){if(!['default','custom'].includes(value))fail('Select exactly one QA_DESTINATION for this fresh guest');return value;}
+export function createPlan(c,destinationKind='default'){
+  validateDestination(destinationKind);
+  const leaf=`Nearly Installer QA ${c.runId}-${c.runAttempt}`,destinations={default:path.win32.join(c.localAppData,'Nearly'),custom:path.win32.join(c.localAppData,leaf,'日本語 space','Nearly'),drive:path.win32.join('D:\\',`Nearly QA 日本語 ${c.runId}-${c.runAttempt}`)};
+  return {schemaVersion:2,controllerSha:c.controllerSha,runId:c.runId,runAttempt:c.runAttempt,runRoot:path.win32.join(c.runnerTemp,`nearly-installer-qa-${c.runId}-${c.runAttempt}`),destinationKind,destinations,installRoot:destinations[destinationKind],sourceVersion:'1.9.0',targetVersion:'2.0.0',...SOURCE};
+}
+export function validatePlan(p,c,destinationKind='default'){
+  const wanted=createPlan(c,destinationKind);
+  if(!p||JSON.stringify(Object.keys(p).sort())!==JSON.stringify(Object.keys(wanted).sort())||Object.entries(wanted).some(([k,v])=>JSON.stringify(p[k])!==JSON.stringify(v)))fail('QA plan/provenance/path mismatch');
   return true;
 }
+export function uiCases(){return ['en','ja'].flatMap(language=>[0,1].flatMap(start=>[0,1].map(desktop=>({name:`${language}-${start}-${desktop}`,language,start,desktop}))));}
 export function validateScenario(scenario){
   if(!['success','health-failure'].includes(scenario))fail('Select exactly one QA_SCENARIO for this fresh guest');
   return scenario;
 }
-export function formatSummary(scenario){
+export function formatSummary(scenario,destination='default'){
   validateScenario(scenario);
+  validateDestination(destination);
   const lifecycle=scenario==='success'?'native update/restart':'deliberate failed-health rollback';
-  return `Installer QA (${scenario}): signed production setup/uninstall and ${lifecycle} passed. QA fixtures remain only on this ephemeral runner; nothing published.\n`;
+  return `Installer QA (${scenario}, ${destination}): signed production setup/uninstall, eight English/Japanese candidate UI choices, cancellation/back navigation and ${lifecycle} passed. QA fixtures remain only on this ephemeral runner; nothing published.\n`;
 }
 export function createFixtureSigner(){
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
@@ -57,15 +64,16 @@ export function createFixtureSigner(){
   }});
 }
 export function verifyFixture(bytes,proof,key,payloadSha256){return verifyUpdaterProof(bytes,proof,key,{version:'2.0.0',file:'Nearly_r2.0_x64-setup.exe',payloadSha256});}
-export function validateOutcome(o,scenario){
-  if(!['success','health-failure'].includes(scenario)||!o||o.schemaVersion!==1||o.scenario!==scenario||o.phase!==(scenario==='success'?'succeeded':'rolledBack')||o.version!==(scenario==='success'?'2.0.0':'1.9.0')||o.error!==undefined)fail('QA outcome did not prove expected success/recovery');
+export function validateOutcome(o,scenario,destination='default'){
+  validateDestination(destination);
+  if(!['success','health-failure'].includes(scenario)||!o||o.schemaVersion!==2||o.destinationKind!==destination||o.scenario!==scenario||o.phase!==(scenario==='success'?'succeeded':'rolledBack')||o.version!==(scenario==='success'?'2.0.0':'1.9.0')||o.error!==undefined)fail('QA outcome did not prove expected success/recovery');
   return true;
 }
-export async function waitForOutcome(file,scenario,{timeoutMs=180000,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),read=f=>regular(f,8192)}={}){
+export async function waitForOutcome(file,scenario,{destination='default',timeoutMs=180000,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),read=f=>regular(f,8192)}={}){
   if(!Number.isFinite(timeoutMs)||timeoutMs<=0||timeoutMs>300000)fail('Invalid outcome deadline');
   const deadline=now()+timeoutMs;
   while(now()<deadline){
-    try{const bytes=await read(file);if(bytes.length>8192)fail('Outcome exceeds bounded limit');const o=JSON.parse(bytes);validateOutcome(o,scenario);return o;}
+    try{const bytes=await read(file);if(bytes.length>8192)fail('Outcome exceeds bounded limit');const o=JSON.parse(bytes);validateOutcome(o,scenario,destination);return o;}
     catch(e){if(e.code!=='ENOENT')throw e;}
     await sleep(500);
   }
@@ -222,7 +230,7 @@ export function settingsFixture(){
   return files;
 }
 export async function run(e=process.env){
-  const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),p=createPlan(c);validatePlan(p,c);
+  const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION),p=createPlan(c,destination);validatePlan(p,c,destination);
   const guest=path.join(root,'scripts/installer-qa-guest.ps1'),baseEnv=cleanChildEnv(e);
   const ps=async(action,args=[],env=baseEnv)=>execute('pwsh',['-NoProfile','-NonInteractive','-File',guest,'-Action',action,'-RunRoot',p.runRoot,...args],{env,timeoutMs:300000});
   // Preflight checks canonical/reparse-free ancestry and absence before any run-root write.
@@ -244,21 +252,32 @@ export async function run(e=process.env){
     const targetBytes=await regular(target.setup),signature=signer.sign(targetBytes,target.payloadSha256);
     await fs.writeFile(path.join(p.runRoot,'Nearly_r2.0_x64-setup.exe'),targetBytes,{flag:'wx'});
     await fs.writeFile(path.join(p.runRoot,'Nearly_r2.0_x64-setup.exe.sig'),signature,{flag:'wx'});
-    await fs.writeFile(path.join(p.runRoot,'authorization.json'),canonical({schemaVersion:1,runId:c.runId,runAttempt:c.runAttempt,controllerSha:c.controllerSha,token,sourceVersion:'1.9.0',targetVersion:'2.0.0',targetFile:'Nearly_r2.0_x64-setup.exe',targetSha256:hash(targetBytes),targetBytes:targetBytes.length,payloadSha256:target.payloadSha256,signatureFile:'Nearly_r2.0_x64-setup.exe.sig'}),{flag:'wx'});
+    await fs.writeFile(path.join(p.runRoot,'authorization.json'),canonical({schemaVersion:2,destinationKind:destination,runId:c.runId,runAttempt:c.runAttempt,controllerSha:c.controllerSha,token,sourceVersion:'1.9.0',targetVersion:'2.0.0',targetFile:'Nearly_r2.0_x64-setup.exe',targetSha256:hash(targetBytes),targetBytes:targetBytes.length,payloadSha256:target.payloadSha256,signatureFile:'Nearly_r2.0_x64-setup.exe.sig'}),{flag:'wx'});
+    for(const choice of uiCases()){
+      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',choice.language,'-Start',String(choice.start),'-Desktop',String(choice.desktop),'-CaseName',choice.name]);
+      results.push({case:`candidate-ui-${choice.name}`,passed:true});
+    }
+    for(const language of ['en','ja']){
+      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',language,'-CaseName',`${language}-cancel`,'-UiMode','Cancel']);
+      results.push({case:`candidate-ui-${language}-cancel`,passed:true});
+    }
+    await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256]);results.push({case:'drive-destination-boundary',passed:true});
     {
       const env={...baseEnv,NEARLY_QA_TOKEN:token,NEARLY_QA_RUN_ROOT:p.runRoot,NEARLY_QA_SCENARIO:scenario};
       await ps('source',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],env);
       await ps('launch',[],env);
-      const outcome=await waitForOutcome(path.join(p.runRoot,`outcome-${scenario}.json`),scenario);
+      const outcome=await waitForOutcome(path.join(p.runRoot,`outcome-${scenario}.json`),scenario,{destination});
       console.log(`Validated native QA outcome: phase=${outcome.phase} version=${outcome.version}`);
       await ps('verify',['-ExpectedPayload',scenario==='success'?target.payloadSha256:source.payloadSha256,'-ExpectedVersion',outcome.version],env);
       await ps('uninstall',[],env);results.push({case:scenario,passed:true,outcome});
     }
-    await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:1,controllerSha:c.controllerSha,scenario,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
-    if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario));
+    await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destination,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
+    if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario,destination));
+    await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:true,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
   }catch(error){
     for(const record of await collectQaTraces(p.runRoot))console.log('QA trace: '+JSON.stringify(record));
-    await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:1,scenario,passed:false,cases:results,error:String(error.message).slice(0,2048)}),{flag:'wx'});throw error;
+    await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:false,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
+    await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,scenario,destination,passed:false,cases:results,error:String(error.message).slice(0,2048)}),{flag:'wx'});throw error;
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

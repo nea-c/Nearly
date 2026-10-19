@@ -1,9 +1,14 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('preflight','extract','production','source','launch','verify','uninstall')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('preflight','extract','production','ui','drive','source','launch','verify','uninstall')][string]$Action,
   [Parameter(Mandatory)][string]$RunRoot,
   [string]$Setup,
   [string]$ExpectedPayload,
-  [string]$ExpectedVersion
+  [string]$ExpectedVersion,
+  [ValidateSet('en','ja')][string]$Language='en',
+  [ValidateSet(0,1)][int]$Start=1,
+  [ValidateSet(0,1)][int]$Desktop=1,
+  [string]$CaseName,
+  [ValidateSet('Install','Cancel')][string]$UiMode='Install'
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -16,7 +21,13 @@ if ($env:QA_CONTROLLER_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_SHA -cn
 if ($env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $env:GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z' -or !$env:RUNNER_TEMP -or !$env:LOCALAPPDATA -or $env:SYNCFILES_CONFIG_DIR) { throw 'Unexpected run/storage context' }
 $expectedRoot = Join-Path $env:RUNNER_TEMP "nearly-installer-qa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 if ($RunRoot -cne $expectedRoot) { throw 'Exact run root required' }
-$install = Join-Path $env:LOCALAPPDATA 'Nearly'
+if ($env:QA_DESTINATION -cnotin @('default','custom')) { throw 'Explicit QA destination required' }
+$destinations = [ordered]@{
+  default = Join-Path $env:LOCALAPPDATA 'Nearly'
+  custom = Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly"
+  drive = "D:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+}
+$install = if ($Action -eq 'production') { $destinations.default } elseif ($Action -eq 'drive') { $destinations.drive } else { $destinations[$env:QA_DESTINATION] }
 $exe = Join-Path $install 'Nearly.exe'
 $uninstaller = Join-Path $install 'uninstall.exe'
 $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native'
@@ -141,9 +152,39 @@ function Uninstall-Owned([bool]$Exact) {
   if ((Test-Path -LiteralPath $startShortcut) -or (Test-Path -LiteralPath $desktopShortcut)) { throw 'Owned shortcuts survived uninstall' }
   Assert-Settings $Exact
 }
+function Get-GeneratedCleanupPaths([string]$InstallRoot,[string[]]$Names,[string[]]$Children) {
+  $allowed=@($Names | ForEach-Object { $_; $_ -replace '\.json$','.backup.json' })
+  if ($allowed.Count -ne 10 -or @($Children).Count -ne 10 -or @($Children | Sort-Object -Unique -CaseSensitive).Count -ne 10) { throw 'Only ten exact generated settings files may be cleaned' }
+  foreach ($leaf in $Children) { if ($leaf -cnotin $allowed) { throw 'Unknown installation child; evidence retained' } }
+  return @($allowed | ForEach-Object { Join-Path $InstallRoot $_ })
+}
+function Remove-GeneratedSettings {
+  # Exact byte/metadata provenance was checked after the real uninstall. Never
+  # recursively delete an installation, unknown files, or recovery evidence.
+  Assert-NoApp; Assert-LocalPath $install; Assert-Settings $true
+  foreach ($target in @($exe,$uninstaller,$registration)) { if (Test-Path -LiteralPath $target) { throw 'Installed payload still present; cannot clean fixtures' } }
+  $children=@(Get-ChildItem -LiteralPath $install -Force)
+  if (@($children | Where-Object { $_.PSIsContainer }).Count -ne 0) { throw 'Unexpected installation subdirectory; evidence retained' }
+  $paths=Get-GeneratedCleanupPaths $install $names @($children.Name)
+  foreach ($file in $paths) { Assert-Regular $file; Remove-Item -LiteralPath $file }
+  [IO.Directory]::Delete($install,$false)
+}
+function Prepare-EmptyUiRoot {
+  Assert-LocalPath $install
+  if (Test-Path -LiteralPath $install) { throw 'Fresh candidate UI requires an absent empty destination' }
+  $parent=Split-Path -Parent $install
+  Assert-LocalPath $parent
+  New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  Assert-LocalPath $parent
+}
+function Get-PreflightFileTargets([string]$Root,[System.Collections.IDictionary]$Destinations,[string]$StartDirectory,[string]$DesktopShortcut) {
+  return @($Root,$Destinations.default,$Destinations.custom,$Destinations.drive,$StartDirectory,$DesktopShortcut)
+}
 
 if ($Action -eq 'preflight') {
-  foreach ($target in @($RunRoot,$install,$registration,$preferences,$startDirectory,$desktopShortcut,'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native')) { if (Test-Path -LiteralPath $target) { throw 'Preexisting Nearly state; guest is not fresh' } }
+  $fileTargets=Get-PreflightFileTargets $RunRoot $destinations $startDirectory $desktopShortcut
+  foreach ($target in $fileTargets) { Assert-LocalPath $target }
+  foreach ($target in @($fileTargets)+@($registration,$preferences,'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native')) { if (Test-Path -LiteralPath $target) { throw 'Preexisting Nearly state; guest is not fresh' } }
   Assert-NoApp
   if (![Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) { throw 'Interactive desktop unavailable; qualification cannot skip' }
   $webview = @('HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}')
@@ -154,7 +195,13 @@ if ($Action -eq 'preflight') {
 }
 $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
-if ($plan.schemaVersion -ne 1 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.installRoot -cne $install -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
+if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.destinationKind -cne $env:QA_DESTINATION -or $plan.installRoot -cne $destinations[$env:QA_DESTINATION] -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
+foreach ($kind in @('default','custom','drive')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
+function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice) {
+  if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
+  Assert-UnderRun $Setup
+  & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode
+}
 switch ($Action) {
   'extract' {
     $zipPath=Join-Path $RunRoot 'signed.zip'; Assert-UnderRun $zipPath
@@ -179,12 +226,53 @@ switch ($Action) {
       Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '2.0.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
       Uninstall-Owned $true
     }
+    Remove-GeneratedSettings
   }
   'source' {
     Assert-UnderRun $Setup; Assert-NoApp
     if ((Test-Path -LiteralPath $exe) -or (Test-Path -LiteralPath $uninstaller) -or (Test-Path -LiteralPath $registration)) { throw 'Previous case not uninstalled' }
-    Seed-Settings; Set-Choices 1 1
-    Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts 1 1
+    Prepare-EmptyUiRoot
+    if (Test-Path -LiteralPath $preferences) { Remove-Item -LiteralPath $preferences -Recurse }
+    Invoke-Ui 'Install' 'native-source' 'en' 0 1
+    Seed-Settings
+    Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts 0 1
+  }
+  'ui' {
+    Assert-NoApp
+    if ((Test-Path -LiteralPath $exe) -or (Test-Path -LiteralPath $uninstaller) -or (Test-Path -LiteralPath $registration)) { throw 'Previous UI case not uninstalled' }
+    Prepare-EmptyUiRoot
+    if (Test-Path -LiteralPath $preferences) { Remove-Item -LiteralPath $preferences -Recurse }
+    Invoke-Ui $UiMode $CaseName $Language $Start $Desktop
+    if ($UiMode -eq 'Cancel') {
+      foreach ($target in @($install,$exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled setup mutated installed state' } }
+    } else {
+      Seed-Settings
+      Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
+      # Reinstall the now-owned candidate without changing adjacent settings or
+      # the choices selected through the real UI.
+      Invoke-Bounded $Setup @('/S')
+      Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
+      Uninstall-Owned $true
+      Remove-GeneratedSettings
+    }
+  }
+  'drive' {
+    Assert-NoApp
+    foreach ($target in @($install,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Drive boundary is not fresh' } }
+    if (Test-Path -LiteralPath $preferences) { Remove-Item -LiteralPath $preferences -Recurse }
+    Invoke-Ui 'Drive' 'drive-boundary' 'en' 1 0
+    if (Test-Path -LiteralPath $exe) {
+      Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
+      Seed-Settings; Uninstall-Owned $true
+      Remove-GeneratedSettings
+    } else {
+      foreach ($target in @($uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Rejected drive boundary changed installed state' } }
+      if (Test-Path -LiteralPath $install) {
+        Assert-LocalPath $install
+        if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Rejected drive boundary left unexpected files' }
+        [IO.Directory]::Delete($install,$false)
+      }
+    }
   }
   'launch' {
     Assert-NoApp; Assert-Regular $exe
@@ -193,7 +281,7 @@ switch ($Action) {
     if ($p.Id -le 0) { throw 'Installed QA process did not launch' }
   }
   'verify' {
-    Assert-Payload $ExpectedPayload $ExpectedVersion; Assert-Settings $false; Assert-Shortcuts 1 1
+    Assert-Payload $ExpectedPayload $ExpectedVersion; Assert-Settings $false; Assert-Shortcuts 0 1
     $apps=@(Get-Process -Name Nearly -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $exe })
     if ($apps.Count -ne 1) { throw 'Expected exact restarted installed application process' }
     if (!$apps[0].CloseMainWindow()) { throw 'Restarted application has no closable frontend window' }
@@ -203,6 +291,6 @@ switch ($Action) {
   'uninstall' {
     Uninstall-Owned $false
     $prefs=Get-ItemProperty -LiteralPath $preferences
-    if ($prefs.StartMenuShortcut -ne 1 -or $prefs.DesktopShortcut -ne 1) { throw 'Uninstall discarded independent shortcut preferences' }
+    if ($prefs.StartMenuShortcut -ne 0 -or $prefs.DesktopShortcut -ne 1) { throw 'Uninstall discarded independent shortcut preferences' }
   }
 }

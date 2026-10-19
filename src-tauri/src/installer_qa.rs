@@ -5,7 +5,7 @@ use std::{collections::HashMap, path::{Path, PathBuf}};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all="camelCase", deny_unknown_fields)]
 pub(crate) struct Plan {
-    pub schema_version:u32, pub run_id:String, pub run_attempt:String,
+    pub schema_version:u32, pub destination_kind:String, pub run_id:String, pub run_attempt:String,
     pub controller_sha:String, pub token:String, pub source_version:String,
     pub target_version:String, pub target_file:String, pub target_sha256:String,
     pub target_bytes:usize, pub payload_sha256:String, pub signature_file:String,
@@ -17,14 +17,17 @@ fn validate(env:&HashMap<String,String>,p:&Plan,image:&Path,compiled_token:&str,
     let get=|k:&str|env.get(k).map(String::as_str).ok_or("qaContext");
     for(k,v)in[("GITHUB_ACTIONS","true"),("RUNNER_ENVIRONMENT","github-hosted"),("RUNNER_OS","Windows"),("GITHUB_REPOSITORY","nea-c/Nearly"),("GITHUB_EVENT_NAME","workflow_dispatch"),("GITHUB_REF","refs/heads/main")]{if get(k)?!=v{return Err("qaContext")}}
     if env.contains_key("SYNCFILES_CONFIG_DIR")||!matches!(get("NEARLY_QA_SCENARIO")?,"success"|"health-failure"){return Err("qaContext")}
-    if !hex(compiled_token,64)||!hex(compiled_sha,40)||p.token!=compiled_token||get("NEARLY_QA_TOKEN")?!=compiled_token||p.controller_sha!=compiled_sha||get("GITHUB_SHA")?!=compiled_sha{return Err("qaIdentity")}
-    if p.schema_version!=1||!id(&p.run_id)||!id(&p.run_attempt)||get("GITHUB_RUN_ID")?!=p.run_id||get("GITHUB_RUN_ATTEMPT")?!=p.run_attempt||p.source_version!="1.9.0"||p.target_version!="2.0.0"||p.target_file!="Nearly_r2.0_x64-setup.exe"||p.signature_file!="Nearly_r2.0_x64-setup.exe.sig"||!hex(&p.target_sha256,64)||!hex(&p.payload_sha256,64)||p.target_bytes==0||p.target_bytes>64*1024*1024{return Err("qaPlan")}
+    if !hex(compiled_token,64)||!hex(compiled_sha,40)||p.token!=compiled_token||get("NEARLY_QA_TOKEN")?!=compiled_token||p.controller_sha!=compiled_sha||get("GITHUB_SHA")?!=compiled_sha||get("GITHUB_WORKFLOW_SHA")?!=compiled_sha||get("QA_CONTROLLER_SHA")?!=compiled_sha||get("QA_CONFIRMATION")?!=format!("installer-qa {compiled_sha}"){return Err("qaIdentity")}
+    if p.schema_version!=2||!matches!(p.destination_kind.as_str(),"default"|"custom")||get("QA_DESTINATION")?!=p.destination_kind||!id(&p.run_id)||!id(&p.run_attempt)||get("GITHUB_RUN_ID")?!=p.run_id||get("GITHUB_RUN_ATTEMPT")?!=p.run_attempt||p.source_version!="1.9.0"||p.target_version!="2.0.0"||p.target_file!="Nearly_r2.0_x64-setup.exe"||p.signature_file!="Nearly_r2.0_x64-setup.exe.sig"||!hex(&p.target_sha256,64)||!hex(&p.payload_sha256,64)||p.target_bytes==0||p.target_bytes>64*1024*1024{return Err("qaPlan")}
     let safe=|s:&str|{let b=s.as_bytes();b.len()>3&&b[0].is_ascii_alphabetic()&&b[1]==b':'&&(b[2]==b'\\'||b[2]==b'/')&&!s[2..].contains(':')&&!s.split(['\\','/']).any(|x|x=="."||x==".."||x.ends_with(' ')||x.ends_with('.'))};
     let temp=get("RUNNER_TEMP")?;let local=get("LOCALAPPDATA")?;let supplied=get("NEARLY_QA_RUN_ROOT")?;
     if !safe(temp)||!safe(local)||!safe(supplied)||!safe(&image.to_string_lossy()){return Err("qaPath")}
     let root=Path::new(temp).join(format!("nearly-installer-qa-{}-{}",p.run_id,p.run_attempt));
     if !same(&root,Path::new(supplied)){return Err("qaPath")}
-    let installed=Path::new(local).join("Nearly");
+    // Both roots are derived from the confirmed guest identity. No renderer,
+    // registry value, command argument, or arbitrary plan path grants QA trust.
+    // Production installation admission still independently checks root ACLs.
+    let installed=if p.destination_kind=="default"{Path::new(local).join("Nearly")}else{Path::new(local).join(format!("Nearly Installer QA {}-{}",p.run_id,p.run_attempt)).join("日本語 space").join("Nearly")};
     if !same(image,&installed.join("Nearly.exe")){
         let parent=image.parent().ok_or("qaImage")?;let nonce=parent.file_name().and_then(|n|n.to_str()).ok_or("qaImage")?;
         if !hex(nonce,32)||!same(parent.parent().ok_or("qaImage")?,&installed.join(".Nearly-update-state"))||image.file_name().and_then(|n|n.to_str())!=Some("previous-image.exe"){return Err("qaImage")}
@@ -103,7 +106,7 @@ mod guest {
         let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|_|"qaOutcome")?;
         let temporary=c.root.join(format!("outcome-{}-{}.tmp",c.scenario,nonce.iter().map(|b|format!("{b:02x}")).collect::<String>()));
         let mut f=OpenOptions::new().write(true).create_new(true).share_mode(1).custom_flags(0x00200000).open(&temporary).map_err(|_|"qaOutcome")?;
-        let mut value=serde_json::json!({"schemaVersion":1,"scenario":c.scenario,"phase":phase,"version":env!("CARGO_PKG_VERSION")});if let Some(code)=error{value["error"]=code.into()}
+        let mut value=serde_json::json!({"schemaVersion":2,"destinationKind":c.plan.destination_kind,"scenario":c.scenario,"phase":phase,"version":env!("CARGO_PKG_VERSION")});if let Some(code)=error{value["error"]=code.into()}
         f.write_all(&serde_json::to_vec(&value).map_err(|_|"qaOutcome")?).and_then(|_|f.sync_all()).map_err(|_|"qaOutcome")?;
         drop(f);std::fs::hard_link(&temporary,&path).map_err(|_|"qaOutcome")?;
         std::fs::remove_file(temporary).map_err(|_|"qaOutcome")
@@ -159,18 +162,19 @@ pub(crate) use guest::*;
 mod tests {
     use super::*;
     fn fixture()->(HashMap<String,String>,Plan,PathBuf){
-        let token="a".repeat(64);let sha="b".repeat(40);
+        let token="a".repeat(64);let sha="b".repeat(40);let confirmation=format!("installer-qa {sha}");
         let e=HashMap::from_iter([
             ("GITHUB_ACTIONS","true"),("RUNNER_ENVIRONMENT","github-hosted"),("RUNNER_OS","Windows"),
             ("GITHUB_REPOSITORY","nea-c/Nearly"),("GITHUB_EVENT_NAME","workflow_dispatch"),("GITHUB_REF","refs/heads/main"),
-            ("GITHUB_RUN_ID","42"),("GITHUB_RUN_ATTEMPT","1"),("GITHUB_SHA",&sha),("NEARLY_QA_TOKEN",&token),
+            ("GITHUB_RUN_ID","42"),("GITHUB_RUN_ATTEMPT","1"),("GITHUB_SHA",&sha),("GITHUB_WORKFLOW_SHA",&sha),("QA_CONTROLLER_SHA",&sha),("QA_CONFIRMATION",&confirmation),("NEARLY_QA_TOKEN",&token),
             ("RUNNER_TEMP",r"C:\runner\temp"),("LOCALAPPDATA",r"C:\guest\Local"),
-            ("NEARLY_QA_RUN_ROOT",r"C:\runner\temp\nearly-installer-qa-42-1"),("NEARLY_QA_SCENARIO","success"),
+            ("NEARLY_QA_RUN_ROOT",r"C:\runner\temp\nearly-installer-qa-42-1"),("NEARLY_QA_SCENARIO","success"),("QA_DESTINATION","default"),
         ].map(|(k,v)|(k.to_owned(),v.to_owned())));
-        let p=Plan{schema_version:1,run_id:"42".into(),run_attempt:"1".into(),controller_sha:sha,token,source_version:"1.9.0".into(),target_version:"2.0.0".into(),target_file:"Nearly_r2.0_x64-setup.exe".into(),target_sha256:"c".repeat(64),target_bytes:1024,payload_sha256:"d".repeat(64),signature_file:"Nearly_r2.0_x64-setup.exe.sig".into()};
+        let p=Plan{schema_version:2,destination_kind:"default".into(),run_id:"42".into(),run_attempt:"1".into(),controller_sha:sha,token,source_version:"1.9.0".into(),target_version:"2.0.0".into(),target_file:"Nearly_r2.0_x64-setup.exe".into(),target_sha256:"c".repeat(64),target_bytes:1024,payload_sha256:"d".repeat(64),signature_file:"Nearly_r2.0_x64-setup.exe.sig".into()};
         (e,p,PathBuf::from(r"C:\guest\Local\Nearly\Nearly.exe"))
     }
     #[test] fn exact_manual_guest_context_accepts_installed_image(){let(e,p,i)=fixture();assert!(validate(&e,&p,&i,&p.token,&p.controller_sha).is_ok());}
+    #[test] fn custom_guest_requires_exact_derived_unicode_root_and_destination_identity(){let(mut e,mut p,i)=fixture();p.destination_kind="custom".into();e.insert("QA_DESTINATION".into(),"custom".into());let image=Path::new(r"C:\guest\Local\Nearly Installer QA 42-1\日本語 space\Nearly\Nearly.exe");assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_ok());assert!(validate(&e,&p,&i,&p.token,&p.controller_sha).is_err());assert!(validate(&e,&p,Path::new(r"D:\Nearly QA 日本語 42-1\Nearly.exe"),&p.token,&p.controller_sha).is_err());e.insert("QA_DESTINATION".into(),"default".into());assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_err());p.destination_kind="drive".into();e.insert("QA_DESTINATION".into(),"drive".into());assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_err());}
     #[test] fn missing_or_foreign_guest_identity_refuses_before_io(){let(e,p,i)=fixture();for k in ["GITHUB_ACTIONS","RUNNER_ENVIRONMENT","RUNNER_OS","GITHUB_REPOSITORY","GITHUB_EVENT_NAME","GITHUB_REF","NEARLY_QA_TOKEN","GITHUB_SHA"]{let mut bad=e.clone();bad.insert(k.into(),"foreign".into());assert!(validate(&bad,&p,&i,&p.token,&p.controller_sha).is_err(),"{k}");}}
     #[test] fn root_traversal_foreign_image_and_config_override_are_refused(){let(e,p,i)=fixture();for value in [r"C:\runner\temp\..\outside",r"C:\runner\temp\nearly-installer-qa-42-2"]{let mut bad=e.clone();bad.insert("NEARLY_QA_RUN_ROOT".into(),value.into());assert!(validate(&bad,&p,&i,&p.token,&p.controller_sha).is_err());}assert!(validate(&e,&p,Path::new(r"D:\normal\Nearly.exe"),&p.token,&p.controller_sha).is_err());let mut bad=e.clone();bad.insert("SYNCFILES_CONFIG_DIR".into(),r"D:\normal".into());assert!(validate(&bad,&p,&i,&p.token,&p.controller_sha).is_err());}
     #[test] fn helper_requires_exact_nonce_backup_path(){let(e,p,_)=fixture();let valid=PathBuf::from(r"C:\guest\Local\Nearly\.Nearly-update-state").join("e".repeat(32)).join("previous-image.exe");assert!(validate(&e,&p,&valid,&p.token,&p.controller_sha).is_ok());for suffix in [r"..\previous-image.exe",r"short\previous-image.exe",r"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\other.exe"]{let bad=PathBuf::from(r"C:\guest\Local\Nearly\.Nearly-update-state").join(suffix);assert!(validate(&e,&p,&bad,&p.token,&p.controller_sha).is_err());}}

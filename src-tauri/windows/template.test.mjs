@@ -19,7 +19,7 @@ function runDecision(name, { registry = {}, files = [], variables = {}, silent =
   const lines = body.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith(";"));
   const vars = { INSTDIR: "C:\\Fixture\\AppData\\Local\\Nearly", SMPROGRAMS: "C:\\Fixture\\Start", DESKTOP: "C:\\Fixture\\Desktop", ...variables };
   const constants = { PRODUCTNAME: "Nearly", MAINBINARYNAME: "Nearly", BUNDLEID: "local.nearly.compile.only", UNINSTKEY: "owned-uninstall-key" };
-  const expand = text => text.replace(/^"|"$/g, "").replace(/\$\{(\w+)\}/g, (_, key) => constants[key] ?? "").replace(/\$(\w+)/g, (_, key) => String(vars[key] ?? ""));
+  const expand = text => text.replace(/^("|')(.*)\1$/, "$2").replace(/\$\{(\w+)\}/g, (_, key) => constants[key] ?? "").replace(/\$(\w+)/g, (_, key) => String(vars[key] ?? ""));
   const exists = new Set(files.map(file => expand(file).toLowerCase()));
   const jump = (to, pc) => to === "0" || to === undefined ? pc + 1 : /^[+-]\d+$/.test(to) ? pc + Number(to) : lines.indexOf(`${to}:`) + 1;
   let pc = 0, budget = 1000, errorLevel = 0;
@@ -51,6 +51,13 @@ function runDecision(name, { registry = {}, files = [], variables = {}, silent =
       case "IfSilent": pc = jump(silent ? args[0] : args[1], pc); break;
       case "MessageBox": pc++; break;
       case "SetErrorLevel": errorLevel = Number(args[0]); pc++; break;
+      case "Call": {
+        if (args[0] === 'NearlyRejectRoot') return {variables:vars,aborted:true,errorLevel:5};
+        assert.ok(['NearlyReleaseGuards','NearlyPinRoot'].includes(args[0]));
+        if(args[0] === 'NearlyPinRoot')vars.pinCalls=(vars.pinCalls??0)+1;
+        pc++;break;
+      }
+      case "Return": return {variables:vars,aborted:false,errorLevel};
       case "Abort": return { variables: vars, aborted: true, errorLevel };
       default: assert.fail(`Unsupported decision instruction: ${lines[pc]}`);
     }
@@ -148,11 +155,11 @@ test("running checks block instead of terminating, before installer mutations", 
   assert.ok(install.indexOf("CreateFileW") < install.indexOf('Call NearlyExtractApplication'));
 });
 
-test("per-user fixed writable install, manual WebView prerequisite, no userdata removal", () => {
+test("per-user selected private writable install, manual WebView prerequisite, no userdata removal", () => {
   assert.match(template, /RequestExecutionLevel user/);
   assert.doesNotMatch(template, /RequestExecutionLevel (?:admin|highest)|WriteReg\w+ HKLM|DeleteReg\w+ HKLM/);
-  assert.doesNotMatch(template, /MUI_PAGE_DIRECTORY|DeleteAppData|RmDir\s+\/(?:r|REBOOTOK)|Delete\s+[^\r\n]*\*|File\s+[^\r\n]*settings\.json/i);
-  assert.match(template, /GetFullPathName \$INSTDIR "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"/);
+  assert.doesNotMatch(template, /DeleteAppData|RmDir\s+\/(?:r|REBOOTOK)|Delete\s+[^\r\n]*\*|File\s+[^\r\n]*settings\.json/i);
+  assert.match(template, /GetFullPathName \$NearlyDefaultRoot "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"/);
   assert.match(template, /"\{\{install_webview2_mode\}\}" != ""/);
   assert.match(template, /Function NearlyRequireWebView/);
   assert.match(template, /WebView2 Runtime is required/);
@@ -212,4 +219,22 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   assert.deepEqual(members,['Nearly.exe'],'single exact member matches the signing-plan contract');
   const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'Nearly.exe'],{windowsHide:true,timeout:30000});
   assert.equal(extracted.status,0);assert.ok(extracted.stdout.equals(fs.readFileSync(payload)));
+});
+
+test('actual registered root resolution locks owned upgrades and rejects migration or partial registration',()=>{
+ const def='C:\\Fixture\\AppData\\Local\\Nearly',custom='D:\\Private Apps\\Nearly';
+ const base={NearlyRequestedRoot:def,NearlyDefaultRoot:def,NearlyRootMissing:0};
+ for(const requested of [def,custom]){
+  const result=runDecision('NearlyResolveRegistration',{variables:{...base,NearlyRequestedRoot:requested},registry:{NearlyOwner:'local.nearly.compile.only',InstallLocation:custom,UninstallString:`"${custom}\\uninstall.exe"`}});
+  assert.equal(result.aborted,false);assert.equal(result.variables.INSTDIR,custom);assert.equal(result.variables.pinCalls,1);
+ }
+ for(const [registry,variables] of [
+  [{NearlyOwner:'foreign',InstallLocation:custom},base],
+  [{InstallLocation:custom},base],
+  [{NearlyOwner:'local.nearly.compile.only'},base],
+  [{NearlyOwner:'local.nearly.compile.only',InstallLocation:custom,UninstallString:'"D:\\Foreign\\uninstall.exe"'},base],
+  [{NearlyOwner:'local.nearly.compile.only',InstallLocation:custom,UninstallString:`"${custom}\\uninstall.exe"`},{...base,NearlyRequestedRoot:'D:\\Migrate'}],
+  [{NearlyOwner:'local.nearly.compile.only',InstallLocation:custom,UninstallString:`"${custom}\\uninstall.exe"`},{...base,NearlyRootMissing:1}],
+ ])assert.equal(runDecision('NearlyResolveRegistration',{registry,variables}).aborted,true,JSON.stringify({registry,variables}));
+ assert.equal(runDecision('NearlyResolveRegistration',{variables:base}).aborted,false,'no registration leaves fresh root selectable');
 });

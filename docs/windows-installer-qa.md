@@ -1,11 +1,72 @@
 # Isolated Windows installer qualification
 
+## Selectable-destination qualification
+
+The manual workflow now creates four independent hosted Windows guests: success
+and health-failure rollback, each at the default and a derived custom destination.
+The custom path contains spaces and Japanese characters. Its controller SHA and
+explicit `installer-qa <sha>` confirmation must match protected main. Native QA
+authorization and outcomes bind the destination kind; no arbitrary path grants
+fixture trust. Production trust/key/gates remain unchanged.
+
+Each guest drives the actual English/Japanese language, directory and independent
+shortcut controls for all four choices, exercises Back and cancellation, then
+verifies installed files, registration, shortcut targets, saved choices and five
+generated settings documents/backups across reinstall and uninstall. A separate
+D-drive UI boundary either installs safely or must show the exact localized
+refusal; unsafe roots are not repaired or bypassed. The final source installation
+uses choices off/on so native update/rollback can verify independent retention.
+
+Only validated, bounded UI PNGs and typed result JSON are retained as Actions
+artifacts. Export strips PNG ancillary metadata and rejects unknown paths, keys,
+captions, file types and links. Fixture binaries, ephemeral tokens, authorization,
+settings and raw logs remain on the disposable guest. Screenshots and summaries
+are evidence, not a substitute for installed-state assertions. A failed or
+unavailable desktop is a failure, never a skipped pass.
+
+The actual hosted result must be inspected before claiming qualification.
+Historical passing runs below cover fixed-destination source. No setup is run on
+the developer PC. Before distribution, verify these additional cases in the
+authorized disposable Windows guests:
+
+- Exercise English and Japanese welcome, destination, independent shortcut and
+  finish pages. Test Back/Next and cancellation. Confirm existing owned installs
+  skip destination selection and keep the registered path.
+- Install into an empty private folder outside LocalAppData, with spaces and
+  Japanese characters, and repeat on a second fixed drive. Confirm registry,
+  uninstaller command, application and both shortcut targets use the selected root.
+- Exercise all four shortcut combinations, then reinstall/update. Saved unchecked
+  choices and links manually deleted in the guest must remain absent. Test `/NS`.
+- Refuse UNC/device/relative/root/stream/dot-component paths, junctions in each
+  ancestor, unsafe shared-write folders, nonexistent parents and nonempty foreign
+  folders. Verify refusal preserves sentinels. Do not modify guest ACLs as a setup
+  workaround; use separately approved generated fixtures for permission cases.
+- Refuse payload symlinks/hardlinks and attempted directory replacement during
+  validation/mutation. Verify no foreign target changes and handles are released
+  on cancel/failure/exit. Inspect setup's System-plugin calls at runtime.
+- Upgrade an existing default-path r3.0 installation without moving it. Preserve
+  all five settings documents, backups and independent shortcut choices.
+- Run signed protocol3 success and health-failure rollback from a custom root.
+  Verify helper/stage identity checks, registered root, current image, journal root
+  binding, unchanged settings/shortcuts, restart gate and mismatch refusal.
+- Uninstall from a custom root, including a nonempty settings folder. Remove only
+  owned payload/links/registration; retain settings and unknown files. Refuse a
+  stale/modified copied uninstaller, changed registration, links and a running
+  application. Check executing-image equivalence against the registered
+  uninstaller: NSIS's normal temporary copy and an identical byte-for-byte copy
+  are equivalent; this is not proof of the original launch path.
+
+Do not treat contract tests, inert NSIS compilation or unit tests as these runtime
+results. No new release or production signing is performed by this QA workflow.
+
+## Historical fixed-destination qualification
+
 `installer-qa-windows.yml` is a manual, read-only workflow. Dispatch main with
 the exact reviewed controller SHA and confirmation `installer-qa <sha>`.
 Each matrix case receives a separate fresh GitHub-hosted Windows VM. It refuses
 self-hosted execution, existing Nearly state, an unavailable interactive desktop,
 or an unavailable WebView2 runtime. It never downloads a missing runtime, publishes
-binaries/releases, accesses signing Secrets, or enables the production update gate.
+binaries/releases, accesses signing Secrets, or changes the production update gate.
 
 The historical signed production setup is pinned to run 39185149137, attempt 1,
 commit b56f01ddff9698ef316dfa775c1e8a441965674f and artifact 12158897824.

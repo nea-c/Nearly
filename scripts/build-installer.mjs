@@ -12,6 +12,16 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const hash=b=>createHash('sha256').update(b).digest('hex');
 const exists=async(f,io=fs)=>{try{await io.access(f);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}};
 
+export function installerLocationPolicy(){
+  return {
+    defaultInstallDirectory:'$LOCALAPPDATA\\Nearly',
+    installDirectoryPolicy:'validated-per-user-registration',
+    destinationSelection:'fresh-install-only',
+    existingInstallationRelocation:false,
+    uninstaller:'<registered-install-directory>\\uninstall.exe',
+  };
+}
+
 export function validateInstallerPolicy(config){
   const b=config.bundle,n=b?.windows?.nsis;
   if(config.identifier!=='local.syncfiles.native'||config.productName!=='Nearly'||config.mainBinaryName!=='Nearly')throw Error('Unexpected application identity');
@@ -102,8 +112,8 @@ export async function runInstallerBuild(args=process.argv.slice(2)){
   // published deliverable uses the public release label; bytes are unchanged.
   const artifact=path.join(paths.targetDir,...(options.target?[options.target]:[]),'release/bundle/nsis',`Nearly_${config.version}_x64-setup.exe`);
   const result=await publishInstaller(root,artifact,{version:config.version,identifier:config.identifier,
-    payloadArchitecture:'x64',installMode:'currentUser',installDirectory:'$LOCALAPPDATA\\Nearly',
-    uninstaller:'$LOCALAPPDATA\\Nearly\\uninstall.exe',shortcutsIndependent:true,settingsIncluded:false,
+    payloadArchitecture:'x64',installMode:'currentUser',...installerLocationPolicy(),
+    shortcutsIndependent:true,settingsIncluded:false,
     adjacentSettingsPreserved:true,updaterInstallationEnabled,embeddedApplicationSha256:hash(await fs.readFile(paths.artifact))});
   console.log(`Built installer ${result.path} (${result.sha256})`);return result;
 }

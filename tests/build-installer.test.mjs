@@ -5,6 +5,18 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {validateInstallerPolicy, requireCachedTools, publishInstaller} from '../scripts/build-installer.mjs';
 import {createPackage,verifyPackage} from '../.github/scripts/release-contract.mjs';
+import * as installer from '../scripts/build-installer.mjs';
+
+test('installer metadata distinguishes a selectable default from the registered update destination',()=>{
+  assert.equal(typeof installer.installerLocationPolicy,'function');
+  assert.deepEqual(installer.installerLocationPolicy(),{
+    defaultInstallDirectory:'$LOCALAPPDATA\\Nearly',
+    installDirectoryPolicy:'validated-per-user-registration',
+    destinationSelection:'fresh-install-only',
+    existingInstallationRelocation:false,
+    uninstaller:'<registered-install-directory>\\uninstall.exe',
+  });
+});
 
 const config = JSON.parse(await fs.readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url)));
 const pe = Buffer.alloc(80); pe.write('MZ'); pe.writeUInt32LE(64,60); pe.writeUInt32LE(0x4550,64);

@@ -6,8 +6,11 @@ Hosted QA-feature installation, restart and rollback evidence is recorded in
 windows-installer-qa.md; it does not qualify an ordinary-PC production installation.
 
 The coordinator retains the verified sibling installer and ancestor locks,
-seals global work admission and settles settings. Only the fixed registered
-LocalAppData/Nearly installation with adjacent settings is supported. A portable
+seals global work admission and settles settings. Only an owned, validated registered
+per-user installation with adjacent settings is supported. The selectable-destination
+candidate pins the registered root and its ancestors continuously into transaction
+and recovery capture; it retains current-image equality and root-bound journals.
+Existing default LocalAppData/Nearly registrations remain supported. A portable
 D: copy or external SYNCFILES_CONFIG_DIR cannot silently switch installations.
 
 A verified immutable old-image copy dispatches as a restricted helper before
@@ -18,7 +21,8 @@ retained parent identity to exit, acquires the lease and reloads the bound recor
 Cancellation is not proof of child exit. No process is forcibly terminated.
 
 The signed package must authenticate exactly one updater-protocol:3 field.
-The NSIS worker accepts only fixed canonical helper PID, creation FILETIME and
+The NSIS worker resolves the owned registered root before authenticating its stage
+helper, and accepts only fixed canonical helper PID, creation FILETIME and
 nonce arguments. Worker-specific authorization events bind its exact PID and
 creation time. Its bounded stage branch writes candidate Nearly.exe and
 uninstall.exe into the exclusive transaction directory, with no live files,
@@ -52,6 +56,9 @@ Tests use generated owned files, isolated registry keys and harmless copied test
 children. Source interpreters and cached NSIS compilation do not execute setup.
 Hosted isolated Windows run 39202794997 passed signed setup/reinstall/uninstall,
 settings and shortcut preservation, and QA-feature success/health-failure rollback.
-The production-enabled variant is validated separately without local execution.
+Those historical results cover fixed-destination source, not the selectable-root
+candidate. Custom-root setup/update/rollback/uninstall runtime qualification remains
+pending; see docs/windows-installer-qa.md. The production-enabled variant is
+validated separately without local execution.
 Power interruption and long-duration stability remain unqualified. Key creation,
 ACL changes, secret registration and release publication require separate approval.

@@ -83,6 +83,526 @@ Var NearlyReadyHandle
 Var NearlyMutationHandle
 Var NearlyWorkerPid
 Var NearlyWorkerCreated
+Var NearlyRequestedRoot
+Var NearlyRegisteredRoot
+Var NearlyDefaultRoot
+Var NearlyGuardHead
+Var NearlyLeafNode
+Var NearlyWalk
+Var NearlyIndex
+Var NearlyHandle
+Var NearlySecurity
+Var NearlyOwnerSid
+Var NearlyDacl
+Var NearlyTokenBuffer
+Var NearlyUserSid
+Var NearlySystemSid
+Var NearlyAdminSid
+Var NearlyInstallerSid
+Var NearlyTestSid
+Var NearlyAceCount
+Var NearlyAceIndex
+Var NearlyMask
+Var NearlyPayload
+Var NearlyRootMissing
+Var NearlyEnum
+Var NearlyEntry
+Var NearlyPinAccess
+Var NearlyFindData
+Var NearlyImageHandle
+Var NearlyRegisteredImageHandle
+Var NearlyImageBuffer
+Var NearlyOtherBuffer
+Var NearlyImageRemaining
+Var NearlyImageSize
+Var NearlyImageChunk
+Var NearlyCreatorSid
+Var NearlyPendingBuffer
+
+; Shared guard implementation. The NSIS/System ABI is 32-bit even for x64 payloads.
+; Every existing ancestor is opened without FILE_SHARE_DELETE until all mutations
+; finish. ACLs are queried from those exact handles; security is never rewritten.
+!macro NearlyRootFunctions prefix
+Function ${prefix}NearlyRejectRoot
+  StrCmp $NearlyHandle 0 nearly_reject_buffer
+  StrCmp $NearlyHandle -1 nearly_reject_buffer
+  System::Call 'kernel32::CloseHandle(p $NearlyHandle)'
+  StrCpy $NearlyHandle 0
+  nearly_reject_buffer:
+  StrCmp $NearlyPendingBuffer 0 nearly_reject_guards
+  System::Free $NearlyPendingBuffer
+  StrCpy $NearlyPendingBuffer 0
+  nearly_reject_guards:
+  StrCmp $NearlyEnum 0 nearly_reject_find_buffer
+  StrCmp $NearlyEnum -1 nearly_reject_find_buffer
+  System::Call 'kernel32::FindClose(p $NearlyEnum)'
+  nearly_reject_find_buffer:
+  StrCpy $NearlyEnum 0
+  StrCmp $NearlyFindData 0 nearly_reject_all_guards
+  System::Free $NearlyFindData
+  StrCpy $NearlyFindData 0
+  nearly_reject_all_guards:
+  Call ${prefix}NearlyReleaseGuards
+  SetErrorLevel 5
+  Abort "$(NearlyCannotWrite)"
+FunctionEnd
+
+Function ${prefix}NearlyTrustedSid
+  System::Call 'advapi32::EqualSid(p $NearlyTestSid, p $NearlyUserSid) i.r0'
+  StrCmp $0 1 nearly_sid_good
+  System::Call 'advapi32::EqualSid(p $NearlyTestSid, p $NearlySystemSid) i.r0'
+  StrCmp $0 1 nearly_sid_good
+  System::Call 'advapi32::EqualSid(p $NearlyTestSid, p $NearlyAdminSid) i.r0'
+  StrCmp $0 1 nearly_sid_good
+  System::Call 'advapi32::EqualSid(p $NearlyTestSid, p $NearlyInstallerSid) i.r0'
+  StrCmp $0 1 nearly_sid_good
+  StrCpy $0 0
+  Return
+  nearly_sid_good:
+  StrCpy $0 1
+FunctionEnd
+
+Function ${prefix}NearlyCheckAcl
+  StrCpy $NearlySecurity 0
+  System::Call 'advapi32::GetSecurityInfo(p $NearlyHandle, i 1, i 5, *p .r1, p 0, *p .r2, p 0, *p .r3) i.r0'
+  StrCpy $NearlyOwnerSid $1
+  StrCpy $NearlyDacl $2
+  StrCpy $NearlySecurity $3
+  StrCmp $0 0 0 nearly_acl_bad
+  StrCmp $NearlyOwnerSid 0 nearly_acl_bad
+  StrCmp $NearlyDacl 0 nearly_acl_bad
+  StrCpy $NearlyTestSid $NearlyOwnerSid
+  Call ${prefix}NearlyTrustedSid
+  StrCmp $0 1 0 nearly_acl_bad
+  System::Call 'advapi32::IsValidAcl(p $NearlyDacl) i.r0'
+  StrCmp $0 1 0 nearly_acl_bad
+  ; ACL header: revision/reserved/size then WORD AceCount.
+  System::Call '*$NearlyDacl(i, &i2 .s)'
+  Pop $NearlyAceCount
+  StrCpy $NearlyAceIndex 0
+  nearly_acl_loop:
+  IntCmp $NearlyAceIndex $NearlyAceCount nearly_acl_done
+  System::Call 'advapi32::GetAce(p $NearlyDacl, i $NearlyAceIndex, *p .r1) i.r0'
+  StrCmp $0 1 0 nearly_acl_bad
+  System::Call '*$1(&i1 .r2, &i1 .r3, &i2 .r4, i .r5)'
+  ; Only ordinary allow/deny ACEs supported. Fail closed for object/callback ACEs.
+  IntCmp $2 1 nearly_acl_next 0 nearly_acl_bad
+  IntOp $6 $3 & 8
+  ; Root descendants must also stay private: inherit-only writable ACEs can
+  ; grant foreign access to newly extracted payload/state children.
+  StrCmp $NearlyMask 0x500D0040 0 nearly_acl_effective
+  StrCmp $6 8 nearly_acl_next
+  nearly_acl_effective:
+  IntOp $5 $5 & $NearlyMask
+  StrCmp $5 0 nearly_acl_next
+  IntOp $NearlyTestSid $1 + 8
+  Call ${prefix}NearlyTrustedSid
+  StrCmp $0 1 nearly_acl_next
+  ; CREATOR OWNER may safely control only future children owned by their creator.
+  ; Never treat it as a trusted effective owner or effective write ACE.
+  IntOp $6 $3 & 8
+  StrCmp $6 8 0 nearly_acl_bad
+  IntOp $6 $3 & 3
+  StrCmp $6 0 nearly_acl_bad
+  System::Call 'advapi32::EqualSid(p $NearlyTestSid, p $NearlyCreatorSid) i.r0'
+  StrCmp $0 1 0 nearly_acl_bad
+  nearly_acl_next:
+  IntOp $NearlyAceIndex $NearlyAceIndex + 1
+  Goto nearly_acl_loop
+  nearly_acl_done:
+  System::Call 'kernel32::LocalFree(p $NearlySecurity)'
+  StrCpy $NearlySecurity 0
+  Return
+  nearly_acl_bad:
+  StrCmp $NearlySecurity 0 +2
+    System::Call 'kernel32::LocalFree(p $NearlySecurity)'
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+
+Function ${prefix}NearlyInitSids
+  StrCmp $NearlyUserSid 0 0 nearly_sids_done
+  System::Call 'kernel32::GetCurrentProcess() p.r0'
+  System::Call 'advapi32::OpenProcessToken(p r0, i 8, *p .r1) i.r0'
+  StrCmp $0 1 0 nearly_sids_bad
+  System::Alloc 4096
+  Pop $NearlyTokenBuffer
+  StrCmp $NearlyTokenBuffer 0 nearly_sids_bad
+  System::Call 'advapi32::GetTokenInformation(p r1, i 1, p $NearlyTokenBuffer, i 4096, *i .r2) i.r0'
+  System::Call 'kernel32::CloseHandle(p r1)'
+  StrCmp $0 1 0 nearly_sids_bad
+  System::Call '*$NearlyTokenBuffer(p .s)'
+  Pop $NearlyUserSid
+  System::Call 'advapi32::ConvertStringSidToSidW(w "S-1-5-18", *p .s) i.r0'
+  Pop $NearlySystemSid
+  StrCmp $0 1 0 nearly_sids_bad
+  System::Call 'advapi32::ConvertStringSidToSidW(w "S-1-5-32-544", *p .s) i.r0'
+  Pop $NearlyAdminSid
+  StrCmp $0 1 0 nearly_sids_bad
+  System::Call 'advapi32::ConvertStringSidToSidW(w "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", *p .s) i.r0'
+  Pop $NearlyInstallerSid
+  StrCmp $0 1 0 nearly_sids_bad
+  System::Call 'advapi32::ConvertStringSidToSidW(w "S-1-3-0", *p .s) i.r0'
+  Pop $NearlyCreatorSid
+  StrCmp $0 1 0 nearly_sids_bad
+  nearly_sids_done:
+  Return
+  nearly_sids_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+
+Function ${prefix}NearlyValidatePath
+  StrLen $0 $INSTDIR
+  IntCmp $0 176 0 0 nearly_path_bad
+  IntCmp $0 3 nearly_path_bad nearly_path_bad
+  System::Call 'kernel32::WideCharToMultiByte(i 65001, i 0x80, w "$INSTDIR", i -1, p 0, i 0, p 0, p 0) i.r0'
+  StrCmp $0 0 nearly_path_bad
+  IntCmp $0 513 0 0 nearly_path_bad
+  StrCpy $1 $INSTDIR 1
+  System::Call 'kernel32::lstrcmpiW(w r1, w "A") i.r2'
+  IntCmp $2 0 0 nearly_path_bad
+  System::Call 'kernel32::lstrcmpiW(w r1, w "Z") i.r2'
+  IntCmp $2 0 0 0 nearly_path_bad
+  StrCpy $1 $INSTDIR 2 1
+  StrCmp $1 ":\" 0 nearly_path_bad
+  StrCpy $0 3
+  StrCpy $3 ""
+  nearly_path_character:
+  StrCpy $1 $INSTDIR 1 $0
+  StrCmp $1 "" nearly_path_component
+  StrCmp $1 "\" nearly_path_component
+  StrCmp $1 "/" nearly_path_bad
+  StrCmp $1 ":" nearly_path_bad
+  StrCmp $1 "?" nearly_path_bad
+  StrCmp $1 "*" nearly_path_bad
+  StrCmp $1 '$\"' nearly_path_bad
+  StrCmp $1 "<" nearly_path_bad
+  StrCmp $1 ">" nearly_path_bad
+  StrCmp $1 "|" nearly_path_bad
+  System::Call 'kernel32::GetStringTypeW(i 1, w r1, i 1, *i .r2) i.r4'
+  StrCmp $4 0 nearly_path_bad
+  IntOp $2 $2 & 0x20
+  StrCmp $2 0 0 nearly_path_bad
+  StrCpy $3 "$3$1"
+  IntOp $0 $0 + 1
+  Goto nearly_path_character
+  nearly_path_component:
+  StrCmp $3 "" nearly_path_bad
+  StrCpy $2 $3 1 -1
+  StrCmp $2 "." nearly_path_bad
+  StrCmp $2 " " nearly_path_bad
+  StrCpy $2 $3 1
+  StrCmp $2 " " nearly_path_bad
+  StrCpy $4 0
+  nearly_path_stem:
+  StrCpy $2 $3 1 $4
+  StrCmp $2 "" nearly_path_stem_done
+  StrCmp $2 "." nearly_path_stem_done
+  IntOp $4 $4 + 1
+  Goto nearly_path_stem
+  nearly_path_stem_done:
+  StrCpy $2 $3 $4
+  StrCmp $2 "CON" nearly_path_bad
+  StrCmp $2 "PRN" nearly_path_bad
+  StrCmp $2 "AUX" nearly_path_bad
+  StrCmp $2 "NUL" nearly_path_bad
+  StrCmp $2 "CONIN$$" nearly_path_bad
+  StrCmp $2 "CONOUT$$" nearly_path_bad
+  StrLen $4 $2
+  StrCmp $4 4 0 nearly_path_not_device
+  StrCpy $4 $2 3
+  StrCmp $4 "COM" nearly_path_device_digit
+  StrCmp $4 "LPT" nearly_path_device_digit nearly_path_not_device
+  nearly_path_device_digit:
+  StrCpy $4 $2 1 3
+  StrCmp $4 "1" nearly_path_bad
+  StrCmp $4 "2" nearly_path_bad
+  StrCmp $4 "3" nearly_path_bad
+  StrCmp $4 "4" nearly_path_bad
+  StrCmp $4 "5" nearly_path_bad
+  StrCmp $4 "6" nearly_path_bad
+  StrCmp $4 "7" nearly_path_bad
+  StrCmp $4 "8" nearly_path_bad
+  StrCmp $4 "9" nearly_path_bad
+  StrCmp $4 "¹" nearly_path_bad
+  StrCmp $4 "²" nearly_path_bad
+  StrCmp $4 "³" nearly_path_bad
+  nearly_path_not_device:
+  StrCmp $1 "" nearly_path_canonical
+  StrCpy $3 ""
+  IntOp $0 $0 + 1
+  Goto nearly_path_character
+  nearly_path_canonical:
+  System::Call 'kernel32::GetFullPathNameW(w "$INSTDIR", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i.r0'
+  StrCmp $0 0 nearly_path_bad
+  StrCmp $1 $INSTDIR 0 nearly_path_bad
+  StrCpy $1 $INSTDIR 3
+  System::Call 'kernel32::GetDriveTypeW(w r1) i.r0'
+  StrCmp $0 3 0 nearly_path_bad
+  ; Fail closed on filesystems without the NTFS identity/ACL guarantees used here.
+  System::Call 'kernel32::GetVolumeInformationW(w r1, p 0, i 0, p 0, p 0, p 0, w .r2, i ${NSIS_MAX_STRLEN}) i.r0'
+  StrCmp $0 1 0 nearly_path_bad
+  StrCmp $2 "NTFS" 0 nearly_path_bad
+  Return
+  nearly_path_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+
+Function ${prefix}NearlyPinDirectory
+  ; OPEN_REPARSE_POINT | BACKUP_SEMANTICS. Share read/write, never delete.
+  System::Call 'kernel32::CreateFileW(w "$NearlyWalk", i 0x20081, i 3, p 0, i 3, i 0x02200000, p 0) p.s'
+  Pop $NearlyHandle
+  StrCmp $NearlyHandle -1 nearly_pin_bad
+  System::Alloc 52
+  Pop $0
+  StrCpy $NearlyPendingBuffer $0
+  StrCmp $0 0 nearly_pin_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p $NearlyHandle, p r0) i.r1'
+  System::Call '*$0(i .r2)'
+  System::Free $0
+  StrCpy $NearlyPendingBuffer 0
+  StrCmp $1 1 0 nearly_pin_bad
+  IntOp $2 $2 & 0x410
+  IntCmp $2 0x10 0 nearly_pin_bad nearly_pin_bad
+  ; Reject SUBST, short-name aliases and namespace redirects, using this handle.
+  System::Call 'kernel32::GetFinalPathNameByHandleW(p $NearlyHandle, w .r1, i ${NSIS_MAX_STRLEN}, i 0) i.r0'
+  StrCmp $0 0 nearly_pin_bad
+  StrCmp $1 "\\?\$NearlyWalk" 0 nearly_pin_bad
+  Call ${prefix}NearlyCheckAcl
+  System::Alloc 8
+  Pop $0
+  StrCmp $0 0 nearly_pin_bad
+  System::Call '*$0(p $NearlyGuardHead, p $NearlyHandle)'
+  StrCpy $NearlyGuardHead $0
+  StrCpy $NearlyHandle 0
+  StrCpy $NearlyPendingBuffer 0
+  Return
+  nearly_pin_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+
+Function ${prefix}NearlyPinRoot
+  Call ${prefix}NearlyInitSids
+  Call ${prefix}NearlyValidatePath
+  StrCpy $NearlyRootMissing 0
+  StrCpy $NearlyLeafNode 0
+  StrCpy $NearlyWalk $INSTDIR 3
+  StrCpy $NearlyMask 0x500D0040 ; parent: delete/child-delete/security takeover
+  Call ${prefix}NearlyPinDirectory
+  StrCpy $NearlyIndex 3
+  nearly_root_character:
+  StrCpy $0 $INSTDIR 1 $NearlyIndex
+  StrCmp $0 "" nearly_root_final
+  StrCmp $0 "\" nearly_root_ancestor
+  StrCpy $NearlyWalk "$NearlyWalk$0"
+  IntOp $NearlyIndex $NearlyIndex + 1
+  Goto nearly_root_character
+  nearly_root_ancestor:
+  Call ${prefix}NearlyPinDirectory
+  StrCpy $NearlyWalk "$NearlyWalk\"
+  IntOp $NearlyIndex $NearlyIndex + 1
+  Goto nearly_root_character
+  nearly_root_final:
+  System::Call 'kernel32::GetFileAttributesW(w "$NearlyWalk") i.r0 ?e'
+  Pop $1
+  StrCmp $0 -1 0 nearly_root_present
+  StrCpy $0 $1
+  StrCmp $0 2 0 nearly_root_bad
+  StrCpy $NearlyRootMissing 1
+  Return
+  nearly_root_present:
+  StrCpy $NearlyMask 0x500D0156 ; root also rejects foreign file writes
+  Call ${prefix}NearlyPinDirectory
+  StrCpy $NearlyLeafNode $NearlyGuardHead
+  Return
+  nearly_root_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+
+Function ${prefix}NearlyReleaseLeaf
+  StrCmp $NearlyLeafNode 0 nearly_leaf_done
+  StrCmp $NearlyLeafNode $NearlyGuardHead 0 nearly_leaf_done
+  System::Call '*$NearlyGuardHead(p .r0, p .r1)'
+  System::Call 'kernel32::CloseHandle(p r1)'
+  System::Free $NearlyGuardHead
+  StrCpy $NearlyGuardHead $0
+  StrCpy $NearlyLeafNode 0
+  nearly_leaf_done:
+FunctionEnd
+Function ${prefix}NearlyReleaseGuards
+  Call ${prefix}NearlyReleaseLeaf
+  nearly_release_loop:
+  StrCmp $NearlyGuardHead 0 nearly_release_done
+  System::Call '*$NearlyGuardHead(p .r0, p .r1)'
+  System::Call 'kernel32::CloseHandle(p r1)'
+  System::Free $NearlyGuardHead
+  StrCpy $NearlyGuardHead $0
+  Goto nearly_release_loop
+  nearly_release_done:
+  StrCpy $NearlyLeafNode 0
+FunctionEnd
+
+Function ${prefix}NearlyValidatePayload
+  System::Call 'kernel32::CreateFileW(w "$NearlyPayload", i 0x20080, i 3, p 0, i 3, i 0x00200000, p 0) p.r0 ?e'
+  Pop $1
+  StrCmp $0 -1 nearly_payload_absent
+  StrCpy $NearlyHandle $0
+  System::Alloc 52
+  Pop $1
+  StrCpy $NearlyPendingBuffer $1
+  StrCmp $1 0 nearly_payload_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p r0, p r1) i.r2'
+  StrCmp $2 1 0 nearly_payload_bad
+  System::Call '*$1(i .r2)'
+  IntOp $3 $1 + 40
+  System::Call '*$3(i .r4)' ; NumberOfLinks must be single-link.
+  System::Free $1
+  StrCpy $NearlyPendingBuffer 0
+  IntOp $2 $2 & 0x410
+  StrCmp $2 0 0 nearly_payload_bad
+  StrCmp $4 1 0 nearly_payload_bad
+  StrCpy $NearlyMask 0x500D0156
+  Call ${prefix}NearlyCheckAcl
+  System::Call 'kernel32::CloseHandle(p $NearlyHandle)'
+  StrCpy $NearlyHandle 0
+  Return
+  nearly_payload_absent:
+  StrCpy $0 $1
+  StrCmp $0 2 0 nearly_payload_bad
+  Return
+  nearly_payload_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+Function ${prefix}NearlyValidatePayloads
+  StrCpy $NearlyPayload "$INSTDIR\${MAINBINARYNAME}.exe"
+  Call ${prefix}NearlyValidatePayload
+  StrCpy $NearlyPayload "$INSTDIR\uninstall.exe"
+  Call ${prefix}NearlyValidatePayload
+FunctionEnd
+!macroend
+!insertmacro NearlyRootFunctions ""
+!insertmacro NearlyRootFunctions "un."
+
+Function NearlyResolveRegistration
+  StrCpy $NearlyRegisteredRoot ""
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyOwner"
+  ReadRegStr $1 HKCU "${UNINSTKEY}" "InstallLocation"
+  StrCmp $0 "" 0 nearly_resolve_owned
+  StrCmp $1 "" 0 nearly_resolve_bad
+  Return
+  nearly_resolve_owned:
+  StrCmp $0 "${BUNDLEID}" 0 nearly_resolve_bad
+  StrCmp $1 "" nearly_resolve_bad
+  StrCpy $NearlyRegisteredRoot $1
+  ; /D is NSIS's special last argument; it is not exposed by GetParameters.
+  ; A fresh UI choice updates RequestedRoot; owned registration never migrates.
+  StrCmp $NearlyRequestedRoot $NearlyDefaultRoot nearly_resolve_use
+  StrCmp $NearlyRequestedRoot $NearlyRegisteredRoot 0 nearly_resolve_bad
+  nearly_resolve_use:
+  StrCpy $INSTDIR $NearlyRegisteredRoot
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "UninstallString"
+  StrCmp $0 '"$INSTDIR\uninstall.exe"' 0 nearly_resolve_bad
+  Call NearlyPinRoot
+  StrCmp $NearlyRootMissing 0 0 nearly_resolve_bad
+  Return
+  nearly_resolve_bad:
+  Call NearlyRejectRoot
+FunctionEnd
+
+Function NearlyRequireFreshContents
+  StrCmp $NearlyOwnedUpgrade 1 nearly_contents_done
+  StrCmp $NearlyRootMissing 1 nearly_contents_done
+  System::Alloc 592
+  Pop $NearlyFindData
+  StrCmp $NearlyFindData 0 nearly_contents_bad
+  System::Call 'kernel32::FindFirstFileW(w "$INSTDIR\*", p $NearlyFindData) p.r0 ?e'
+  Pop $1
+  StrCpy $NearlyEnum $0
+  StrCmp $NearlyEnum -1 0 nearly_contents_loop
+  StrCpy $0 $1
+  StrCmp $0 2 nearly_contents_free nearly_contents_bad
+  nearly_contents_loop:
+  IntOp $0 $NearlyFindData + 44
+  System::Call '*$0(&w260 .s)'
+  Pop $NearlyEntry
+  StrCmp $NearlyEntry "" nearly_contents_close
+  StrCmp $NearlyEntry "." nearly_contents_next
+  StrCmp $NearlyEntry ".." nearly_contents_next
+  StrCmp $INSTDIR $NearlyDefaultRoot 0 nearly_contents_bad
+  ; Only known settings/backup leaves may survive an unregistered default reinstall.
+  StrCmp $NearlyEntry "settings.json" nearly_contents_file
+  StrCmp $NearlyEntry "settings.backup.json" nearly_contents_file
+  StrCmp $NearlyEntry "history.json" nearly_contents_file
+  StrCmp $NearlyEntry "history.backup.json" nearly_contents_file
+  StrCmp $NearlyEntry "bookmarks.json" nearly_contents_file
+  StrCmp $NearlyEntry "bookmarks.backup.json" nearly_contents_file
+  StrCmp $NearlyEntry "sync-profiles.json" nearly_contents_file
+  StrCmp $NearlyEntry "sync-profiles.backup.json" nearly_contents_file
+  StrCmp $NearlyEntry "connections.json" nearly_contents_file
+  StrCmp $NearlyEntry "connections.backup.json" nearly_contents_file
+  StrCmp $NearlyEntry "Nearly.exe.WebView2" nearly_contents_webview nearly_contents_bad
+  nearly_contents_webview:
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\$NearlyEntry") i.r0'
+  IntOp $0 $0 & 0x410
+  IntCmp $0 0x10 nearly_contents_next nearly_contents_bad nearly_contents_bad
+  nearly_contents_file:
+  StrCpy $NearlyPayload "$INSTDIR\$NearlyEntry"
+  Call NearlyValidatePayload
+  nearly_contents_next:
+  System::Call 'kernel32::FindNextFileW(p $NearlyEnum, p $NearlyFindData) i.r0 ?e'
+  Pop $1
+  StrCmp $0 1 nearly_contents_loop
+  StrCpy $0 $1
+  StrCmp $0 18 0 nearly_contents_bad
+  nearly_contents_close:
+  System::Call 'kernel32::FindClose(p $NearlyEnum)'
+  nearly_contents_free:
+  System::Free $NearlyFindData
+  StrCpy $NearlyFindData 0
+  StrCpy $NearlyEnum 0
+  nearly_contents_done:
+  Return
+  nearly_contents_bad:
+  StrCmp $NearlyEnum 0 nearly_contents_free_error
+  StrCmp $NearlyEnum -1 nearly_contents_free_error
+  System::Call 'kernel32::FindClose(p $NearlyEnum)'
+  StrCpy $NearlyEnum 0
+  nearly_contents_free_error:
+  StrCmp $NearlyFindData 0 nearly_contents_release_error
+  System::Free $NearlyFindData
+  StrCpy $NearlyFindData 0
+  nearly_contents_release_error:
+  StrCpy $NearlyEnum 0
+  Call NearlyReleaseGuards
+  SetErrorLevel 7
+  Abort "$(NearlyExistingFiles)"
+FunctionEnd
+
+Function NearlyDirectoryPre
+  ${If} ${Silent}
+  ${OrIf} $NearlyPassive = 1
+  ${OrIf} $NearlyOwnedUpgrade = 1
+    Abort
+  ${EndIf}
+FunctionEnd
+Function NearlyDirectoryLeave
+  Call NearlyReleaseGuards
+  StrCpy $NearlyRequestedRoot $INSTDIR
+  Call NearlyPinRoot
+  Call NearlyCheckInstallOwnership
+  Call NearlyRequireFreshContents
+  StrCpy $NearlyPinAccess 6
+  StrCmp $NearlyRootMissing 0 nearly_page_access
+  StrCpy $NearlyPinAccess 4
+  ${GetParent} "$INSTDIR" $NearlyWalk
+  nearly_page_access:
+  System::Call 'kernel32::CreateFileW(w "$NearlyWalk", i $NearlyPinAccess, i 3, p 0, i 3, i 0x02200000, p 0) p.r0'
+  StrCmp $0 -1 0 +2
+    Call NearlyRejectRoot
+  System::Call 'kernel32::CloseHandle(p r0)'
+  ; Verify writeability without writing files during page navigation. The actual
+  ; leaf inherits ACLs, is checked and write-probed immediately before payload.
+  Call NearlyReleaseGuards
+FunctionEnd
 
 ; Validate canonical unsigned decimal before System converts PID/FILETIME input.
 ; Compare equal-length decimal strings digit-by-digit: never parse a possibly
@@ -268,9 +788,10 @@ FunctionEnd
 ; One Global application mutex conservatively serializes different users too.
 ; Older/external registry writers do not participate in this mutex protocol.
 !macro NearlyAcquireMutationBody
-  System::Call 'kernel32::CreateMutexW(p 0, i 1, w "Global\NearlyInstallMutation-local.syncfiles.native-v3") p.s'
-  Pop $NearlyMutationHandle
-  System::Call 'kernel32::GetLastError() i.r0'
+  System::Call 'kernel32::CreateMutexW(p 0, i 1, w "Global\NearlyInstallMutation-local.syncfiles.native-v3") p.r0 ?e'
+  Pop $1
+  StrCpy $NearlyMutationHandle $0
+  StrCpy $0 $1
   ${If} $NearlyMutationHandle P= 0
   ${OrIf} $0 = 183
     SetErrorLevel 8
@@ -286,6 +807,9 @@ FunctionEnd
 
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE NearlyDirectoryPre
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE NearlyDirectoryLeave
+!insertmacro MUI_PAGE_DIRECTORY
 Page custom NearlyShortcutPage NearlyShortcutPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_NOAUTOCLOSE
@@ -305,9 +829,9 @@ LangString NearlyShortcutTitle ${LANG_JAPANESE} "ショートカット"
 LangString NearlyShortcutSubtitle ${LANG_ENGLISH} "Choose where Nearly appears. Your choices are kept for upgrades."
 LangString NearlyShortcutSubtitle ${LANG_JAPANESE} "Nearly の表示場所を選んでください。更新時もこの選択を保持します。"
 LangString NearlyStartMenuText ${LANG_ENGLISH} "Create a Start menu shortcut"
-LangString NearlyStartMenuText ${LANG_JAPANESE} "スタートメニューにショートカットを作成する"
+LangString NearlyStartMenuText ${LANG_JAPANESE} "スタートメニューに登録する"
 LangString NearlyDesktopText ${LANG_ENGLISH} "Create a desktop shortcut"
-LangString NearlyDesktopText ${LANG_JAPANESE} "デスクトップにショートカットを作成する"
+LangString NearlyDesktopText ${LANG_JAPANESE} "デスクトップショートカットを作成する"
 LangString NearlyDataNotice ${LANG_ENGLISH} "Nearly installs for this Windows user only. Settings beside Nearly.exe are preserved during upgrades and uninstall."
 LangString NearlyDataNotice ${LANG_JAPANESE} "この Windows ユーザー専用にインストールします。Nearly.exe と同じ場所の設定は、更新時・アンインストール時にも残ります。"
 LangString NearlyCloseApp ${LANG_ENGLISH} "Nearly is running. Stop its syncs and close all Nearly windows, then run Setup again. Setup will not stop the app."
@@ -316,8 +840,8 @@ LangString NearlyCannotCheck ${LANG_ENGLISH} "Setup could not verify that Nearly
 LangString NearlyCannotCheck ${LANG_JAPANESE} "Nearly が終了していることを確認できませんでした。変更は行っていません。Nearly を閉じて、もう一度実行してください。"
 LangString NearlyWebViewMissing ${LANG_ENGLISH} "Microsoft Edge WebView2 Runtime is required. Install the runtime separately from Microsoft's official website, then run Nearly Setup again. Nearly and its settings have not been changed."
 LangString NearlyWebViewMissing ${LANG_JAPANESE} "Microsoft Edge WebView2 Runtime が必要です。Microsoft の公式サイトから別途インストールし、このセットアップを再実行してください。Nearly と設定は変更していません。"
-LangString NearlyCannotWrite ${LANG_ENGLISH} "Nearly must be installed in its writable per-user folder under LocalAppData. Check this folder's permissions and try again."
-LangString NearlyCannotWrite ${LANG_JAPANESE} "Nearly は LocalAppData 内の書き込み可能なユーザー専用フォルダーにインストールする必要があります。フォルダーのアクセス権を確認してください。"
+LangString NearlyCannotWrite ${LANG_ENGLISH} "Choose a dedicated private writable folder on a local fixed drive, with an existing parent (path up to 176 characters). Shared, redirected, ambiguous or unrelated nonempty folders cannot be used."
+LangString NearlyCannotWrite ${LANG_JAPANESE} "ローカル固定ドライブ上の、このユーザー専用の書き込み可能なフォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。共有・転送先・不明なファイルがあるフォルダーは使用できません。"
 LangString NearlyPayloadError ${LANG_ENGLISH} "Setup could not replace Nearly.exe. Close Nearly and try again. Your settings have not been removed."
 LangString NearlyPayloadError ${LANG_JAPANESE} "Nearly.exe を更新できませんでした。Nearly を閉じて再実行してください。設定は削除していません。"
 LangString NearlyWrongFolder ${LANG_ENGLISH} "This uninstaller only manages this user's original Nearly installation folder. No files were removed."
@@ -378,6 +902,7 @@ Function NearlyCheckInstallOwnership
   StrCmp $NearlyOwnedUpgrade 1 nearly_ownership_done 0
   IfSilent +2
     MessageBox MB_ICONSTOP|MB_OK "$(NearlyExistingFiles)"
+  Call NearlyReleaseGuards
   SetErrorLevel 7
   Abort
   nearly_ownership_done:
@@ -510,6 +1035,8 @@ Function NearlyShortcutPage
     EnableWindow $NearlyStartMenuCheckbox 0
     EnableWindow $NearlyDesktopCheckbox 0
   ${EndIf}
+  ; Capture choices on Back as well as Next before nsDialogs destroys controls.
+  ${NSD_OnBack} NearlyShortcutPageLeave
   nsDialogs::Show
 FunctionEnd
 Function NearlyShortcutPageLeave
@@ -606,10 +1133,25 @@ nearly_version_done:
 FunctionEnd
 
 Function .onInit
+  StrCpy $NearlyUserSid 0
+  StrCpy $NearlyGuardHead 0
+  StrCpy $NearlyLeafNode 0
+  StrCpy $NearlyHandle 0
+  StrCpy $NearlyPendingBuffer 0
+  StrCpy $NearlyEnum 0
+  StrCpy $NearlyFindData 0
   !insertmacro NearlyContext
-  ; Deliberately override /D= and any saved path: settings are EXE-adjacent and
-  ; this installer supports only the fixed, writable per-user location.
-  GetFullPathName $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
+  StrCpy $NearlyRequestedRoot $INSTDIR
+  GetFullPathName $NearlyDefaultRoot "$LOCALAPPDATA\${PRODUCTNAME}"
+  Call NearlyResolveRegistration
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/NEARLYSTAGE" $1
+  ${IfNot} ${Errors}
+    StrCmp $NearlyRegisteredRoot "" 0 +3
+      SetErrorLevel 8
+      Abort "Stage mode requires an owned registered installation."
+  ${EndIf}
   Call NearlyStageUpdate
   ${If} $NearlyUpdateMode = 3
     Return
@@ -629,8 +1171,9 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $NearlyNoShortcuts 1
   ${EndIf}
-  !insertmacro NearlyRequireTargetDirectory
-  Call NearlyCheckInstallOwnership
+  StrCpy $NearlyOwnedUpgrade 0
+  StrCmp $NearlyRegisteredRoot "" +2
+    Call NearlyCheckInstallOwnership
   Call NearlyLoadPreferences
   Call NearlyInferMissingShortcuts
   !if "{{display_language_selector}}" == "true"
@@ -671,6 +1214,7 @@ Function .onInstSuccess
 FunctionEnd
 
 Function .onGUIEnd
+  Call NearlyReleaseGuards
   StrCmp $NearlyParentHandle 0 +2
     System::Call 'kernel32::CloseHandle(p $NearlyParentHandle)'
   StrCmp $NearlyCommitHandle 0 +2
@@ -701,16 +1245,26 @@ Section Install
     Call NearlyExtractStage
     Return
   ${EndIf}
-  GetFullPathName $0 "$LOCALAPPDATA\${PRODUCTNAME}"
-  ${If} $INSTDIR != $0
-    SetErrorLevel 5
-    Abort "$(NearlyCannotWrite)"
-  ${EndIf}
-  ; Recheck immediately before mutation; a running app is never stopped.
-  !insertmacro NearlyRequireTargetDirectory
+  ; Registration and filesystem are checked again immediately before mutation.
+  Call NearlyReleaseGuards
+  Call NearlyResolveRegistration
+  StrCmp $NearlyRegisteredRoot "" 0 +2
+    Call NearlyPinRoot
   Call NearlyCheckInstallOwnership
+  Call NearlyRequireFreshContents
   !insertmacro NearlyRequireClosed
-  CreateDirectory "$INSTDIR"
+  ${If} $NearlyRootMissing = 1
+    ; CreateDirectoryW creates only the leaf. Ancestor guards stay held.
+    System::Call 'kernel32::CreateDirectoryW(w "$INSTDIR", p 0) i.r0'
+    StrCmp $0 0 0 +3
+      SetErrorLevel 5
+      Abort "$(NearlyCannotWrite)"
+    StrCpy $NearlyWalk $INSTDIR
+    StrCpy $NearlyMask 0x500D0156
+    Call NearlyPinDirectory
+    StrCpy $NearlyLeafNode $NearlyGuardHead
+  ${EndIf}
+  Call NearlyValidatePayloads
   System::Call 'kernel32::GetCurrentProcessId() i.r8'
   System::Call 'kernel32::CreateFileW(w "$INSTDIR\.nearly-installer-probe-$8.tmp", i 0x40010000, i 0, p 0, i 1, i 0x04000100, p 0) p.r9'
   ${If} $9 P= -1
@@ -766,39 +1320,154 @@ Section Install
   ${EndIf}
 SectionEnd
 
+; NSIS normally executes a byte-for-byte Temp self-copy. INSTDIR alone is not
+; origin proof because _?= can override it. Compare the actual mapped image's
+; file with the owned registered uninstaller while both regular files are held
+; without write/delete sharing. A same-byte copy is intentionally equivalent.
+Function un.NearlyImageCleanup
+  StrCmp $NearlyImageHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyImageHandle)'
+  StrCmp $NearlyRegisteredImageHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyRegisteredImageHandle)'
+  StrCmp $NearlyImageBuffer 0 +2
+    System::Free $NearlyImageBuffer
+  StrCmp $NearlyOtherBuffer 0 +2
+    System::Free $NearlyOtherBuffer
+  StrCpy $NearlyImageHandle 0
+  StrCpy $NearlyRegisteredImageHandle 0
+  StrCpy $NearlyImageBuffer 0
+  StrCpy $NearlyOtherBuffer 0
+FunctionEnd
+Function un.NearlyImageReject
+  Call un.NearlyImageCleanup
+  Call un.NearlyRejectRoot
+FunctionEnd
+Function un.NearlyOpenImage
+  System::Call 'kernel32::CreateFileW(w "$NearlyPayload", i 0x80000080, i 1, p 0, i 3, i 0x00200000, p 0) p.s'
+  Pop $NearlyHandle
+  StrCmp $NearlyHandle -1 nearly_image_open_bad
+  System::Call 'kernel32::GetFileType(p $NearlyHandle) i.r0'
+  StrCmp $0 1 0 nearly_image_open_bad
+  System::Alloc 52
+  Pop $NearlyPendingBuffer
+  StrCmp $NearlyPendingBuffer 0 nearly_image_open_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p $NearlyHandle, p $NearlyPendingBuffer) i.r0'
+  StrCmp $0 1 0 nearly_image_open_bad
+  System::Call '*$NearlyPendingBuffer(i .r0)'
+  IntOp $0 $0 & 0x410
+  StrCmp $0 0 0 nearly_image_open_bad
+  IntOp $0 $NearlyPendingBuffer + 32
+  System::Call '*$0(i .r1, i .r2, i .r3)'
+  StrCmp $1 0 0 nearly_image_open_bad
+  StrCmp $3 1 0 nearly_image_open_bad
+  ; Bound every read and allocation; reject empty/oversized images.
+  IntCmp $2 0 nearly_image_open_bad nearly_image_open_bad
+  IntCmp $2 67108864 0 0 nearly_image_open_bad
+  StrCpy $NearlyImageSize $2
+  System::Free $NearlyPendingBuffer
+  StrCpy $NearlyPendingBuffer 0
+  Return
+  nearly_image_open_bad:
+  Call un.NearlyImageReject
+FunctionEnd
+Function un.NearlyVerifyUninstallerImage
+  StrCpy $NearlyImageHandle 0
+  StrCpy $NearlyRegisteredImageHandle 0
+  StrCpy $NearlyImageBuffer 0
+  StrCpy $NearlyOtherBuffer 0
+  System::Call 'kernel32::GetModuleFileNameW(p 0, w .r0, i ${NSIS_MAX_STRLEN}) i.r1'
+  StrCmp $1 0 nearly_image_mismatch
+  IntCmp $1 ${NSIS_MAX_STRLEN} nearly_image_mismatch 0 nearly_image_mismatch
+  StrCpy $NearlyPayload $0
+  Call un.NearlyOpenImage
+  StrCpy $NearlyImageHandle $NearlyHandle
+  StrCpy $NearlyHandle 0
+  StrCpy $NearlyImageRemaining $NearlyImageSize
+  StrCpy $NearlyPayload "$INSTDIR\uninstall.exe"
+  Call un.NearlyOpenImage
+  StrCpy $NearlyRegisteredImageHandle $NearlyHandle
+  StrCpy $NearlyHandle 0
+  StrCmp $NearlyImageSize $NearlyImageRemaining 0 nearly_image_mismatch
+  System::Alloc 65536
+  Pop $NearlyImageBuffer
+  StrCmp $NearlyImageBuffer 0 nearly_image_mismatch
+  System::Alloc 65536
+  Pop $NearlyOtherBuffer
+  StrCmp $NearlyOtherBuffer 0 nearly_image_mismatch
+  nearly_image_read:
+  StrCmp $NearlyImageRemaining 0 nearly_image_equal
+  StrCpy $NearlyImageChunk $NearlyImageRemaining
+  IntCmp $NearlyImageChunk 65536 0 0 nearly_image_full_chunk
+  Goto nearly_image_chunk_ready
+  nearly_image_full_chunk:
+  StrCpy $NearlyImageChunk 65536
+  nearly_image_chunk_ready:
+  System::Call 'kernel32::ReadFile(p $NearlyImageHandle, p $NearlyImageBuffer, i $NearlyImageChunk, *i .r1, p 0) i.r0'
+  StrCmp $0 1 0 nearly_image_mismatch
+  StrCmp $1 $NearlyImageChunk 0 nearly_image_mismatch
+  System::Call 'kernel32::ReadFile(p $NearlyRegisteredImageHandle, p $NearlyOtherBuffer, i $NearlyImageChunk, *i .r1, p 0) i.r0'
+  StrCmp $0 1 0 nearly_image_mismatch
+  StrCmp $1 $NearlyImageChunk 0 nearly_image_mismatch
+  System::Call 'ntdll::RtlCompareMemory(p $NearlyImageBuffer, p $NearlyOtherBuffer, i $NearlyImageChunk) i.r0'
+  StrCmp $0 $NearlyImageChunk 0 nearly_image_mismatch
+  IntOp $NearlyImageRemaining $NearlyImageRemaining - $NearlyImageChunk
+  Goto nearly_image_read
+  nearly_image_equal:
+  ; Keep the proven image handles until immediately before self-deletion.
+  System::Free $NearlyImageBuffer
+  System::Free $NearlyOtherBuffer
+  StrCpy $NearlyImageBuffer 0
+  StrCpy $NearlyOtherBuffer 0
+  Return
+  nearly_image_mismatch:
+  Call un.NearlyImageReject
+FunctionEnd
+
+
 Function un.onInit
+  StrCpy $NearlyUserSid 0
+  StrCpy $NearlyGuardHead 0
+  StrCpy $NearlyLeafNode 0
+  StrCpy $NearlyHandle 0
+  StrCpy $NearlyPendingBuffer 0
+  StrCpy $NearlyEnum 0
+  StrCpy $NearlyFindData 0
+  StrCpy $NearlyImageHandle 0
+  StrCpy $NearlyRegisteredImageHandle 0
+  StrCpy $NearlyImageBuffer 0
+  StrCpy $NearlyOtherBuffer 0
   Call un.NearlyAcquireMutation
   !insertmacro NearlyContext
-  GetFullPathName $0 "$LOCALAPPDATA\${PRODUCTNAME}"
-  GetFullPathName $1 "$INSTDIR"
-  ${If} $0 != $1
-    IfSilent +2
-      MessageBox MB_ICONSTOP|MB_OK "$(NearlyWrongFolder)"
-    SetErrorLevel 5
-    Abort
-  ${EndIf}
-  !insertmacro NearlyRequireTargetDirectory
+  ; NSIS self-copies to Temp; $INSTDIR retains the original image directory.
+  StrCpy $NearlyRequestedRoot $INSTDIR
   ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyOwner"
-  ${If} $0 != "${BUNDLEID}"
-    IfSilent +2
-      MessageBox MB_ICONSTOP|MB_OK "$(NearlyWrongFolder)"
-    SetErrorLevel 5
-    Abort
-  ${EndIf}
-  ReadRegStr $0 HKCU "${UNINSTKEY}" "InstallLocation"
-  ${If} $0 != ""
-    GetFullPathName $0 "$0"
-  ${EndIf}
-  ${If} $0 != $1
-    IfSilent +2
-      MessageBox MB_ICONSTOP|MB_OK "$(NearlyWrongFolder)"
-    SetErrorLevel 5
-    Abort
-  ${EndIf}
+  ReadRegStr $NearlyRegisteredRoot HKCU "${UNINSTKEY}" "InstallLocation"
+  ReadRegStr $1 HKCU "${UNINSTKEY}" "UninstallString"
+  StrCmp $0 "${BUNDLEID}" 0 nearly_uninstall_wrong
+  StrCmp $NearlyRegisteredRoot "" nearly_uninstall_wrong
+  StrCmp $NearlyRegisteredRoot $NearlyRequestedRoot 0 nearly_uninstall_wrong
+  StrCmp $1 '"$NearlyRequestedRoot\uninstall.exe"' 0 nearly_uninstall_wrong
+  ; $EXEDIR may describe the Temp copy; use original $INSTDIR binding above.
+  Call un.NearlyPinRoot
+  StrCmp $NearlyRootMissing 0 0 nearly_uninstall_wrong
+  Call un.NearlyValidatePayloads
+  Call un.NearlyVerifyUninstallerImage
   !insertmacro NearlyRequireClosed
+  Return
+  nearly_uninstall_wrong:
+    SetErrorLevel 5
+    Abort "$(NearlyWrongFolder)"
+FunctionEnd
+
+Function un.onGUIEnd
+  Call un.NearlyImageCleanup
+  Call un.NearlyReleaseGuards
+  StrCmp $NearlyMutationHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyMutationHandle)'
 FunctionEnd
 
 Section Uninstall
+  Call un.NearlyValidatePayloads
   !insertmacro NearlyRequireTargetDirectory
   !insertmacro NearlyRequireClosed
   ClearErrors
@@ -810,9 +1479,16 @@ Section Uninstall
   !insertmacro NearlyApplyShortcut "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk" 0
   !insertmacro NearlyApplyShortcut "$DESKTOP\${PRODUCTNAME}.lnk" 0
   RMDir "$SMPROGRAMS\${PRODUCTNAME}"
+  Call un.NearlyImageCleanup
+  ClearErrors
   Delete "$INSTDIR\uninstall.exe"
+  ${If} ${Errors}
+    SetErrorLevel 6
+    Abort "$(NearlyPayloadError)"
+  ${EndIf}
   DeleteRegKey HKCU "${UNINSTKEY}"
   ; Preferences and all user data remain. Nonrecursive removal only succeeds
   ; for an empty folder; settings.json, backups and WebView data prevent it.
+  Call un.NearlyReleaseLeaf
   RMDir "$INSTDIR"
 SectionEnd

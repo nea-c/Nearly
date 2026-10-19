@@ -41,6 +41,7 @@ mod installer_qa;
 mod version;
 mod update_package;
 mod update_handoff;
+mod install_root;
 mod update_cleanup;
 mod update_transaction;
 mod update_restart;

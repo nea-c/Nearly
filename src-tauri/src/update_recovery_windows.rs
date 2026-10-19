@@ -63,8 +63,15 @@ pub(crate) fn capture_registered_root() -> Result<PinnedRoot> {
     {
         return Err(Error::Disabled);
     }
-    let image = crate::update_handoff::installed_executable().map_err(|_| Error::Unsafe)?;
-    PinnedRoot::capture(image.parent().ok_or(Error::Unsafe)?)
+    let installation = crate::install_root::RegisteredInstallation::capture_recovery()
+        .map_err(|_| Error::Unsafe)?;
+    // Admission guards stay alive while PinnedRoot acquires its own pins.
+    capture_admitted_root(installation)
+}
+fn capture_admitted_root(installation:crate::install_root::RegisteredInstallation)->Result<PinnedRoot>{
+    let mut root=PinnedRoot::capture(installation.root())?;
+    Arc::get_mut(&mut root.0).ok_or(Error::Unsafe)?.guards.extend(installation.into_guards());
+    Ok(root)
 }
 
 use crate::update_recovery::{
@@ -1508,17 +1515,15 @@ fn authenticate_installer(
 }
 pub(crate) fn ordinary_startup_allowed() -> std::result::Result<(), String> {
     (|| -> Result<()> {
-        let installed = match crate::update_handoff::installed_executable() {
-            Ok(path) => path,
-            Err(_) => return Ok(()),
+        let installation = match crate::install_root::RegisteredInstallation::capture_current_startup()
+            .map_err(|_| Error::Unsafe)? {
+            Some(installation) => installation,
+            None => return Ok(()),
         };
-        let current = std::env::current_exe().map_err(|_| Error::Io)?;
-        if dunce::canonicalize(&current).map_err(|_| Error::Io)?
-            != dunce::canonicalize(&installed).map_err(|_| Error::Io)?
-        {
+        if !installation.is_current().map_err(|_| Error::Unsafe)? {
             return Ok(());
         }
-        let root = PinnedRoot::capture(installed.parent().ok_or(Error::Unsafe)?)?;
+        let root = capture_admitted_root(installation)?;
         observed_startup_admission(&root)
     })()
     .map_err(|_| "An incomplete native update requires recovery before Nearly can open".into())
