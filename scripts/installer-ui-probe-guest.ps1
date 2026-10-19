@@ -10,6 +10,15 @@ function Write-ProbeEvent([string]$Phase,[string]$Event,[int]$Code=-1) {
   $script:phase=$Phase
   Write-Host ('Mock lifecycle: ' + (ConvertTo-Json -InputObject (New-ProbeEvent $Phase $Event $Code) -Compress))
 }
+function New-ProbeGate([string]$Stage,[string]$Event) {
+  if ($Stage -cnotin @('context','fixture','payload','registration','preferences','start-link','desktop-link','wide-reader','wsh-reader','identity-reader') -or $Event -cnotin @('start','finished','verified','failure')) { throw 'Unsupported mock diagnostic gate' }
+  return [ordered]@{stage=$Stage;event=$Event}
+}
+function Write-ProbeGate([string]$Stage,[string]$Event) {
+  $script:gate=$Stage
+  Write-Host ('Mock gate: '+(ConvertTo-Json -InputObject (New-ProbeGate $Stage $Event) -Compress))
+}
+$script:gate='context'
 function Assert-Path([string]$Path) {
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/') -or $Path.Substring(2).Contains(':') -or [IO.Path]::GetFullPath($Path) -cne $Path) { throw 'Invalid lifecycle path' }
   $cursor=$Path
@@ -103,32 +112,48 @@ public static class NearlyProbeShortcut {
 '@
 function Observe-Shortcut {
   $wide='';$wsh='';$wideAvailable=$false;$wshAvailable=$false;$shell=$null;$link=$null
+  Write-ProbeGate 'wide-reader' 'start'
   try { $wide=[NearlyProbeShortcut]::ReadWide($desktopShortcut);$wideAvailable=$true } catch {}
+  Write-ProbeGate 'wide-reader' 'finished'
+  Write-ProbeGate 'wsh-reader' 'start'
   try { $shell=New-Object -ComObject WScript.Shell;$link=$shell.CreateShortcut($desktopShortcut);$wsh=$link.TargetPath;$wshAvailable=$true } catch {}
   finally { foreach ($com in @($link,$shell)) { if ($null -ne $com -and [Runtime.InteropServices.Marshal]::IsComObject($com)) { try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) } catch {} } } }
+  Write-ProbeGate 'wsh-reader' 'finished'
+  Write-ProbeGate 'identity-reader' 'start'
   $checks=[NearlyProbeShortcut]::Compare($exe,$wide,$wsh)
   $record=[ordered]@{wideAvailable=$wideAvailable;wshAvailable=$wshAvailable;wideMatchesExpected=$checks[0];wshMatchesExpected=$checks[1];readersMatch=$checks[2];wideIdentityMatchesExpected=$checks[3];wshIdentityMatchesExpected=$checks[4]}
   Write-Host ('Mock shortcut: '+(ConvertTo-Json -InputObject $record -Compress))
   if (!$wideAvailable -or !$checks[0] -or !$checks[3]) { throw 'Wide mock shortcut target or file identity differs' }
+  Write-ProbeGate 'identity-reader' 'verified'
 }
 function Assert-NoApp {
   if (@(Get-Process -Name Nearly -ErrorAction SilentlyContinue).Count -ne 0) { throw 'Mock image must never launch' }
 }
 function Assert-Choices([bool]$Installed=$true) {
+  Write-ProbeGate 'preferences' 'start'
   $prefs=Get-ItemProperty -LiteralPath $preferences
   $expectedDesktop=if ($Boundary) { 0 } else { 1 }
   if ($prefs.StartMenuShortcut -ne 0 -or $prefs.DesktopShortcut -ne $expectedDesktop) { throw 'Mock shortcut choices changed' }
+  Write-ProbeGate 'preferences' 'verified'
+  Write-ProbeGate 'start-link' 'start'
   Assert-Path $startShortcut;if (Test-Path -LiteralPath $startShortcut) { throw 'Unselected mock shortcut exists' }
+  Write-ProbeGate 'start-link' 'verified'
+  Write-ProbeGate 'desktop-link' 'start'
   Assert-Path $desktopShortcut
-  if ($Installed -and $expectedDesktop -eq 1) { Assert-Regular $desktopShortcut;Observe-Shortcut }
+  if ($Installed -and $expectedDesktop -eq 1) { Assert-Regular $desktopShortcut;Write-ProbeGate 'desktop-link' 'verified';Observe-Shortcut }
   elseif (Test-Path -LiteralPath $desktopShortcut) { throw 'Removed or unselected mock shortcut exists' }
+  else { Write-ProbeGate 'desktop-link' 'verified' }
 }
 function Assert-Installed {
+  Write-ProbeGate 'payload' 'start'
   Assert-NoApp
   foreach ($file in @($exe,$uninstaller)) { Assert-Regular $file }
   if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $mock -Algorithm SHA256).Hash) { throw 'Installed mock bytes differ' }
+  Write-ProbeGate 'payload' 'verified'
+  Write-ProbeGate 'registration' 'start'
   $r=Get-ItemProperty -LiteralPath $registration
   if ($r.NearlyOwner -cne 'local.syncfiles.native' -or $r.NearlyInternalVersion -cne '1.9.0' -or $r.DisplayVersion -cne 'r1.9' -or $r.InstallLocation -ine $install -or $r.UninstallString -cne ('"'+$uninstaller+'"')) { throw 'Owned mock registration changed' }
+  Write-ProbeGate 'registration' 'verified'
   Assert-Choices
 }
 function Assert-Settings {
@@ -161,6 +186,7 @@ if ($Boundary) {
     }
     Write-ProbeEvent 'boundary' 'verified' 0
   } catch {
+    Write-ProbeGate $script:gate 'failure'
     Write-ProbeEvent 'boundary' 'failure'
     throw 'Mock boundary postconditions failed'
   }
@@ -169,9 +195,11 @@ if ($Boundary) {
 $script:phase='installed'
 try {
   Write-ProbeEvent 'installed' 'start'
+  Write-ProbeGate 'fixture' 'start'
   Assert-Regular $setup; Assert-Regular $mock 80
   $bytes=[IO.File]::ReadAllBytes($mock)
   if ($bytes.Length -ne 80 -or [BitConverter]::ToUInt16($bytes,0) -ne 0x5a4d -or [BitConverter]::ToUInt32($bytes,60) -ne 64 -or [BitConverter]::ToUInt32($bytes,64) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes,68) -ne 0x8664) { throw 'Invalid nonlaunchable mock fixture' }
+  Write-ProbeGate 'fixture' 'verified'
   Assert-Installed
   $originalCreated=(Get-Item -LiteralPath $install -Force).CreationTimeUtc.Ticks
   Write-ProbeEvent 'installed' 'verified' 0
@@ -209,6 +237,7 @@ try {
   Write-ProbeEvent 'verify' 'verified' 0
   Write-ProbeEvent 'complete' 'verified' 0
 } catch {
+  Write-ProbeGate $script:gate 'failure'
   Write-ProbeEvent $script:phase 'failure'
   throw 'Mock lifecycle diagnostic failed; inspect fixed phase/exit records'
 }

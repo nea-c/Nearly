@@ -2,6 +2,83 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::{Cell, RefCell};
 
+#[test]
+fn rm_snapshot_growth_discards_partial_entries_and_retains_foreign_users() {
+    let mut capacities = Vec::new();
+    let complete = rm_complete_snapshot_with(|entries| {
+        capacities.push(entries.len());
+        match entries.len() {
+            0 => RmReply { status: 234, needed: 1, count: 0 },
+            1 => { entries[0].process.pid = 999; RmReply { status: 234, needed: 2, count: 1 } },
+            2 => {
+                entries[0].process.pid = 42; entries[0].process.created.dwLowDateTime = 100;
+                entries[1].process.pid = 77; entries[1].process.created.dwLowDateTime = 200;
+                RmReply { status: 0, needed: 2, count: 2 }
+            },
+            _ => panic!("Only reported bounded capacity may be allocated"),
+        }
+    }).expect("ERROR_MORE_DATA growth requires another bounded fill query");
+    assert_eq!(capacities, [0, 1, 2]);
+    assert_eq!(complete.iter().map(|r| r.process.pid).collect::<Vec<_>>(), [42, 77]);
+    let own = ProcessIdentity { pid: 42, created: 100 };
+    assert!(rm_identity_allowed(&complete[0], &own, None));
+    assert!(!rm_identity_allowed(&complete[1], &own, None), "A complete snapshot must retain the foreign user");
+}
+
+#[test]
+fn rm_snapshot_growth_is_bounded_to_four_fill_queries() {
+    let mut capacities = Vec::new();
+    let result = rm_complete_snapshot_with(|entries| {
+        capacities.push(entries.len());
+        RmReply { status: 234, needed: entries.len() as u32 + 1, count: entries.len() as u32 }
+    });
+    assert!(matches!(result, Err(Error::Uncertain)));
+    assert_eq!(capacities, [0, 1, 2, 3, 4]);
+    let mut calls = 0;
+    assert_eq!(rm_complete_snapshot_with(|entries| {
+        calls += 1;
+        if calls == 5 { RmReply { status: 0, needed: 4, count: 4 } }
+        else { RmReply { status: 234, needed: entries.len() as u32 + 1, count: entries.len() as u32 } }
+    }).unwrap().len(), 4);
+}
+
+#[test]
+fn rm_snapshot_errors_or_invalid_sizes_never_authorize_or_retry_arbitrary_errors() {
+    let cases: Vec<Vec<(u32, u32, u32)>> = vec![
+        vec![(5, 1, 0)], vec![(0, 1, 0)], vec![(0, 0, 1)], vec![(234, 1, 1)],
+        vec![(234, 0, 0)], vec![(234, 33, 0)],
+        vec![(234, 1, 0), (5, 1, 1)],
+        vec![(234, 1, 0), (234, 1, 1)],
+        vec![(234, 2, 0), (234, 1, 1)],
+        vec![(234, 1, 0), (234, 33, 1)],
+        vec![(234, 1, 0), (234, 2, 2)],
+        vec![(234, 1, 0), (0, 1, 2)],
+        vec![(234, 1, 0), (0, 2, 1)],
+    ];
+    for replies in cases {
+        let mut queue: std::collections::VecDeque<_> = replies.into();
+        assert!(matches!(rm_complete_snapshot_with(|_| {
+            let (status, needed, count) = queue.pop_front().expect("No extra query may follow an arbitrary error or invalid size");
+            RmReply { status, needed, count }
+        }), Err(Error::Uncertain)));
+        assert!(queue.is_empty());
+    }
+}
+
+#[test]
+fn rm_snapshot_empty_complete_responses_do_not_expose_unused_entries() {
+    assert!(rm_complete_snapshot_with(|entries| {
+        assert!(entries.is_empty()); RmReply { status: 0, needed: 0, count: 0 }
+    }).unwrap().is_empty());
+    let mut calls = 0;
+    assert!(rm_complete_snapshot_with(|_| {
+        calls += 1;
+        if calls == 1 { RmReply { status: 234, needed: 32, count: 0 } }
+        else { RmReply { status: 0, needed: 0, count: 0 } }
+    }).unwrap().is_empty());
+    assert_eq!(calls, 2);
+}
+
 fn retained_test_peer() -> LivePeer {
     let path = std::env::current_exe().unwrap();
     let proof = FileProof::open(&path, false).unwrap().1;
