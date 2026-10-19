@@ -48,13 +48,80 @@ $startShortcut=Join-Path $startDirectory 'Nearly.lnk'
 $desktopShortcut=Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Nearly.lnk'
 $names=@('settings.json','history.json','bookmarks.json','sync-profiles.json','connections.json')
 $hashes=@{}
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+public static class NearlyProbeShortcut {
+  [ComImport,Guid("000214F9-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellLinkW {
+    [PreserveSig] int GetPath([Out,MarshalAs(UnmanagedType.LPWStr)] StringBuilder path,int count,IntPtr data,uint flags);
+  }
+  [StructLayout(LayoutKind.Sequential)] struct Info {
+    public uint Attributes;public FILETIME Creation,Access,Write;
+    public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
+  }
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+  static extern IntPtr CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(IntPtr file,out Info info);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr file);
+  public static string ReadWide(string shortcut) {
+    object link=null;
+    try {
+      link=Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
+      ((IPersistFile)link).Load(shortcut,0);
+      var path=new StringBuilder(32768);
+      if(((IShellLinkW)link).GetPath(path,path.Capacity,IntPtr.Zero,4)!=0)throw new Exception("Wide shortcut read failed");
+      return path.ToString();
+    } catch {throw new Exception("Wide shortcut read failed");}
+    finally {if(link!=null&&Marshal.IsComObject(link))Marshal.FinalReleaseComObject(link);}
+  }
+  static bool LocalPath(string path) {
+    if(string.IsNullOrEmpty(path)||path.Length<4||!char.IsLetter(path[0])||path[1]!=':'||path[2]!='\\'||path.IndexOf('/',0)>=0||path.IndexOf(':',2)>=0)return false;
+    foreach(var part in path.Substring(3).Split('\\'))if(part.Length==0||part=="."||part==".."||part.EndsWith(" ")||part.EndsWith("."))return false;
+    return true;
+  }
+  static bool SameFile(string expected,string observed) {
+    if(!LocalPath(expected)||!LocalPath(observed))return false;
+    IntPtr a=(IntPtr)(-1),b=(IntPtr)(-1);
+    try {
+      // Query existing files only, without following a reparse-point leaf.
+      a=CreateFileW(expected,0x80,7,IntPtr.Zero,3,0x200000,IntPtr.Zero);
+      b=CreateFileW(observed,0x80,7,IntPtr.Zero,3,0x200000,IntPtr.Zero);
+      if(a==(IntPtr)(-1)||b==(IntPtr)(-1))return false;
+      Info x,y;
+      return GetFileInformationByHandle(a,out x)&&GetFileInformationByHandle(b,out y)&&(x.Attributes&0x410)==0&&(y.Attributes&0x410)==0&&x.Volume==y.Volume&&x.IndexHigh==y.IndexHigh&&x.IndexLow==y.IndexLow;
+    } catch {return false;}
+    finally {if(a!=(IntPtr)(-1))CloseHandle(a);if(b!=(IntPtr)(-1))CloseHandle(b);}
+  }
+  public static bool[] Compare(string expected,string wide,string wsh) {
+    return new[]{string.Equals(wide,expected,StringComparison.Ordinal),string.Equals(wsh,expected,StringComparison.Ordinal),string.Equals(wide,wsh,StringComparison.Ordinal),SameFile(expected,wide),SameFile(expected,wsh)};
+  }
+}
+'@
+function Observe-Shortcut {
+  $wide='';$wsh='';$wideAvailable=$false;$wshAvailable=$false;$shell=$null;$link=$null
+  try { $wide=[NearlyProbeShortcut]::ReadWide($desktopShortcut);$wideAvailable=$true } catch {}
+  try { $shell=New-Object -ComObject WScript.Shell;$link=$shell.CreateShortcut($desktopShortcut);$wsh=$link.TargetPath;$wshAvailable=$true } catch {}
+  finally { foreach ($com in @($link,$shell)) { if ($null -ne $com -and [Runtime.InteropServices.Marshal]::IsComObject($com)) { try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) } catch {} } } }
+  $checks=[NearlyProbeShortcut]::Compare($exe,$wide,$wsh)
+  $record=[ordered]@{wideAvailable=$wideAvailable;wshAvailable=$wshAvailable;wideMatchesExpected=$checks[0];wshMatchesExpected=$checks[1];readersMatch=$checks[2];wideIdentityMatchesExpected=$checks[3];wshIdentityMatchesExpected=$checks[4]}
+  Write-Host ('Mock shortcut: '+(ConvertTo-Json -InputObject $record -Compress))
+  if (!$wideAvailable -or !$checks[0] -or !$checks[3]) { throw 'Wide mock shortcut target or file identity differs' }
+}
 function Assert-NoApp {
   if (@(Get-Process -Name Nearly -ErrorAction SilentlyContinue).Count -ne 0) { throw 'Mock image must never launch' }
 }
-function Assert-Choices {
+function Assert-Choices([bool]$Installed=$true) {
   $prefs=Get-ItemProperty -LiteralPath $preferences
-  if ($prefs.StartMenuShortcut -ne 0 -or $prefs.DesktopShortcut -ne 0) { throw 'Mock shortcut choices changed' }
-  foreach ($shortcut in @($startShortcut,$desktopShortcut)) { Assert-Path $shortcut; if (Test-Path -LiteralPath $shortcut) { throw 'Unselected mock shortcut exists' } }
+  $expectedDesktop=if ($Boundary) { 0 } else { 1 }
+  if ($prefs.StartMenuShortcut -ne 0 -or $prefs.DesktopShortcut -ne $expectedDesktop) { throw 'Mock shortcut choices changed' }
+  Assert-Path $startShortcut;if (Test-Path -LiteralPath $startShortcut) { throw 'Unselected mock shortcut exists' }
+  Assert-Path $desktopShortcut
+  if ($Installed -and $expectedDesktop -eq 1) { Assert-Regular $desktopShortcut;Observe-Shortcut }
+  elseif (Test-Path -LiteralPath $desktopShortcut) { throw 'Removed or unselected mock shortcut exists' }
 }
 function Assert-Installed {
   Assert-NoApp
@@ -137,7 +204,7 @@ try {
   if (!$removed) { throw 'Mock uninstall state timeout' }
   Write-ProbeEvent 'uninstall-wait' 'verified' 0
   Write-ProbeEvent 'verify' 'start'
-  Assert-NoApp; Assert-Path $install; Assert-Settings; Assert-Choices
+  Assert-NoApp; Assert-Path $install; Assert-Settings; Assert-Choices $false
   if (!(Test-Path -LiteralPath $install) -or (Get-Item -LiteralPath $install -Force).CreationTimeUtc.Ticks -ne $originalCreated -or $hashes.Count -ne 10) { throw 'Original settings root was not preserved' }
   Write-ProbeEvent 'verify' 'verified' 0
   Write-ProbeEvent 'complete' 'verified' 0

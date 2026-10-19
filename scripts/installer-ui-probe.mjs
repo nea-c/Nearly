@@ -14,6 +14,10 @@ export function validateProbeKind(kind,navigation){
   if(!['lifecycle','boundary'].includes(kind)||(kind==='boundary'&&navigation!=='Command'))fail('Select lifecycle or the Command-only boundary diagnostic');
   return kind;
 }
+export function probeShortcutChoices(kind){
+  if(!['lifecycle','boundary'].includes(kind))fail('Unsupported mock shortcut case');
+  return {start:0,desktop:kind==='lifecycle'?1:0};
+}
 function safePath(value){
   if(typeof value!=='string'||!/^[A-Za-z]:\\/.test(value)||/[\x00-\x1f$"<>|?*]/.test(value)||value.includes('/')||value.slice(2).includes(':')||path.win32.normalize(value)!==value||value.split('\\').some(part=>part==='.'||part==='..'||/[. ]$/.test(part)))fail('Unsafe NSIS probe path');
   return value;
@@ -83,7 +87,8 @@ export async function runProbe(e=process.env){
     // Only the deterministic parent is created; destination stays absent so
     // production directory admission sees a genuinely fresh installation.
     if(kind==='lifecycle')await fs.mkdir(path.dirname(plan.installRoot),{recursive:true});
-    await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-qa-ui.ps1'),'-RunRoot',plan.runRoot,'-Setup',path.join(plan.runRoot,'diagnostic-setup.exe'),'-InstallRoot',kind==='boundary'?plan.destinations.drive:plan.installRoot,'-Language','en','-Start','0','-Desktop','0','-CaseName',kind==='boundary'?'probe-drive':`probe-${navigation.toLowerCase()}`,'-Mode',kind==='boundary'?'Drive':'Install','-NavigationMode',navigation],{env,timeoutMs:240000});
+    const choices=probeShortcutChoices(kind);
+    await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-qa-ui.ps1'),'-RunRoot',plan.runRoot,'-Setup',path.join(plan.runRoot,'diagnostic-setup.exe'),'-InstallRoot',kind==='boundary'?plan.destinations.drive:plan.installRoot,'-Language','en','-Start',String(choices.start),'-Desktop',String(choices.desktop),'-CaseName',kind==='boundary'?'probe-drive':`probe-${navigation.toLowerCase()}`,'-Mode',kind==='boundary'?'Drive':'Install','-NavigationMode',navigation],{env,timeoutMs:240000});
     if(kind==='boundary')await execute('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'scripts','installer-ui-probe-guest.ps1'),'-RunRoot',plan.runRoot,'-Boundary'],{env,timeoutMs:30000});
     uiSucceeded=true;
     if(kind==='lifecycle'){

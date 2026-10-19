@@ -7,6 +7,71 @@ const modelTimeoutMs=60_000;
 const probe=await import('../scripts/installer-ui-probe.mjs').catch(()=>({}));
 const template=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
 const paths={runRoot:'D:\\temp\\nearly-installer-qa-123-1',tools:'C:\\local\\tauri\\NSIS',icon:'C:\\source\\src-tauri\\icons\\icon.ico'};
+test('mock lifecycle selects only desktop while the independent boundary keeps both shortcuts disabled',()=>{
+  assert.deepEqual(probe.probeShortcutChoices('lifecycle'),{start:0,desktop:1});
+  assert.deepEqual(probe.probeShortcutChoices('boundary'),{start:0,desktop:0});
+  assert.throws(()=>probe.probeShortcutChoices('other'));
+});
+test('wide shortcut diagnostics compare exact Unicode strings and existing file identities without native or COM calls',{skip:process.platform!=='win32'},async()=>{
+  const guestSource=await fs.readFile(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url),'utf8');
+  let csharp=guestSource.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp);
+  assert.match(csharp,/000214F9-0000-0000-C000-000000000046/);assert.match(csharp,/GetPath\(path,path\.Capacity,IntPtr\.Zero,4\)/);
+  csharp=csharp.replace('public static class NearlyProbeShortcut {','public static class NearlyProbeShortcut { public static int Opens=0,Closes=0;public static bool Unsafe=false;');
+  const native=(name,code)=>{const expression=new RegExp(String.raw`\[DllImport\("kernel32\.dll"[^\]]*\)\]\s*static extern [^\n;]+ ${name}\([^;]*\);`);assert.match(csharp,expression);csharp=csharp.replace(expression,code);};
+  native('CreateFileW','static IntPtr CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template){if(access!=0x80||share!=7||disposition!=3||flags!=0x200000)throw new Exception("Unexpected open policy");Opens++;return path.Contains("missing")?(IntPtr)(-1):path.Contains("different")?(IntPtr)2:(IntPtr)1;}');
+  native('GetFileInformationByHandle','static bool GetFileInformationByHandle(IntPtr file,out Info info){info=new Info{Attributes=Unsafe?0x400u:0u,Volume=1,IndexLow=(uint)file.ToInt64()};return true;}');
+  native('CloseHandle','static bool CloseHandle(IntPtr file){Closes++;return true;}');
+  const readWide=/public static string ReadWide\(string shortcut\) \{[\s\S]*?\r?\n  \}/;assert.match(csharp,readWide);
+  csharp=csharp.replace(readWide,'public static string ReadWide(string shortcut){return @"C:\\generated\\日本語 space\\Nearly.exe";}');
+  assert.doesNotMatch(csharp,/DllImport|\bextern\b|Activator\.CreateInstance|\.Load\(shortcut/);
+  const source=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+$expected='C:\generated\日本語 space\Nearly.exe'
+$checks=[NearlyProbeShortcut]::Compare($expected,$expected,'C:\generated\alias\Nearly.exe')
+if(!$checks[0] -or $checks[1] -or $checks[2] -or !$checks[3] -or !$checks[4]){throw 'Alias diagnostic did not distinguish string and identity'}
+$checks=[NearlyProbeShortcut]::Compare($expected,'C:\generated\different\Nearly.exe',$expected)
+if($checks[0] -or $checks[3] -or !$checks[4]){throw 'Foreign target identity accepted'}
+[NearlyProbeShortcut]::Unsafe=$true
+if(([NearlyProbeShortcut]::Compare($expected,$expected,$expected))[3]){throw 'Reparse target accepted'}
+[NearlyProbeShortcut]::Unsafe=$false
+if(([NearlyProbeShortcut]::Compare($expected,'\\foreign\share\Nearly.exe',$expected))[3]){throw 'UNC target accepted'}
+if([NearlyProbeShortcut]::Opens -ne [NearlyProbeShortcut]::Closes){throw 'Read-only handles leaked'}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Observe-Shortcut'},$true)
+Invoke-Expression $fn[0].Extent.Text
+function New-Object {param([string]$ComObject)if($ComObject -cne 'WScript.Shell'){throw 'Unexpected COM request'};$shell=[pscustomobject]@{};$shell | Add-Member ScriptMethod CreateShortcut {param($path)return [pscustomobject]@{TargetPath='C:\generated\alias\Nearly.exe'}};return $shell}
+$exe=$expected;$desktopShortcut='C:\generated\desktop.lnk'
+Observe-Shortcut
+'Inert wide shortcut model passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Inert wide shortcut model passed/);
+  const line=result.stdout.split(/\r?\n/).find(line=>line.startsWith('Mock shortcut: '));assert.ok(line);
+  const record=JSON.parse(line.slice('Mock shortcut: '.length));assert.equal(record.wideMatchesExpected,true);assert.equal(record.wshMatchesExpected,false);assert.equal(record.wideIdentityMatchesExpected,true);assert.ok(Object.values(record).every(value=>typeof value==='boolean'));assert.doesNotMatch(line,/C:|Nearly\.exe|日本語/);
+});
+test('mock desktop selection is retained after uninstall while both shortcut files must be absent',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref]$null,[ref]$null)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-Choices'},$true)
+Invoke-Expression $fn[0].Extent.Text
+$Boundary=$false;$preferences='generated';$startShortcut='start';$desktopShortcut='desktop';$script:exists=$true;$script:desktop=1;$script:observed=0
+function Get-ItemProperty {param($LiteralPath)return [pscustomobject]@{StartMenuShortcut=0;DesktopShortcut=$script:desktop}}
+function Assert-Path {}
+function Assert-Regular {}
+function Observe-Shortcut {$script:observed++}
+function Test-Path {param($LiteralPath)return $LiteralPath -ceq 'desktop' -and $script:exists}
+Assert-Choices
+if($script:observed -ne 1){throw 'Selected installed shortcut was not observed'}
+$script:exists=$false;Assert-Choices $false
+if($script:observed -ne 1){throw 'Removed shortcut was read after uninstall'}
+$Boundary=$true;$script:desktop=0;Assert-Choices
+$script:desktop=1;$rejected=$false;try{Assert-Choices}catch{$rejected=$true};if(!$rejected){throw 'Boundary preferences changed from 00'}
+'Inert retained shortcut preference model passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Inert retained shortcut preference model passed/);
+});
 test('mock payload has only bounded PE headers and cannot be mistaken for an application',()=>{
   const bytes=probe.mockPayload();assert.equal(bytes.length,80);assert.equal(bytes.readUInt16LE(0),0x5a4d);assert.equal(bytes.readUInt32LE(60),64);assert.equal(bytes.readUInt32LE(64),0x4550);assert.equal(bytes.readUInt16LE(68),0x8664);
   assert.equal(bytes.readUInt16LE(70),0);assert.ok(bytes.length<64+24,'even the full PE file header is absent');
