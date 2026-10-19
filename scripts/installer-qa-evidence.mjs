@@ -14,7 +14,7 @@ export function validatePublicSummary(v){
  for(const c of v.cases){keys(c,['case','passed']);if(!label(c.case)||typeof c.passed!=='boolean')fail();}
  return v;
 }
-const pages=['language','welcome','directory','destination-rejected','shortcuts-defaults','independent-0','independent-1','shortcuts-selected','directory-back','shortcuts-back-return','cancel-confirmation','finish-run-unchecked'];
+const pages=['language','welcome','directory','destination-rejected','shortcuts-defaults','independent-0','independent-1','shortcuts-selected','directory-back','shortcuts-back-return','cancel-confirmation','finish-run-unchecked','failure'];
 const captions={en:['Create a Start menu shortcut','Create a desktop shortcut'],ja:['スタートメニューに登録する','デスクトップショートカットを作成する']};
 export function validateUiEvidence(v){
  keys(v,['schemaVersion','case','language','mode','destinationKind','start','desktop','result','lastStage','events']);

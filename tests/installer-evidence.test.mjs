@@ -22,5 +22,7 @@ test('UI evidence requires known labels and state assertions rather than arbitra
  assert.equal(typeof evidence.validateUiEvidence,'function');
  const record={schemaVersion:1,case:'en-0-1',language:'en',mode:'Install',destinationKind:'default',start:0,desktop:1,result:'installed',lastStage:'finish',events:[{stage:'directory',screenshot:'directory.png'},{stage:'shortcut-assertions',captions:['Create a Start menu shortcut','Create a desktop shortcut'],defaults:[1,0],selected:[0,1],independentToggle:true},{stage:'finish-assertions',runUnchecked:true,backRetainedChoices:true,destinationFromActualEdit:true}]};
  assert.deepEqual(evidence.validateUiEvidence(record),record);
+ const failure={...record,result:'failed',lastStage:'shortcuts',events:[{stage:'failure',screenshot:'failure.png'}]};
+ assert.deepEqual(evidence.validateUiEvidence(failure),failure);
  for(const patch of [{token:'secret'},{events:[{stage:'directory',screenshot:'../secret.png'}]},{events:[{stage:'shortcut-assertions',captions:['private text','secret'],defaults:[1,0],selected:[0,1],independentToggle:true}]}])assert.throws(()=>evidence.validateUiEvidence({...record,...patch}));
 });

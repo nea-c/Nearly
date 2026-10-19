@@ -97,6 +97,9 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class NearlyOwnedUi {
+  public sealed class WindowChangedException : Exception {
+    public WindowChangedException(int expected,uint actual):base("Owned window changed; expected PID="+expected+", observed PID="+actual){}
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc fn, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc fn, IntPtr p);
@@ -115,7 +118,7 @@ public static class NearlyOwnedUi {
   [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
   public static void AssertOwner(IntPtr h, int pid) {
     uint actual; GetWindowThreadProcessId(h,out actual);
-    if(h==IntPtr.Zero || actual!=(uint)pid) throw new Exception("Window is not owned by launched setup");
+    if(h==IntPtr.Zero || actual!=(uint)pid) throw new WindowChangedException(pid,actual);
   }
   public static IntPtr[] Windows(int pid, IntPtr parent) {
     var found=new List<IntPtr>();
@@ -171,8 +174,22 @@ function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
   $deadline=[DateTime]::UtcNow.AddSeconds($Seconds)
   while ([DateTime]::UtcNow -lt $deadline) {
     Assert-Process
-    $value=& $Condition
-    if ($null -ne $value -and $value -ne $false -and $value -ne [IntPtr]::Zero) { return $value }
+    # Conditions only inspect controls. A page transition can destroy a child
+    # between enumeration and metadata access. Re-enumerate on that typed race;
+    # input methods still require ownership and propagate failures normally.
+    try { $value=& $Condition }
+    catch {
+      if ($_.Exception.GetBaseException() -isnot [NearlyOwnedUi+WindowChangedException]) { throw }
+      $value=$null
+    }
+    # PowerShell converts boxed IntPtr.Zero to true when comparing a Boolean.
+    # Keep the result kinds separate so true is accepted and a zero HWND is not.
+    $ready=if ($null -eq $value) { $false }
+      elseif ($value -is [bool]) { $value }
+      elseif ($value -is [IntPtr]) { $value -ne [IntPtr]::Zero }
+      elseif ($value -is [hashtable]) { $true }
+      else { throw 'Unsupported owned UI wait result type' }
+    if ($ready) { return $value }
     Start-Sleep -Milliseconds 150
   }
   throw 'Bounded owned installer UI wait timed out'
@@ -181,6 +198,21 @@ function Controls([IntPtr]$Parent) { Assert-Process; return [NearlyOwnedUi]::Win
 function ById([IntPtr]$Parent,[int]$Id) { return @(Controls $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id }) }
 function One-Control([object[]]$Items) { if ($Items.Count -ne 1) { $caller=(Get-PSCallStack)[1].ScriptLineNumber; throw "Expected exactly one owned visible control; count=$($Items.Count), caller=$caller" }; return [IntPtr]$Items[0] }
 function Click-Id([IntPtr]$Parent,[int]$Id) { [NearlyOwnedUi]::Click((One-Control @(ById $Parent $Id)),$ownedProcess.Id) }
+function Failure-ControlSnapshot([IntPtr]$Window) {
+  $entries=[Collections.Generic.List[object]]::new()
+  foreach ($control in @(Controls $Window | Select-Object -First 64)) {
+    try {
+      $class=[NearlyOwnedUi]::Class($control,$ownedProcess.Id)
+      $kind=switch -CaseSensitive ($class) {'Button' {'button'} 'Edit' {'edit'} 'ComboBox' {'combo'} 'Static' {'static'} '#32770' {'dialog'} default {'other'}}
+      $id=[NearlyOwnedUi]::GetDlgCtrlID($control)
+      if ($id -lt -1 -or $id -gt 65535) { $id=$null }
+      $entries.Add(@{kind=$kind;id=$id;enabled=[NearlyOwnedUi]::IsWindowEnabled($control)})
+    } catch {
+      if ($_.Exception.GetBaseException() -isnot [NearlyOwnedUi+WindowChangedException]) { throw }
+    }
+  }
+  return @($entries.ToArray())
+}
 function Screenshot([string]$Name,[IntPtr]$Window=$main) {
   Assert-Process
   $file=$Name+'.png'
@@ -356,10 +388,12 @@ try {
     }
   }
 } catch {
-  # On an early language-control failure retain the same owned dialog image,
-  # when available. Capture failure must not replace the original test error.
-  if ($stage -eq 'language' -and $languageWindow -ne [IntPtr]::Zero -and @($events | Where-Object stage -eq 'language').Count -eq 0) {
-    try { Screenshot 'language' $languageWindow } catch {}
+  # Preserve only owned-window pixels and bounded numeric/known-kind metadata.
+  # Never read arbitrary captions or let diagnostics replace the original error.
+  $failureWindow=if ($main -ne [IntPtr]::Zero) { $main } else { $languageWindow }
+  if ($failureWindow -ne [IntPtr]::Zero) {
+    try { Write-Host ('QA UI failure controls: '+(ConvertTo-Json -InputObject @(Failure-ControlSnapshot $failureWindow) -Depth 3 -Compress)) } catch {}
+    try { Screenshot 'failure' $failureWindow } catch {}
   }
   throw
 } finally {
