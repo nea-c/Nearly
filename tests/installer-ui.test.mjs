@@ -5,6 +5,41 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+test('owned visibility avoids the initial hidden startup override without repositioning windows',{skip:process.platform!=='win32'},()=>{
+  // Exercise the actual C# wrapper with native declarations replaced by a
+  // pure API-contract model. No user32 method or desktop is invoked.
+  let csharp=fs.readFileSync(script,'utf8').match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+  assert.ok(csharp,'owned interop source missing');
+  csharp=csharp.replace('public delegate bool EnumProc',`public static bool ModelVisible=true, ModelResult=true, ModelFirstShow=true; public static int ModelPositionCalls=0, ModelForegroundCalls=0;
+  public delegate bool EnumProc`);
+  const substitute=(name,definition,required=false)=>{
+    const pattern=new RegExp(String.raw`\[DllImport\("user32\.dll"[^\]]*\)\]\s*(?:public )?static extern (?:bool|uint) ${name}\([^;]*\);`);
+    if(required)assert.match(csharp,pattern,`native model declaration missing: ${name}`);
+    csharp=csharp.replace(pattern,definition);
+  };
+  substitute('GetWindowThreadProcessId','static uint GetWindowThreadProcessId(IntPtr h,out uint pid){pid=h==(IntPtr)1?7u:9u;return 1;}',true);
+  substitute('ShowWindow','static bool ShowWindow(IntPtr h,int command){ModelVisible=ModelFirstShow?false:command!=0;ModelFirstShow=false;return true;}');
+  substitute('SetForegroundWindow','static bool SetForegroundWindow(IntPtr h){if(h!=(IntPtr)1)throw new Exception("Foreign activation");ModelForegroundCalls++;return true;}',true);
+  substitute('SetWindowPos','static bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int width,int height,uint flags){if(h!=(IntPtr)1||after!=IntPtr.Zero||x!=0||y!=0||width!=0||height!=0||flags!=0x4057u)throw new Exception("Unsafe window positioning flags");ModelPositionCalls++;ModelVisible=ModelResult;return ModelResult;}');
+  // Every other imported API becomes a throwing fake as well. A future wrapper
+  // refactor must never turn this unit test into a real desktop operation.
+  csharp=csharp.replace(/\[DllImport\([^\]]+\)\]\s*((?:public )?static) extern ([^\n;]+);/g,'$1 $2 {throw new Exception("Unmodeled native call");}');
+  assert.doesNotMatch(csharp,/DllImport|\bextern\b/,'native declarations must all be replaced');
+  const source=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+[NearlyOwnedUi]::Show([IntPtr]1,7)
+if(![NearlyOwnedUi]::ModelVisible -or [NearlyOwnedUi]::ModelPositionCalls -ne 1){throw 'Owned dialog must remain visible without startup ShowWindow override'}
+$before=[NearlyOwnedUi]::ModelPositionCalls;$rejected=$false
+try{[NearlyOwnedUi]::Show([IntPtr]2,7)}catch{$rejected=$true}
+if(!$rejected -or [NearlyOwnedUi]::ModelPositionCalls -ne $before){throw 'Foreign window was not rejected before visibility change'}
+[NearlyOwnedUi]::ModelResult=$false;$rejected=$false
+try{[NearlyOwnedUi]::Show([IntPtr]1,7)}catch{$rejected=$true}
+if(!$rejected){throw 'Native visibility failure was ignored'}
+'Owned visibility API contract passed'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Owned visibility API contract passed/);
+});
 test('language selector waits for its owned combo after the dialog becomes visible',{skip:process.platform!=='win32'},()=>{
   const source=String.raw`
 $ErrorActionPreference='Stop'

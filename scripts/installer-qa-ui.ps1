@@ -108,7 +108,7 @@ public static class NearlyOwnedUi {
   [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int index);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
   [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int command);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out Rect rect);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
@@ -143,7 +143,13 @@ public static class NearlyOwnedUi {
     if(!PostMessage(h,245,IntPtr.Zero,IntPtr.Zero))throw new Exception("Owned control click failed");
   }
   public static bool Checkbox(IntPtr h,int pid) {AssertOwner(h,pid);int type=GetWindowLong(h,-16)&15;return Class(h,pid)=="Button"&&(type==2||type==3);}
-  public static void Show(IntPtr h,int pid) {AssertOwner(h,pid);ShowWindow(h,5);SetForegroundWindow(h);}
+  public static void Show(IntPtr h,int pid) {
+    AssertOwner(h,pid);
+    // Explicit visibility avoids ShowWindow's initial STARTUPINFO override.
+    // Preserve position/size/Z order; post asynchronously to the owning queue.
+    if(!SetWindowPos(h,IntPtr.Zero,0,0,0,0,0x4057))throw new Exception("Owned window visibility request failed");
+    SetForegroundWindow(h);
+  }
   public static int[] Bounds(IntPtr h,int pid) {
     AssertOwner(h,pid);Rect r;if(!GetWindowRect(h,out r)||r.Right-r.Left<100||r.Bottom-r.Top<50||r.Right-r.Left>2400||r.Bottom-r.Top>1800)throw new Exception("Unexpected owned window bounds");
     return new int[]{r.Right-r.Left,r.Bottom-r.Top};
