@@ -191,6 +191,15 @@ test('QA peer and supervisor diagnostics accept only their fixed event-specific 
     assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event,code,version:'2.0.0',pid:42})+'\n'),42));
   }
 });
+
+test('file-user observation stages and retained-peer failures remain fixed diagnostics only',()=>{
+  const mapping={fileUserObservation:['peerPrecheckFailed','rootVerificationFailed','rmStartFailed','rmRegisterFailed','rmFirstFailed','rmListFailed','rmCapacityInvalid','rmListExhausted','rmListGrowth','supervisorIdentityFailed'],peerObservation:['identityMismatch','waitFailed','pathMismatch','exitQueryFailed','stillActiveAfterSignal']};
+  for(const [event,codes]of Object.entries(mapping))for(const code of codes){
+    const row={event,code,version:'1.9.0',pid:42};
+    assert.deepEqual(qa.decodeQaTrace(Buffer.from(JSON.stringify(row)+'\n'),42),[row]);
+  }
+  for(const [event,code]of [['fileUserObservation','C:\\private\\app.exe'],['fileUserObservation','RmStartSession error5'],['fileUserObservation','identityMismatch'],['peerObservation','rmListGrowth'],['fileUserObservation','scanner.exe'],['fileUserObservation','rmListGrowth\n']])assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event,code,version:'1.9.0',pid:42})+'\n'),42));
+});
 test('QA trace collection reads at most eight exact PID files with a fixed size limit',async()=>{
   assert.equal(typeof qa.collectQaTraces,'function');
   const files=['authorization.json','qa-trace-0.jsonl','qa-trace-01.jsonl','qa-trace-4294967296.jsonl','qa-trace-42.jsonl\n','../qa-trace-42.jsonl',...Array.from({length:10},(_,i)=>`qa-trace-${i+1}.jsonl`)];

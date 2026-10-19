@@ -1641,15 +1641,28 @@ fn observe_retained_exit(
             crate::installer_qa::trace("peerObservation", "identityQueryFailed");
             error
         })?;
-        if observed != *expected { return Err(Error::Uncertain); }
+        if observed != *expected {
+            #[cfg(feature="installer-qa")]
+            crate::installer_qa::trace("peerObservation", "identityMismatch");
+            return Err(Error::Uncertain);
+        }
         Ok(())
     };
     verify_identity(identity())?;
+    let mut wait_for_signal = |milliseconds| signaled(milliseconds).map_err(|error| {
+        #[cfg(feature="installer-qa")]
+        crate::installer_qa::trace("peerObservation", "waitFailed");
+        error
+    });
     let mut exited_after_path_failure = false;
-    if !signaled(0)? {
+    if !wait_for_signal(0)? {
         match path() {
             Ok(observed) => {
-                if observed != expected_path { return Err(Error::Uncertain); }
+                if observed != expected_path {
+                    #[cfg(feature="installer-qa")]
+                    crate::installer_qa::trace("peerObservation", "pathMismatch");
+                    return Err(Error::Uncertain);
+                }
                 return Ok(None);
             }
             Err(error) => {
@@ -1658,7 +1671,7 @@ fn observe_retained_exit(
                 // Image queries can fail while the retained object is still
                 // tearing down. Wait once on that same handle, then revalidate
                 // its identity. A timeout/error never authorizes a live peer.
-                if !signaled(1000)? {
+                if !wait_for_signal(1000)? {
                     #[cfg(feature="installer-qa")]
                     crate::installer_qa::trace("peerObservation", "pathFailureStillLive");
                     return Err(error);
@@ -1668,8 +1681,16 @@ fn observe_retained_exit(
             }
         }
     }
-    let code = exit_code()?;
-    if code == 259 { return Err(Error::Uncertain); }
+    let code = exit_code().map_err(|error| {
+        #[cfg(feature="installer-qa")]
+        crate::installer_qa::trace("peerObservation", "exitQueryFailed");
+        error
+    })?;
+    if code == 259 {
+        #[cfg(feature="installer-qa")]
+        crate::installer_qa::trace("peerObservation", "stillActiveAfterSignal");
+        return Err(Error::Uncertain);
+    }
     #[cfg(feature="installer-qa")]
     if exited_after_path_failure {
         crate::installer_qa::trace("peerObservation", "exitAfterPathFailure");
@@ -2262,11 +2283,72 @@ unsafe extern "system" {
     ) -> u32;
     fn RmEndSession(session: u32) -> u32;
 }
+struct RmReply { status: u32, needed: u32, count: u32 }
+fn trace_file_user_observation(code: &'static str) {
+    #[cfg(feature="installer-qa")]
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static REPORTED: AtomicU32 = AtomicU32::new(0);
+        let bit = match code {
+            "peerPrecheckFailed" => 1, "rootVerificationFailed" => 2,
+            "rmStartFailed" => 4, "rmRegisterFailed" => 8,
+            "rmFirstFailed" => 16, "rmListFailed" => 32,
+            "rmCapacityInvalid" => 64, "rmListExhausted" => 128,
+            "rmListGrowth" => 256, "supervisorIdentityFailed" => 512,
+            _ => return,
+        };
+        if REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            crate::installer_qa::trace("fileUserObservation", code);
+        }
+    }
+    let _ = code;
+}
+fn rm_complete_snapshot_with(mut query: impl FnMut(&mut [RmInfo]) -> RmReply) -> Result<Vec<RmInfo>> {
+    let first = query(&mut []);
+    if first.status == 0 {
+        return if first.needed == 0 && first.count == 0 { Ok(Vec::new()) } else {
+            trace_file_user_observation("rmFirstFailed"); Err(Error::Uncertain)
+        };
+    }
+    if first.status != 234 || first.count != 0 {
+        trace_file_user_observation("rmFirstFailed"); return Err(Error::Uncertain);
+    }
+    let mut needed = first.needed;
+    let mut capacity = 0;
+    // ERROR_MORE_DATA is a sizing response, not permission to consume a partial
+    // list. Resource users may grow between calls. Complete at most four fills
+    // inside this one observation, retaining the existing 32-process ceiling.
+    for _ in 0..4 {
+        if needed == 0 || needed > 32 || needed <= capacity {
+            trace_file_user_observation("rmCapacityInvalid"); return Err(Error::Uncertain);
+        }
+        capacity = needed;
+        let mut information = vec![unsafe { std::mem::zeroed::<RmInfo>() }; capacity as usize];
+        let reply = query(&mut information);
+        if reply.count > capacity {
+            trace_file_user_observation("rmCapacityInvalid"); return Err(Error::Uncertain);
+        }
+        if reply.status == 0 {
+            if reply.needed > capacity {
+                trace_file_user_observation("rmCapacityInvalid"); return Err(Error::Uncertain);
+            }
+            information.truncate(reply.count as usize);
+            return Ok(information);
+        }
+        if reply.status != 234 {
+            trace_file_user_observation("rmListFailed"); return Err(Error::Uncertain);
+        }
+        trace_file_user_observation("rmListGrowth");
+        needed = reply.needed;
+    }
+    trace_file_user_observation("rmListExhausted");
+    Err(Error::Uncertain)
+}
 fn no_file_users(root: &PinnedRoot, allowed: Option<&LivePeer>) -> Result<bool> {
     if let Some(peer) = allowed {
-        peer.exited()?;
+        peer.exited().map_err(|error| { trace_file_user_observation("peerPrecheckFailed"); error })?;
     }
-    root.verify()?;
+    root.verify().map_err(|error| { trace_file_user_observation("rootVerificationFailed"); error })?;
     let mut id = 0;
     let mut key = [0u16; 33];
     let start_status = unsafe { RmStartSession(&mut id, 0, key.as_mut_ptr()) };
@@ -2275,6 +2357,7 @@ fn no_file_users(root: &PinnedRoot, allowed: Option<&LivePeer>) -> Result<bool> 
         eprintln!("RM start={} root={}", start_status, root.path().display());
     }
     if start_status != 0 {
+        trace_file_user_observation("rmStartFailed");
         return Err(Error::Uncertain);
     }
     struct Rm(u32);
@@ -2307,67 +2390,30 @@ fn no_file_users(root: &PinnedRoot, allowed: Option<&LivePeer>) -> Result<bool> 
         eprintln!("RM register={} files={:?}", register_status, LIVE_NAMES);
     }
     if register_status != 0 {
+        trace_file_user_observation("rmRegisterFailed");
         return Err(Error::Uncertain);
     }
-    let (mut needed, mut count, mut reasons) = (0, 0, 0);
-    let status = unsafe {
-        RmGetList(
-            session.0,
-            &mut needed,
-            &mut count,
-            std::ptr::null_mut(),
-            &mut reasons,
-        )
-    };
-    #[cfg(test)]
-    if std::env::var_os("NEARLY_RECOVERY_RM_TRACE").is_some() {
-        eprintln!(
-            "RM first={} needed={} count={} reasons={}",
-            status, needed, count, reasons
-        );
-    }
-    if status == 0 {
-        return Ok(needed == 0 && count == 0);
-    }
-    if status != 234 || needed == 0 || needed > 32 {
-        return Err(Error::Uncertain);
-    }
-    let mut information = vec![unsafe { std::mem::zeroed::<RmInfo>() }; needed as usize];
-    count = needed;
-    let list_status = unsafe {
-        RmGetList(
-            session.0,
-            &mut needed,
-            &mut count,
-            information.as_mut_ptr(),
-            &mut reasons,
-        )
-    };
-    #[cfg(test)]
-    if std::env::var_os("NEARLY_RECOVERY_RM_TRACE").is_some() {
-        eprintln!(
-            "RM list={} needed={} count={} reasons={}",
-            list_status, needed, count, reasons
-        );
-        for p in information
-            .iter()
-            .take((count as usize).min(information.len()))
-        {
-            let text = |s: &[u16]| {
-                String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
-            };
-            eprintln!("RM user pid={} created={} app={:?} service={:?} type={} status={} session={} restartable={}",p.process.pid,((p.process.created.dwHighDateTime as u64)<<32)|p.process.created.dwLowDateTime as u64,text(&p.application),text(&p.service),p.application_type,p.status,p.session,p.restartable);
+    let information = rm_complete_snapshot_with(|information| {
+        let (mut needed, mut count, mut reasons) = (0, information.len() as u32, 0);
+        let status = unsafe {
+            RmGetList(session.0, &mut needed, &mut count,
+                if information.is_empty() { std::ptr::null_mut() } else { information.as_mut_ptr() },
+                &mut reasons)
+        };
+        #[cfg(test)]
+        if std::env::var_os("NEARLY_RECOVERY_RM_TRACE").is_some() {
+            eprintln!("RM snapshot={} needed={} count={} capacity={} reasons={}", status, needed, count, information.len(), reasons);
         }
-    }
-    if list_status != 0 || count as usize > information.len() {
-        return Err(Error::Uncertain);
-    }
+        RmReply { status, needed, count }
+    })?;
     // Our own immutable proof pins are legitimate resource users. The helper
     // enters before Tauri/normal operations, so only this exact native process
     // and (during probation) its exact retained child may be excluded.
-    let supervisor = current_process_identity()?;
+    let supervisor = current_process_identity().map_err(|error| {
+        trace_file_user_observation("supervisorIdentityFailed"); error
+    })?;
     let mut clean = true;
-    for entry in &information[..count as usize] {
+    for entry in &information {
         if !rm_identity_allowed(entry, &supervisor, allowed.map(|p| &p.identity)) {
             clean = false;
             #[cfg(feature="installer-qa")]
@@ -2392,7 +2438,7 @@ fn settled_no_file_users_with(
     mut elapsed: impl FnMut() -> Duration,
     mut pause: impl FnMut(),
 ) -> Result<bool> {
-    if let Some(peer) = allowed { peer.exited()?; }
+    if let Some(peer) = allowed { peer.exited().map_err(|error| { trace_file_user_observation("peerPrecheckFailed"); error })?; }
     let may_wait = allowed.is_some();
     loop {
         if observe(root, allowed)? {

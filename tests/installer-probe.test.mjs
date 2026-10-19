@@ -12,6 +12,21 @@ test('mock lifecycle selects only desktop while the independent boundary keeps b
   assert.deepEqual(probe.probeShortcutChoices('boundary'),{start:0,desktop:0});
   assert.throws(()=>probe.probeShortcutChoices('other'));
 });
+test('mock gate diagnostics expose only fixed stage/event enums',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref]$null,[ref]$null)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-ProbeGate'},$true)
+if($fn.Count -ne 1){throw 'Gate validator missing'}
+Invoke-Expression $fn[0].Extent.Text
+$record=New-ProbeGate 'desktop-link' 'start'
+if($record.stage -cne 'desktop-link' -or $record.event -cne 'start'){throw 'Fixed stage lost'}
+foreach($bad in @(@('C:\private\sentinel','failure'),@('payload','COM exception body'))){$rejected=$false;try{New-ProbeGate $bad[0] $bad[1]|Out-Null}catch{$rejected=$true};if(!$rejected){throw 'Arbitrary diagnostic accepted'}}
+'Fixed gate model passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Fixed gate model passed/);
+});
 test('wide shortcut diagnostics compare exact Unicode strings and existing file identities without native or COM calls',{skip:process.platform!=='win32'},async()=>{
   const guestSource=await fs.readFile(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url),'utf8');
   let csharp=guestSource.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp);
@@ -40,6 +55,7 @@ $ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref
 $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Observe-Shortcut'},$true)
 Invoke-Expression $fn[0].Extent.Text
 function New-Object {param([string]$ComObject)if($ComObject -cne 'WScript.Shell'){throw 'Unexpected COM request'};$shell=[pscustomobject]@{};$shell | Add-Member ScriptMethod CreateShortcut {param($path)return [pscustomobject]@{TargetPath='C:\generated\alias\Nearly.exe'}};return $shell}
+function Write-ProbeGate {}
 $exe=$expected;$desktopShortcut='C:\generated\desktop.lnk'
 Observe-Shortcut
 'Inert wide shortcut model passed'
@@ -60,6 +76,7 @@ function Get-ItemProperty {param($LiteralPath)return [pscustomobject]@{StartMenu
 function Assert-Path {}
 function Assert-Regular {}
 function Observe-Shortcut {$script:observed++}
+function Write-ProbeGate {}
 function Test-Path {param($LiteralPath)return $LiteralPath -ceq 'desktop' -and $script:exists}
 Assert-Choices
 if($script:observed -ne 1){throw 'Selected installed shortcut was not observed'}

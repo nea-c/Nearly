@@ -90,7 +90,8 @@ const TRACE_CODES=Object.freeze({
   supervisorChild:['NotStarted','LiveUnhealthy','LiveHealthy','Exited','Uncertain'],
   supervisorBlock:['rootLeaseInvalid','snapshotsChanged','settingsChanged','otherFileUsers','workerUncertain','childUncertain','childNotIdle','childExitTimedOut'],
   fileUserHint:['scannerHint','webviewHint','childIdentityMismatch','unknown'],
-  peerObservation:['pathQueryFailed','exitAfterPathFailure','pathFailureStillLive','identityQueryFailed'],
+  peerObservation:['pathQueryFailed','exitAfterPathFailure','pathFailureStillLive','identityQueryFailed','identityMismatch','waitFailed','pathMismatch','exitQueryFailed','stillActiveAfterSignal'],
+  fileUserObservation:['peerPrecheckFailed','rootVerificationFailed','rmStartFailed','rmRegisterFailed','rmFirstFailed','rmListFailed','rmCapacityInvalid','rmListExhausted','rmListGrowth','supervisorIdentityFailed'],
   supervisorError:['parent','commit','child','worker','fileUsers','idle','tuple','exitRequest'],
   restoration:['verified','restartIssued','confirmed','rejected'],outcome:['succeeded','rolledBack','failed','writeFailed'],
 });
