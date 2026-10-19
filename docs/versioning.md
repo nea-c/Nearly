@@ -1,6 +1,6 @@
 # Release versions
 
-`version.json` is the single authoritative version source. The current batch is **r1.0** (internal `1.0.0`). Do not increment it merely because this batch contains several features. Future major features increment X; minor fixes increment Y. Version changes are explicit release decisions, never automatic build increments.
+`version.json` is the single authoritative version source. The approved release is **r3.0** (internal `3.0.0`), introducing production automatic-update handoff and refreshed application/status artwork. Major features increment X; minor fixes increment Y. Version changes are explicit release decisions, never automatic build increments.
 
 The mapping is one-to-one: `X.Y.0` internally becomes `rX.Y` in Settings and the GitHub release tag. For example, `1.0.0` → `r1.0`, `1.1.0` → `r1.1`, and `2.0.0` → `r2.0`. Components are decimal integers from 0 through 65535 without leading zeros. Nonzero internal patch versions, prerelease versions, and build metadata are rejected: they cannot be represented without ambiguity by this two-component public policy.
 
@@ -10,4 +10,4 @@ Stable GitHub releases must use the exact canonical tag `rX.Y` and its matching 
 
 Published distribution artifacts use the public release label. For tag `r1.0`, the x64 installer is `Nearly_r1.0_x64-setup.exe`, and its detached signature is `Nearly_r1.0_x64-setup.exe.sig`; both URLs must be under `/nea-c/Nearly/releases/download/r1.0/`. The authenticated minisign trusted comment must contain exactly one `version:1.0.0` field and exactly one `file:Nearly_r1.0_x64-setup.exe` field. Neither a public tag in the signed version field nor another version's filename is accepted. Build manifests record the internal version and its derived public displayVersion. Tauri may emit an intermediate numeric bundle name; publication copies its unchanged bytes to the public filename.
 
-Version preparation grants no distribution trust. The production signing key remains absent and `HANDOFF_RELEASE_VALIDATED` remains false. Signing, publishing, installation and enabling updater handoff remain separate work.
+Version preparation grants no distribution trust. Production key registration and the explicitly approved `HANDOFF_RELEASE_VALIDATED=true` gate are already in place. The existing signed release workflow still requires exact reviewed source/version bindings and the owner's protected Environment approval before using the registered signing secrets. Publishing a release never installs it on the developer's PC.
