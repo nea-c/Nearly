@@ -7,6 +7,97 @@ import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:['C:','Users','runneradmin','AppData','Local'].join(String.fromCharCode(92)),QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('qualification wide shortcut reader preserves Unicode and ordinal case policy without accepting other paths',{skip:process.platform!=='win32'},async()=>{
+  const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+  let csharp=source.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp,'Wide reader missing');
+  assert.match(csharp,/000214F9-0000-0000-C000-000000000046/);assert.match(csharp,/\.Load\(shortcut,0\)!=0/);assert.match(csharp,/StringBuilder\(32768\)/);assert.match(csharp,/GetPath\(target,target\.Capacity,IntPtr\.Zero,4\)!=0/);assert.match(csharp,/finally/);
+  assert.ok(source.indexOf('Add-Type -TypeDefinition')>source.indexOf("throw 'Owned plan marker mismatch'"));
+  const method=/public static string ReadWide\(string shortcut\) \{[\s\S]*?\r?\n  \}/;assert.match(csharp,method);
+  csharp=csharp.replace(method,'public static string ReadWide(string shortcut){throw new Exception("COM disabled in pure model");}');
+  assert.doesNotMatch(csharp,/Activator\.CreateInstance|\.Load\(shortcut|FinalReleaseComObject|DllImport/);
+  const script=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+$expected='C:\generated\日本語 space\Nearly\Nearly.exe'
+foreach($actual in @($expected,'c:\GENERATED\日本語 SPACE\nearly\NEARLY.EXE')){if(![NearlyQaShortcut]::TargetMatches($expected,$actual)){throw 'Exact Unicode/case path rejected'}}
+foreach($actual in @('C:\generated\日本語 space\Other\Nearly.exe','C:\genera~1\NIHONG~1\Nearly\Nearly.exe','Nearly.exe','.\Nearly.exe','C:\generated\日本語 space\Nearly\..\Nearly\Nearly.exe')){if([NearlyQaShortcut]::TargetMatches($expected,$actual)){throw 'Foreign or alias path accepted'}}
+'Pure wide shortcut target comparison passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Pure wide shortcut target comparison passed/);
+});
+test('wide qualification rejects every nonzero Load/GetPath HRESULT using managed fake COM interfaces',{skip:process.platform!=='win32'},async()=>{
+  const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+  let csharp=source.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp);
+  const persist=csharp.match(/interface IPersistFileRaw \{([\s\S]*?)\n  \}/)?.[1];assert.ok(persist);
+  assert.deepEqual([...persist.matchAll(/\[PreserveSig\] int ([A-Za-z]+)\(/g)].map(match=>match[1]),['GetClassID','IsDirty','Load','Save','SaveCompleted','GetCurFile']);
+  csharp=csharp.replaceAll('[ComImport,Guid(','[Guid(');
+  const factory=/link=Activator\.CreateInstance\([^;]+\);/;assert.match(csharp,factory);csharp=csharp.replace(factory,'link=new Fake();');
+  csharp=csharp.replace('public static class NearlyQaShortcut {',`public static class NearlyQaShortcut {
+  public static int LoadCode=0,PathCode=0,PathCalls=0;public static bool Empty=false;
+  sealed class Fake:IPersistFileRaw,IShellLinkW {
+    public int GetClassID(out Guid id){throw new Exception("Unmodeled method");}
+    public int IsDirty(){throw new Exception("Unmodeled method");}
+    public int Load(string path,uint mode){if(path!="inert.lnk"||mode!=0)throw new Exception("Unexpected load mode");return LoadCode;}
+    public int Save(string path,bool remember){throw new Exception("Mutation forbidden");}
+    public int SaveCompleted(string path){throw new Exception("Mutation forbidden");}
+    public int GetCurFile(out IntPtr path){throw new Exception("Unmodeled method");}
+    public int GetPath(StringBuilder target,int count,IntPtr data,uint flags){if(count!=32768||data!=IntPtr.Zero||flags!=4)throw new Exception("Unexpected wide read mode");PathCalls++;if(!Empty)target.Append(@"C:\\generated\\日本語 space\\Nearly.exe");return PathCode;}
+  }`);
+  assert.doesNotMatch(csharp,/ComImport|Activator\.CreateInstance|DllImport/);
+  const script=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+$expected='C:\generated\日本語 space\Nearly.exe'
+foreach($code in @(-2147467259,1)){
+ [NearlyQaShortcut]::LoadCode=$code;[NearlyQaShortcut]::PathCalls=0
+ $rejected=$false;try{[NearlyQaShortcut]::Matches('inert.lnk',$expected)|Out-Null}catch{$rejected=$_.Exception.GetBaseException().Message -ceq 'Wide shortcut read failed'}
+ if(!$rejected -or [NearlyQaShortcut]::PathCalls -ne 0){throw 'Nonzero Load HRESULT accepted'}
+}
+[NearlyQaShortcut]::LoadCode=0
+foreach($code in @(-2147467259,1)){
+ [NearlyQaShortcut]::PathCode=$code;[NearlyQaShortcut]::Empty=$true
+ $rejected=$false;try{[NearlyQaShortcut]::Matches('inert.lnk',$expected)|Out-Null}catch{$rejected=$_.Exception.GetBaseException().Message -ceq 'Wide shortcut read failed'}
+ if(!$rejected){throw 'Nonzero GetPath HRESULT accepted'}
+}
+[NearlyQaShortcut]::PathCode=0
+if([NearlyQaShortcut]::Matches('inert.lnk',$expected)){throw 'Empty successful read accepted'}
+[NearlyQaShortcut]::Empty=$false
+if(![NearlyQaShortcut]::Matches('inert.lnk',$expected)){throw 'Exact zero HRESULT Unicode target rejected'}
+'Managed HRESULT failure model passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Managed HRESULT failure model passed/);
+});
+
+test('shortcut qualification checks regular no-reparse input before activating the wide reader',{skip:process.platform!=='win32'},()=>{
+  const script=String.raw`
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class NearlyQaShortcut {
+ public static int Activations=0;public static bool Guarded=false,Match=true;
+ public static bool Matches(string shortcut,string expected){if(!Guarded)throw new Exception("Reader activated before file guard");Guarded=false;Activations++;return Match;}
+}
+'@
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_TEST_SOURCE,[ref]$null,[ref]$null)
+$guard=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-Regular'},$true)
+if($guard.Count -ne 1 -or $guard[0].Extent.Text -notmatch 'Assert-LocalPath \$Path'){throw 'Actual regular-file guard lost ancestry validation'}
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-Shortcuts'},$true)
+Invoke-Expression $fn[0].Extent.Text
+$startShortcut='generated-start';$desktopShortcut='generated-desktop';$exe='generated-exe';$preferences='generated-prefs';$script:deny=$false
+function Test-Path {return $true}
+function New-Object {throw 'COM activation disabled in inert test'}
+function Assert-Regular {if($script:deny){throw 'Regular/reparse guard refused'};[NearlyQaShortcut]::Guarded=$true}
+function Get-ItemProperty {return [pscustomobject]@{StartMenuShortcut=1;DesktopShortcut=1}}
+Assert-Shortcuts 1 1
+if([NearlyQaShortcut]::Activations -ne 2){throw 'Both existing shortcuts not read'}
+$script:deny=$true;$before=[NearlyQaShortcut]::Activations;$rejected=$false;try{Assert-Shortcuts 1 1}catch{$rejected=$true}
+if(!$rejected -or [NearlyQaShortcut]::Activations -ne $before){throw 'Refused file reached COM reader'}
+$script:deny=$false;[NearlyQaShortcut]::Match=$false;$rejected=$false;try{Assert-Shortcuts 1 1}catch{$rejected=$true}
+if(!$rejected){throw 'Foreign wide target accepted'}
+'Guarded inert wide-reader activation passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,QA_TEST_SOURCE:fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:60000});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Guarded inert wide-reader activation passed/);
+});
+
 test('guest JSON comparison normalizes empty objects without running a guest action',{skip:process.platform!=='win32'},()=>{
   const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./installer-qa-normalize.ps1',import.meta.url)),'-Source',fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))],{encoding:'utf8',windowsHide:true,timeout:15000});
   assert.equal(r.status,0,r.stderr||r.error?.message);
