@@ -78,7 +78,7 @@ test("installer shows public release labels while numeric Windows and downgrade 
 });
 
 test("actual installed version reader prefers internal metadata and validates legacy fallback", () => {
-  for (const registry of [{}, {DisplayVersion:'0.2.0'}, {NearlyInternalVersion:'1.10.0',DisplayVersion:'r1.10'}, {NearlyInternalVersion:'2.0.0',DisplayVersion:'0.1.0'}]) {
+  for (const registry of [{}, {DisplayVersion:'0.2.0'}, {NearlyInternalVersion:'1.10.0',DisplayVersion:'r1.10'}, {NearlyInternalVersion:'2.0.0',DisplayVersion:'0.1.0'}, {NearlyInternalVersion:'3.0.0',DisplayVersion:'r3.0'}]) {
     const result=runDecision('NearlyReadInstalledVersion',{registry});
     assert.equal(result.aborted,false);
     assert.equal(result.variables['0'],registry.NearlyInternalVersion ?? registry.DisplayVersion ?? '');

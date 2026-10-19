@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {displayVersion, internalVersion, compareReleaseTags, checkVersions, versionFiles, generatedFrontend, readVersion, projectRoot} from '../scripts/version.mjs';
 
 test('release labels have a lossless stable internal mapping and numeric order', () => {
-  for (const [internal, label] of [['1.0.0','r1.0'], ['1.1.0','r1.1'], ['2.0.0','r2.0'], ['1.10.0','r1.10']]) {
+  for (const [internal, label] of [['1.0.0','r1.0'], ['1.1.0','r1.1'], ['2.0.0','r2.0'], ['1.10.0','r1.10'], ['3.0.0','r3.0'], ['3.1.0','r3.1']]) {
     assert.equal(displayVersion(internal), label);
     assert.equal(internalVersion(label), internal);
   }
@@ -15,6 +15,8 @@ test('release labels have a lossless stable internal mapping and numeric order',
   assert.equal(compareReleaseTags('r2.0', 'r1.10'), 1);
   assert.equal(compareReleaseTags('r1.0', 'r1.0'), 0);
   assert.equal(compareReleaseTags('r1.9', 'r1.10'), -1);
+  assert.equal(compareReleaseTags('r3.1', 'r3.0'), 1);
+  assert.equal(compareReleaseTags('r3.0', 'r3.1'), -1);
 });
 
 test('Windows autocrlf checkout preserves the canonical generated frontend version bytes', async () => {
@@ -42,9 +44,9 @@ test('patches, prereleases, ambiguous aliases and incompatible Windows values fa
   for (const value of ['v1.0.0','1.0.0','r1.0.0','r01.0','r1.00','r1.0-beta','r1.0+build','r1.0\n','r65536.0']) assert.throws(() => internalVersion(value));
 });
 test('the repository metadata and frontend label match the authoritative milestone', async () => {
-  assert.equal(await checkVersions(), '3.0.0');
+  assert.equal(await checkVersions(), '3.1.0');
   const frontend = await fs.readFile(path.join(projectRoot,'src/version.ts'),'utf8');
-  assert.match(frontend, /return "r3\.0"/);
+  assert.match(frontend, /return "r3\.1"/);
 });
 test('sync detects every metadata drift and preserves unrelated package/lock data', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'nearly-version-'));

@@ -24,10 +24,21 @@ settings and raw logs remain on the disposable guest. Screenshots and summaries
 are evidence, not a substitute for installed-state assertions. A failed or
 unavailable desktop is a failure, never a skipped pass.
 
-The actual hosted result must be inspected before claiming qualification.
-Historical passing runs below cover fixed-destination source. No setup is run on
-the developer PC. Before distribution, verify these additional cases in the
-authorized disposable Windows guests:
+Run [39270738277](https://github.com/nea-c/Nearly/actions/runs/39270738277),
+attempt 1, qualified controller `2c459dcc40e76889850132e2e65af60adeccc0ab`
+in all four conditions: default/custom destination and success/health-failure.
+Its 52 cases, 48 UI reports and 484 normalized PNGs were checked against artifact
+digests and strict native causal proofs. Both destinations reached target 2.0.0;
+the unhealthy target cases restored and restarted source 1.9.0. English/Japanese
+independent shortcut combinations, Back/cancel, reinstall, settings/backups and
+uninstall passed. The D-drive boundary refused the unsafe root and cancelled;
+it did not establish successful installation on another drive.
+
+These are QA-feature builds with ephemeral keys, not a literal production-signed
+r3.0-to-r3.1 installation. No setup runs on the developer PC. The checklist below
+is broader than this passing run; arbitrary external destinations, path attacks,
+power-loss recovery and ordinary-PC installation must not inherit qualification
+from it. Historical passing runs below cover fixed-destination source.
 
 - Exercise English and Japanese welcome, destination, independent shortcut and
   finish pages. Test Back/Next and cancellation. Confirm existing owned installs
