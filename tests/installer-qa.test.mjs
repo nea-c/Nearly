@@ -203,6 +203,48 @@ test('QA trace collection reads at most eight exact PID files with a fixed size 
   assert.deepEqual(await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl\n','authorization.json','../qa-trace-42.jsonl','qa-trace-042.jsonl'],read:async()=>{unexpectedReads++;throw Error('must not read');}}),[]);
   assert.equal(unexpectedReads,0);
 });
+const traceRow=(pid,version,event,code)=>({pid,version,event,code});
+function causalFixture(scenario='health-failure'){
+  const helper=(event,code)=>traceRow(20,'1.9.0',event,code),target=(event,code)=>traceRow(30,'2.0.0',event,code),restored=(event,code)=>traceRow(40,'1.9.0',event,code);
+  const common=[helper('helper','started'),helper('supervisorPhase','AwaitingHealth'),helper('supervisorAction','LaunchNew')];
+  return scenario==='health-failure'?[...common,helper('supervisorChild','LiveUnhealthy'),helper('supervisorAction','RequestChildExit'),helper('supervisorChild','Exited'),helper('supervisorPhase','Restoring'),helper('supervisorPhase','Restored'),helper('supervisorAction','RestartOld'),helper('restoration','verified'),helper('restoration','restartIssued'),helper('helper','succeeded'),target('bootstrap','target'),restored('bootstrap','source'),restored('marker','existing'),restored('restoration','confirmed'),restored('outcome','rolledBack')]:[...common,helper('supervisorPhase','Succeeded'),helper('helper','succeeded'),target('runtime','succeeded'),target('bootstrap','target'),target('outcome','succeeded')];
+}
+test('causal health proof requires the unhealthy target, cooperative child exit and restored source in distinct PID groups',()=>{
+  const records=causalFixture(),proof=qa.validateCausalProof(records,'health-failure');
+  assert.deepEqual(proof,{schemaVersion:1,scenario:'health-failure',proof:'health-failure-after-target-bootstrap',helperPid:20,targetPid:30,restoredPid:40});
+  assert.deepEqual(qa.validateCausalProof([...records,traceRow(10,'1.9.0','bootstrap','source'),traceRow(10,'1.9.0','marker','created'),traceRow(50,'1.9.0','startup','helper')],'health-failure'),proof);
+  for(let i=0;i<records.length;i++)assert.throws(()=>qa.validateCausalProof(records.filter((_,index)=>index!==i),'health-failure'),undefined,`missing ${records[i].event}:${records[i].code}`);
+  const preHealth=records.filter(row=>!['AwaitingHealth','LaunchNew','LiveUnhealthy','RequestChildExit','Exited'].includes(row.code));
+  assert.throws(()=>qa.validateCausalProof(preHealth,'health-failure'));
+  for(const change of [rows=>rows.map(row=>row.pid===30?{...row,version:'1.9.0'}:row),rows=>rows.map(row=>row.pid===40?{...row,pid:20}:row),rows=>{[rows[3],rows[4]]=[rows[4],rows[3]];return rows;},rows=>[...rows,traceRow(20,'1.9.0','supervisorChild','LiveHealthy')],rows=>[...rows,traceRow(20,'1.9.0','supervisorPhase','Succeeded')],rows=>[...rows,traceRow(20,'1.9.0','supervisorAction','ManualRepair')],rows=>[...rows,{...rows[0],code:'unknown'}]])assert.throws(()=>qa.validateCausalProof(change([...records]),'health-failure'));
+  const prematureRestore=[...records];[prematureRestore[5],prematureRestore[6]]=[prematureRestore[6],prematureRestore[5]];assert.throws(()=>qa.validateCausalProof(prematureRestore,'health-failure'));
+});
+test('causal success proof requires durable helper success and target runtime/outcome without assuming cross-file timing',()=>{
+  const records=causalFixture('success');
+  assert.deepEqual(qa.validateCausalProof(records,'success'),{schemaVersion:1,scenario:'success',proof:'native-success-after-target-bootstrap',helperPid:20,targetPid:30});
+  for(let i=0;i<records.length;i++)assert.throws(()=>qa.validateCausalProof(records.filter((_,index)=>index!==i),'success'));
+  assert.throws(()=>qa.validateCausalProof(causalFixture(),'success'));
+  assert.throws(()=>qa.validateCausalProof(records.map(row=>row.pid===30?{...row,pid:20}:row),'success'));
+  assert.throws(()=>qa.validateCausalProof([...records,traceRow(21,'1.9.0','helper','started')],'success'));
+});
+test('strict trace reading rejects truncation, unknown/missing codes, mixed versions, mismatched file PID and all I/O failures',async()=>{
+  const row=traceRow(42,'1.9.0','helper','started'),encode=rows=>Buffer.from(rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  const readCalls=[];
+  assert.deepEqual(await qa.collectStrictQaTraces('owned-root',{list:async()=>['authorization.json','qa-trace-42.jsonl'],read:async(file,limit)=>{readCalls.push({file,limit});return encode([row]);}}),[row]);
+  assert.equal(readCalls[0].limit,16384);
+  const maximum=await qa.collectStrictQaTraces('owned-root',{list:async()=>Array.from({length:8},(_,i)=>`qa-trace-${i+1}.jsonl`),read:async file=>{const pid=Number(/qa-trace-([0-9]+)\.jsonl$/.exec(file)[1]);return encode(Array.from({length:64},()=>({...row,pid})));}});
+  assert.equal(maximum.length,512);
+  for(const bytes of [Buffer.from(JSON.stringify(row)),Buffer.from(JSON.stringify(row)+'\n{"event":"help'),encode([{...row,code:undefined}]),encode([{...row,code:'unknown'}]),encode([{...row,pid:43}]),encode([row,{...row,version:'2.0.0'}]),encode(Array.from({length:65},()=>row)),Buffer.alloc(16385),Buffer.from('\n')])await assert.rejects(qa.collectStrictQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl'],read:async()=>bytes}));
+  const fixedFailure=error=>{assert.equal(error.message,'QA causal trace unavailable');assert.doesNotMatch(error.message,/sentinel-private-path|sentinel-token/);return true;};
+  await assert.rejects(qa.collectStrictQaTraces('owned-root',{list:async()=>{throw Error('C:\\sentinel-private-path\\sentinel-token');}}),fixedFailure);
+  await assert.rejects(qa.collectStrictQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl'],read:async()=>{throw Error('C:\\sentinel-private-path\\sentinel-token');}}),fixedFailure);
+});
+test('strict trace inventory fails on overflow or suspicious names before any read, without slicing or swallowing',async()=>{
+  let reads=0;
+  for(const names of [[],Array.from({length:9},(_,i)=>`qa-trace-${i+1}.jsonl`),['../qa-trace-42.jsonl'],['qa-trace-042.jsonl'],['qa-trace-42.jsonl\n'],['qa-trace-4294967296.jsonl'],['qa-trace-42.jsonl','qa-trace-42.jsonl']])await assert.rejects(qa.collectStrictQaTraces('owned-root',{list:async()=>names,read:async()=>{reads++;return Buffer.alloc(0);}}));
+  assert.equal(reads,0);
+});
+
 test('workflow remains manual, read-only and uploads only validated public evidence',async()=>{
   const text=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
   assert.match(text,/workflow_dispatch:/);assert.match(text,/controller_sha:/);assert.match(text,/confirmation:/);
