@@ -81,7 +81,7 @@ const TRACE_CODES=Object.freeze({
   supervisorChild:['NotStarted','LiveUnhealthy','LiveHealthy','Exited','Uncertain'],
   supervisorBlock:['rootLeaseInvalid','snapshotsChanged','settingsChanged','otherFileUsers','workerUncertain','childUncertain','childNotIdle','childExitTimedOut'],
   fileUserHint:['scannerHint','webviewHint','childIdentityMismatch','unknown'],
-  peerObservation:['pathQueryFailed','exitAfterPathFailure'],
+  peerObservation:['pathQueryFailed','exitAfterPathFailure','pathFailureStillLive','identityQueryFailed'],
   supervisorError:['parent','commit','child','worker','fileUsers','idle','tuple','exitRequest'],
   restoration:['verified','restartIssued','confirmed','rejected'],outcome:['succeeded','rolledBack','failed','writeFailed'],
 });

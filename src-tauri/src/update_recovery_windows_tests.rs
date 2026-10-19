@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 fn retained_test_peer() -> LivePeer {
     let path = std::env::current_exe().unwrap();
@@ -15,7 +15,7 @@ fn retained_exit_race_requires_a_second_exact_signaled_observation() {
     let identities = Cell::new(0);
     let result = observe_retained_exit(&id, Path::new("owned.exe"), || {
         identities.set(identities.get() + 1); Ok(id.clone())
-    }, || {
+    }, |_| {
         waits.set(waits.get() + 1); Ok(waits.get() == 2)
     }, || Err(Error::Unsafe), || Ok(7));
     assert_eq!(result.unwrap(), Some(7));
@@ -36,7 +36,7 @@ fn retained_exit_race_never_rescues_live_changed_or_uncertain_processes() {
                 if case == 2 { return Err(Error::Unsafe); }
             }
             Ok(id.clone())
-        }, || {
+        }, |_| {
             waits.set(waits.get() + 1);
             if waits.get() == 1 || case == 0 { return Ok(false); }
             if case == 3 { return Err(Error::Uncertain); }
@@ -52,7 +52,8 @@ fn retained_exit_race_never_rescues_live_changed_or_uncertain_processes() {
 fn retained_exit_race_never_rescues_a_successfully_mismatching_path() {
     let id = ProcessIdentity { pid: 42, created: 100 };
     let waits = Cell::new(0);
-    assert!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()), || {
+    assert!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()), |ms| {
+        assert_eq!(ms, 0);
         waits.set(waits.get() + 1); Ok(false)
     }, || Ok(PathBuf::from("foreign.exe")), || panic!("not authorized")).is_err());
     assert_eq!(waits.get(), 1);
@@ -62,9 +63,51 @@ fn retained_exit_race_never_rescues_a_successfully_mismatching_path() {
 fn retained_exit_normal_live_and_already_signaled_paths_are_preserved() {
     let id = ProcessIdentity { pid: 42, created: 100 };
     assert_eq!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()),
-        || Ok(false), || Ok(PathBuf::from("owned.exe")), || panic!("still live")).unwrap(), None);
+        |ms| { assert_eq!(ms, 0); Ok(false) }, || Ok(PathBuf::from("owned.exe")), || panic!("still live")).unwrap(), None);
     assert_eq!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()),
-        || Ok(true), || panic!("exited path is not required"), || Ok(0)).unwrap(), Some(0));
+        |ms| { assert_eq!(ms, 0); Ok(true) }, || panic!("exited path is not required"), || Ok(0)).unwrap(), Some(0));
+}
+
+#[test]
+fn retained_exit_path_error_waits_once_before_post_exit_identity_check() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    let events = RefCell::new(Vec::new());
+    let result = observe_retained_exit(&id, Path::new("owned.exe"), || {
+        events.borrow_mut().push("identity"); Ok(id.clone())
+    }, |ms| {
+        events.borrow_mut().push(if ms == 0 { "wait0" } else { "wait1000" });
+        assert!(ms == 0 || ms == 1000);
+        Ok(ms == 1000)
+    }, || { events.borrow_mut().push("pathError"); Err(Error::Unsafe) }, || {
+        events.borrow_mut().push("exitCode"); Ok(7)
+    });
+    assert_eq!(result.unwrap(), Some(7));
+    assert_eq!(*events.borrow(), ["identity", "wait0", "pathError", "wait1000", "identity", "exitCode"]);
+}
+
+#[test]
+fn retained_exit_path_error_timeout_never_retries_or_reads_exit_code() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    let identities = Cell::new(0);
+    let budgets = RefCell::new(Vec::new());
+    let result = observe_retained_exit(&id, Path::new("owned.exe"), || {
+        identities.set(identities.get() + 1); Ok(id.clone())
+    }, |ms| { budgets.borrow_mut().push(ms); Ok(false) }, || Err(Error::Unsafe),
+        || panic!("timeout cannot authorize exit"));
+    assert!(matches!(result, Err(Error::Unsafe)));
+    assert_eq!(*budgets.borrow(), [0, 1000]);
+    assert_eq!(identities.get(), 1);
+}
+
+#[test]
+fn retained_exit_initial_identity_failure_never_waits_or_queries_a_path() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    for error in [false, true] {
+        assert!(observe_retained_exit(&id, Path::new("owned.exe"), || {
+            if error { Err(Error::Unsafe) } else { Ok(ProcessIdentity { pid: 42, created: 101 }) }
+        }, |_| panic!("identity did not match"), || panic!("identity did not match"),
+            || panic!("identity did not match")).is_err());
+    }
 }
 
 #[test]
