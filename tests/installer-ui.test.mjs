@@ -5,6 +5,37 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+test('language selector waits for its owned combo after the dialog becomes visible',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+# Pure fake handles only: no drawing loader, user32 or desktop calls.
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public static int Queries=0;
+ public static IntPtr[] Windows(int pid,IntPtr parent){Queries++;return Queries==1?new IntPtr[0]:new[]{(IntPtr)2};}
+ public static string Class(IntPtr h,int pid){return "ComboBox";}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Wait-Ui','Controls','One-Control')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+ Invoke-Expression $fn[0].Extent.Text
+}
+function Assert-Process {}
+$ownedProcess=[pscustomobject]@{Id=7};$languageWindow=[IntPtr]1
+$assignment=$ast.FindAll({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$combo'},$true)
+if($assignment.Count -ne 1){throw 'Exact language combo assignment required'}
+Invoke-Expression $assignment[0].Extent.Text
+if($combo -ne [IntPtr]2 -or [NearlyOwnedUi]::Queries -lt 2){throw 'Transient owned control was not awaited'}
+'Transient owned combo awaited'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Transient owned combo awaited/);
+});
 test('hosted UI driver exists with a parseable, testable fail-closed policy', {skip:process.platform!=='win32'},()=>{
   assert.equal(fs.existsSync(script),true,'missing guarded installer UI driver');
   // Load ONLY pure functions from the parsed AST. Never execute the entrypoint,

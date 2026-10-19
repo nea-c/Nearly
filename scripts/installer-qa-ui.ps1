@@ -155,6 +155,7 @@ $captions=Get-UiCaptions $Language
 $events=[Collections.Generic.List[object]]::new()
 $ownedProcess=$null
 $main=[IntPtr]::Zero
+$languageWindow=[IntPtr]::Zero
 $result='failed'
 $stage='launch'
 function Assert-Process {
@@ -172,7 +173,7 @@ function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
 }
 function Controls([IntPtr]$Parent) { Assert-Process; return [NearlyOwnedUi]::Windows($ownedProcess.Id,$Parent) }
 function ById([IntPtr]$Parent,[int]$Id) { return @(Controls $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id }) }
-function One-Control([object[]]$Items) { if ($Items.Count -ne 1) { throw 'Expected exactly one owned visible control' }; return [IntPtr]$Items[0] }
+function One-Control([object[]]$Items) { if ($Items.Count -ne 1) { $caller=(Get-PSCallStack)[1].ScriptLineNumber; throw "Expected exactly one owned visible control; count=$($Items.Count), caller=$caller" }; return [IntPtr]$Items[0] }
 function Click-Id([IntPtr]$Parent,[int]$Id) { [NearlyOwnedUi]::Click((One-Control @(ById $Parent $Id)),$ownedProcess.Id) }
 function Screenshot([string]$Name,[IntPtr]$Window=$main) {
   Assert-Process
@@ -235,7 +236,12 @@ try {
     foreach ($w in @(Controls ([IntPtr]::Zero))) { if (@(Controls $w | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'ComboBox' }).Count -eq 1) { return $w } }
   }
   [NearlyOwnedUi]::Show($languageWindow,$ownedProcess.Id)
-  $combo=One-Control @(Controls $languageWindow | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'ComboBox' })
+  # Showing/activating the dialog can transiently hide or recreate its child.
+  # Re-query only this owned dialog until exactly one combo is available.
+  $combo=Wait-Ui {
+    $matches=@(Controls $languageWindow | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'ComboBox' })
+    if ($matches.Count -eq 1) { return $matches[0] }
+  }
   $count=[NearlyOwnedUi]::Send($combo,$ownedProcess.Id,326,0,0).ToInt32()
   if ($count -ne 2) { throw 'Expected exact English/Japanese language list' }
   $languageIndex=-1
@@ -343,6 +349,13 @@ try {
       $result='installed'
     }
   }
+} catch {
+  # On an early language-control failure retain the same owned dialog image,
+  # when available. Capture failure must not replace the original test error.
+  if ($stage -eq 'language' -and $languageWindow -ne [IntPtr]::Zero -and @($events | Where-Object stage -eq 'language').Count -eq 0) {
+    try { Screenshot 'language' $languageWindow } catch {}
+  }
+  throw
 } finally {
   # Deliberately emit only generated labels, known UI captions and states.
   # Never copy logs, arbitrary window text, settings, tokens, binaries or env.
