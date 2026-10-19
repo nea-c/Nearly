@@ -161,6 +161,86 @@ export async function collectQaTraces(runRoot,{list=dir=>fs.readdir(dir),read=re
   }catch{/* Diagnostic discovery is best effort; never print raw errors/paths. */}
   return records;
 }
+function strictTraceNames(entries){
+  if(!Array.isArray(entries)||entries.length>512||entries.some(name=>typeof name!=='string'))fail('Invalid strict QA trace inventory');
+  const files=entries.filter(name=>name.toLowerCase().includes('qa-trace-'));
+  if(files.length<1||files.length>8||new Set(files).size!==files.length)fail('Invalid strict QA trace inventory');
+  for(const name of files){const match=/^qa-trace-([1-9][0-9]*)\.jsonl$/.exec(name);if(!match||match[0]!==name||!tracePid(Number(match[1])))fail('Invalid strict QA trace inventory');}
+  return files.sort();
+}
+async function listStrictTraceDirectory(dir){
+  // The context derives the owned root. Recheck every directory component so
+  // an ancestor junction cannot redirect an otherwise regular trace filename.
+  const absolute=path.resolve(dir);let current=path.parse(absolute).root;
+  for(const part of absolute.slice(current.length).split(path.sep).filter(Boolean)){
+    current=path.join(current,part);const stat=await fs.lstat(current);
+    if(!stat.isDirectory()||stat.isSymbolicLink())fail('Unsafe strict QA trace directory');
+  }
+  return fs.readdir(absolute);
+}
+function strictTraceGroups(records){
+  if(!Array.isArray(records)||records.length<1||records.length>512)fail('Invalid strict QA trace records');
+  const groups=new Map();
+  for(const row of records){
+    if(!row||typeof row!=='object'||JSON.stringify(Object.keys(row).sort())!==JSON.stringify(['code','event','pid','version'])||typeof row.event!=='string'||typeof row.code!=='string'||!tracePid(row.pid)||!['1.9.0','2.0.0'].includes(row.version)||!Object.hasOwn(TRACE_CODES,row.event)||!TRACE_CODES[row.event].includes(row.code))fail('Invalid strict QA trace records');
+    const group=groups.get(row.pid)??[];
+    if(group.length>=64||(group.length&&group[0].version!==row.version))fail('Invalid strict QA trace PID group');
+    group.push(row);groups.set(row.pid,group);
+  }
+  if(groups.size>8)fail('Invalid strict QA trace PID count');
+  return groups;
+}
+export async function collectStrictQaTraces(runRoot,{list=listStrictTraceDirectory,read=regular}={}){
+  // Qualification evidence is separate from best-effort diagnostics. No tail
+  // recovery, truncation, skipped file, or swallowed I/O failure is permitted.
+  let files;
+  try{files=strictTraceNames(await list(runRoot));}catch{fail('QA causal trace unavailable');}
+  const records=[];
+  for(const name of files){
+    const pid=Number(/^qa-trace-([1-9][0-9]*)\.jsonl$/.exec(name)[1]);let bytes;
+    try{bytes=await read(path.join(runRoot,name),16384);}catch{fail('QA causal trace unavailable');}
+    if(!Buffer.isBuffer(bytes)||bytes.length<2||bytes.length>16384||bytes.at(-1)!==10)fail('Strict QA trace must be bounded and complete');
+    const group=decodeQaTrace(bytes,pid);strictTraceGroups(group);records.push(...group);
+  }
+  strictTraceGroups(records);return records;
+}
+const matchesTrace=(row,[event,code])=>row.event===event&&row.code===code;
+function hasOrderedTrace(rows,sequence){let next=0;for(const row of rows)if(next<sequence.length&&matchesTrace(row,sequence[next]))next++;return next===sequence.length;}
+export function validateCausalProof(records,scenario){
+  validateScenario(scenario);const groups=strictTraceGroups(records),all=[...groups.values()];
+  const role=(version,event,code)=>{
+    const found=all.filter(rows=>rows[0].version===version&&rows.some(row=>matchesTrace(row,[event,code])));
+    if(found.length!==1)fail('QA causal proof role missing or ambiguous');return found[0];
+  };
+  if(records.some(row=>matchesTrace(row,['helper','failed'])||matchesTrace(row,['supervisorAction','ManualRepair'])||matchesTrace(row,['supervisorPhase','ManualRepair'])||matchesTrace(row,['outcome','failed'])||matchesTrace(row,['outcome','writeFailed'])||matchesTrace(row,['restoration','rejected'])))fail('QA causal proof contains a terminal failure');
+  const helper=role('1.9.0','helper','started'),target=role('2.0.0','bootstrap','target');
+  const helperPid=helper[0].pid,targetPid=target[0].pid;
+  if(helperPid===targetPid)fail('QA causal proof process roles overlap');
+  const beginning=[['helper','started'],['supervisorPhase','AwaitingHealth'],['supervisorAction','LaunchNew']];
+  if(scenario==='health-failure'){
+    if(records.some(row=>matchesTrace(row,['supervisorChild','LiveHealthy'])||matchesTrace(row,['supervisorPhase','Succeeded'])||matchesTrace(row,['runtime','succeeded'])||matchesTrace(row,['outcome','succeeded'])))fail('Health-failure QA trace contains success');
+    // The native loop observes Exited before next_action publishes Restoring:
+    // a live child requests cooperative exit and cannot authorize restoration.
+    const sequence=[...beginning,['supervisorChild','LiveUnhealthy'],['supervisorAction','RequestChildExit'],['supervisorChild','Exited'],['supervisorPhase','Restoring'],['supervisorPhase','Restored'],['supervisorAction','RestartOld'],['restoration','verified'],['restoration','restartIssued'],['helper','succeeded']];
+    const restored=role('1.9.0','marker','existing'),restoredPid=restored[0].pid;
+    if(restoredPid===helperPid||restoredPid===targetPid||!hasOrderedTrace(helper,sequence)||!hasOrderedTrace(restored,[['bootstrap','source'],['marker','existing'],['restoration','confirmed'],['outcome','rolledBack']]))fail('Health-failure QA lacks post-health rollback proof');
+    return {schemaVersion:1,scenario,proof:'health-failure-after-target-bootstrap',helperPid,targetPid,restoredPid};
+  }
+  if(!hasOrderedTrace(helper,[...beginning,['supervisorPhase','Succeeded'],['helper','succeeded']])||!hasOrderedTrace(target,[['runtime','succeeded'],['outcome','succeeded']])||!hasOrderedTrace(target,[['bootstrap','target'],['outcome','succeeded']])||records.some(row=>matchesTrace(row,['supervisorPhase','Restoring'])||matchesTrace(row,['supervisorPhase','Restored'])||matchesTrace(row,['outcome','rolledBack'])))fail('Success QA lacks durable helper and target proof');
+  return {schemaVersion:1,scenario,proof:'native-success-after-target-bootstrap',helperPid,targetPid};
+}
+async function closedQaTraces(runRoot,env){
+  let names;
+  try{names=strictTraceNames(await listStrictTraceDirectory(runRoot));}catch{fail('QA causal trace unavailable');}
+  const pids=names.map(name=>Number(/^qa-trace-([1-9][0-9]*)\.jsonl$/.exec(name)[1]));
+  // Read-only lookups of these exact bounded trace PIDs only. Never enumerate
+  // unrelated processes or terminate a writer to manufacture complete evidence.
+  const script=`$ErrorActionPreference='Stop'; $tracePids=@(${pids.join(',')}); $deadline=[DateTime]::UtcNow.AddSeconds(15); do { $live=$false; foreach($tracePid in $tracePids) { try { $null=Get-Process -Id $tracePid -ErrorAction Stop; $live=$true } catch { if($_.CategoryInfo.Category -ne [Management.Automation.ErrorCategory]::ObjectNotFound) { throw 'QA trace process observation failed' } } }; if(!$live) { exit 0 }; Start-Sleep -Milliseconds 250 } while([DateTime]::UtcNow -lt $deadline); throw 'QA trace writer did not exit'`;
+  await execute('pwsh',['-NoProfile','-NonInteractive','-Command',script],{env,timeoutMs:20000});
+  const records=await collectStrictQaTraces(runRoot),observed=[...new Set(records.map(row=>row.pid))];
+  if(observed.length!==pids.length||observed.some(pid=>!pids.includes(pid)))fail('QA trace PID inventory changed after writer observation');
+  return records;
+}
 async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,capture=false}={}){
   return new Promise((resolve,reject)=>{
     let output='',settled=false;
@@ -269,6 +349,8 @@ export async function run(e=process.env){
       const outcome=await waitForOutcome(path.join(p.runRoot,`outcome-${scenario}.json`),scenario,{destination});
       console.log(`Validated native QA outcome: phase=${outcome.phase} version=${outcome.version}`);
       await ps('verify',['-ExpectedPayload',scenario==='success'?target.payloadSha256:source.payloadSha256,'-ExpectedVersion',outcome.version],env);
+      const proof=validateCausalProof(await closedQaTraces(p.runRoot,env),scenario);
+      console.log('QA causal proof: '+JSON.stringify(proof));
       await ps('uninstall',[],env);results.push({case:scenario,passed:true,outcome});
     }
     await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destination,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
