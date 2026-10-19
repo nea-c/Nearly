@@ -87,11 +87,10 @@ function Assert-Payload([string]$Digest,[string]$Version) {
   Assert-Registration $Version
 }
 function Assert-Shortcuts([int]$Start,[int]$Desktop) {
-  $shell = New-Object -ComObject WScript.Shell
   foreach ($pair in @(@($startShortcut,$Start),@($desktopShortcut,$Desktop))) {
     $exists = Test-Path -LiteralPath $pair[0]
     if ($exists -ne [bool]$pair[1]) { throw 'Shortcut choice was not preserved' }
-    if ($exists) { Assert-Regular $pair[0]; if ($shell.CreateShortcut($pair[0]).TargetPath -ine $exe) { throw 'Shortcut targets foreign executable' } }
+    if ($exists) { Assert-Regular $pair[0]; if (![NearlyQaShortcut]::Matches($pair[0],$exe)) { throw 'Shortcut targets foreign executable' } }
   }
   $prefs = Get-ItemProperty -LiteralPath $preferences
   if ($prefs.StartMenuShortcut -ne $Start -or $prefs.DesktopShortcut -ne $Desktop) { throw 'Shortcut preference registration differs' }
@@ -197,6 +196,47 @@ $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.destinationKind -cne $env:QA_DESTINATION -or $plan.installRoot -cne $destinations[$env:QA_DESTINATION] -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
 foreach ($kind in @('default','custom','drive')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class NearlyQaShortcut {
+  [ComImport,Guid("000214F9-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellLinkW {
+    [PreserveSig] int GetPath([Out,MarshalAs(UnmanagedType.LPWStr)] StringBuilder target,int count,IntPtr data,uint flags);
+  }
+  [ComImport,Guid("0000010B-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPersistFileRaw {
+    [PreserveSig] int GetClassID(out Guid id);
+    [PreserveSig] int IsDirty();
+    [PreserveSig] int Load([MarshalAs(UnmanagedType.LPWStr)] string path,uint mode);
+    [PreserveSig] int Save([MarshalAs(UnmanagedType.LPWStr)] string path,[MarshalAs(UnmanagedType.Bool)] bool remember);
+    [PreserveSig] int SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string path);
+    [PreserveSig] int GetCurFile(out IntPtr path);
+  }
+  public static string ReadWide(string shortcut) {
+    object link=null;
+    try {
+      link=Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
+      if(((IPersistFileRaw)link).Load(shortcut,0)!=0)throw new Exception("Wide shortcut read failed");
+      var target=new StringBuilder(32768);
+      if(((IShellLinkW)link).GetPath(target,target.Capacity,IntPtr.Zero,4)!=0)throw new Exception("Wide shortcut read failed");
+      return target.ToString();
+    } catch {throw new Exception("Wide shortcut read failed");}
+    finally {
+      if(link!=null&&Marshal.IsComObject(link)){
+        try {Marshal.FinalReleaseComObject(link);}catch {throw new Exception("Wide shortcut release failed");}
+      }
+    }
+  }
+  public static bool TargetMatches(string expected,string actual) {
+    // Compare the complete RAW4 string using the existing Windows case policy.
+    // Do not normalize, resolve aliases, or fall back to matching file identity.
+    return !string.IsNullOrEmpty(expected)&&!string.IsNullOrEmpty(actual)&&actual.Length<32768&&string.Equals(expected,actual,StringComparison.OrdinalIgnoreCase);
+  }
+  public static bool Matches(string shortcut,string expected) {return TargetMatches(expected,ReadWide(shortcut));}
+}
+'@
 function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice) {
   if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
   Assert-UnderRun $Setup
