@@ -146,6 +146,8 @@ impl Runtime {
             })
     }
     fn publish(&self, phase: &'static str, reason: Option<&'static str>) {
+        #[cfg(all(feature="installer-qa",windows))]
+        crate::installer_qa::trace_runtime(phase,reason);
         let notice = if let Ok(mut s) = self.0.inner.lock() {
             if s.report.phase == phase && s.report.reason == reason {
                 return;
@@ -298,10 +300,14 @@ impl Runtime {
                     drop(s);self.publish("succeeded",None);return Ok(());
                 },
                 Some(SupervisorEvent::ExitRequest)=>{
+                    #[cfg(feature="installer-qa")] crate::installer_qa::trace("exit","requested");
                     let s=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?;
                     let actions=s.actions.as_ref().ok_or("runtimeUnavailable")?;
                     let seal=(actions.seal_exit)().map_err(|_|"healthShutdownBusy")?;
+                    #[cfg(feature="installer-qa")] crate::installer_qa::trace("exit","sealed");
                     live.signal_idle(&seal).map_err(|_|"supervisorEvidenceLost")?;
+                    #[cfg(feature="installer-qa")] crate::installer_qa::trace("exit","idleSignalled");
+                    #[cfg(feature="installer-qa")] crate::installer_qa::trace("exit","issued");
                     (actions.exit)();return Ok(());
                 },
                 None=>(),
@@ -313,6 +319,7 @@ impl Runtime {
                 // its writer lock. Retry boundedly; never assume settlement.
                 if let Ok(proof)=(s.actions.as_ref().ok_or("runtimeUnavailable")?.attest_idle)(){
                     live.signal_probation_idle(&proof).map_err(|_|"supervisorEvidenceLost")?;idle_attested=true;
+                    #[cfg(feature="installer-qa")] crate::installer_qa::trace("idle","attested");
                 }
             }
             if !signalled&&idle_attested&&self.native_health(){live.signal_healthy().map_err(|_|"supervisorEvidenceLost")?;signalled=true;self.publish("awaitingSuccess",None);}

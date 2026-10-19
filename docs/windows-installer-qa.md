@@ -37,6 +37,14 @@ instead of opening the legacy protocol2 store. Canonical staging uses exclusive
 creation and pinned file/ancestor handles; an existing package is preserved and
 causes a closed failure. Retained files are never overwritten or broadly cleaned.
 
+For failed hosted cases, compile-QA-only breadcrumbs record fixed role, phase,
+action and error categories in at most 64 JSON lines per process, 256 bytes per
+line. Each process creates its own run-owned file without adopting an existing
+file. The controller reads at most eight regular trace files and prints only
+whitelisted event/code/version/PID fields. Tokens, keys, paths, settings and raw
+native records are excluded. These diagnostic writes never authorize recovery
+or change a failed outcome into a passing one.
+
 Default builds omit the QA module and embedded QA values. The production key and
 `HANDOFF_RELEASE_VALIDATED=false` remain unchanged. Passing this workflow is not
 authorization to enable production updates or publish QA fixtures. Local unit

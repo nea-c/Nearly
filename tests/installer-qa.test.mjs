@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:'C:\\Users\\runneradmin\\AppData\\Local',QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('guest JSON comparison normalizes empty objects without running a guest action',{skip:process.platform!=='win32'},()=>{
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./installer-qa-normalize.ps1',import.meta.url)),'-Source',fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Pure generated JSON normalization passed/);
+});
 test('fixture copy excludes generated roots while retaining dependency distribution files',()=>{
   assert.equal(typeof qa.copyFixturePath,'function');
   for(const name of ['','src/app.ts','node_modules/vite/dist/node/cli.js','node_modules/example/build/index.js','src-tauri/vendor/example/target.rs'])assert.equal(qa.copyFixturePath(name),true,name);
@@ -83,6 +90,38 @@ test('wait deadline fails closed with inert injected clock and no setup executio
   assert.equal(typeof qa.waitForOutcome,'function');let now=0;
   await assert.rejects(qa.waitForOutcome('unused','success',{timeoutMs:30,now:()=>now,sleep:async()=>{now+=10;},read:async()=>{throw Object.assign(Error(),{code:'ENOENT'});}}),/timed out/);
   await assert.rejects(qa.waitForOutcome('unused','success',{timeoutMs:30,read:async()=>Buffer.alloc(9000)}),/bounded/);
+});
+test('QA trace decoding accepts fixed fields and never returns credential or unknown values',()=>{
+  assert.equal(typeof qa.decodeQaTrace,'function');
+  const row={event:'startup',code:'source',version:'1.9.0',pid:42};
+  const encode=value=>Buffer.from(JSON.stringify(value)+'\n');
+  assert.deepEqual(qa.decodeQaTrace(encode(row),42),[row]);
+  for(const change of [{event:'ghp_exampleCredential'},{code:'a'.repeat(64)},{token:'secret'},{path:'C:\\secret'},{version:'3.0.0'},{pid:0},{pid:4294967296},{pid:43},{event:'unknownEvent'},{code:'unknownCode'}])assert.throws(()=>qa.decodeQaTrace(encode({...row,...change}),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from('{"event":"startup","event":"frontendReady","version":"1.9.0","pid":42}\n'),42));
+});
+test('QA trace bounds and incomplete final-line handling fail closed',()=>{
+  const row=JSON.stringify({event:'startup',version:'2.0.0',pid:42});
+  assert.deepEqual(qa.decodeQaTrace(Buffer.from(row+'\n{"event":"start'),42),[JSON.parse(row)]);
+  assert.deepEqual(qa.decodeQaTrace(Buffer.from(row),42),[JSON.parse(row)]);
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"event":"start\n'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\nnotJson'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"event" false'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{"token":"secret'),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.alloc(16385),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from((row+'\n').repeat(65)),42));
+  assert.throws(()=>qa.decodeQaTrace(Buffer.from(row+'\n{}\n'),42));
+});
+test('QA trace collection reads at most eight exact PID files with a fixed size limit',async()=>{
+  assert.equal(typeof qa.collectQaTraces,'function');
+  const files=['authorization.json','qa-trace-0.jsonl','qa-trace-01.jsonl','qa-trace-4294967296.jsonl','qa-trace-42.jsonl\n','../qa-trace-42.jsonl',...Array.from({length:10},(_,i)=>`qa-trace-${i+1}.jsonl`)];
+  const read=[];
+  const records=await qa.collectQaTraces('owned-root',{list:async()=>files,read:async(file,limit)=>{read.push({file,limit});const pid=Number(/qa-trace-([0-9]+)\.jsonl$/.exec(file)[1]);return Buffer.from(JSON.stringify({event:'startup',version:'1.9.0',pid})+'\n');}});
+  assert.equal(records.length,8);assert.equal(read.length,8);assert.ok(read.every(r=>r.limit===16384));
+  const rejected=await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl'],read:async()=>Buffer.from('{"token":"neverLogThis"}\n')});
+  assert.deepEqual(rejected,[]);
+  let unexpectedReads=0;
+  assert.deepEqual(await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl\n','authorization.json','../qa-trace-42.jsonl','qa-trace-042.jsonl'],read:async()=>{unexpectedReads++;throw Error('must not read');}}),[]);
+  assert.equal(unexpectedReads,0);
 });
 test('workflow remains manual, read-only, pinned and publishes no QA artifact',async()=>{
   const text=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');

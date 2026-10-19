@@ -70,6 +70,85 @@ export async function waitForOutcome(file,scenario,{timeoutMs=180000,now=Date.no
   }
   fail(`QA ${scenario} timed out; no skipped pass`);
 }
+const TRACE_CODES=Object.freeze({
+  startup:['source','target','helper'],bootstrap:['source','target'],marker:['created','existing','invalid'],fixture:['staging','ready'],handoff:['failed','returned'],
+  runtime:['idle','waitingForUi','checking','awaitingSuccess','succeeded','recoveryRequired'],
+  runtimeError:['supervisorAuthenticationFailed','liveSupervisorMissing','restartInterrupted','supervisorEvidenceLost','runtimeUnavailable','probationReleaseFailed','healthShutdownBusy','supervisorHealthTimeout','transactionUnavailable','unsupportedPlatform','invalidHealthArguments','other'],
+  exit:['requested','sealed','idleSignalled','issued'],idle:['attested'],helper:['started','succeeded','failed'],
+  nativeError:['Disabled','Invalid','Unsafe','Busy','Missing','Io','Protection','Uncertain'],
+  supervisorPhase:['Prepared','Armed','Staging','CandidatesVerified','Applying','AwaitingHealth','Succeeded','Restoring','Restored','ManualRepair'],
+  supervisorAction:['StartStaging','VerifyCandidates','ApplyImage','ApplyUninstaller','ApplyRegistration','RestoreImage','RestoreUninstaller','RestoreRegistration','LaunchNew','RequestChildExit','RestartOld','Complete','ManualRepair'],
+  supervisorChild:['NotStarted','LiveUnhealthy','LiveHealthy','Exited','Uncertain'],
+  supervisorBlock:['rootLeaseInvalid','snapshotsChanged','settingsChanged','otherFileUsers','workerUncertain','childUncertain','childNotIdle','childExitTimedOut'],
+  restoration:['verified','restartIssued','confirmed','rejected'],outcome:['succeeded','rolledBack','failed','writeFailed'],
+});
+const tracePid=p=>Number.isInteger(p)&&p>0&&p<=0xffffffff;
+function incompleteTraceTail(line){
+  // Recognize only a prefix of the native flat JSON record grammar. An invalid
+  // complete line or a credential/unknown-key tail is never treated as a crash.
+  let i=0;const seen=new Set(),fields=['event','code','version','pid'];
+  const skip=()=>{while(line[i]===' ')i++;};
+  const string=()=>{
+    if(line[i++]!=='"')return null;
+    let value='';while(i<line.length){const ch=line[i++];if(ch==='"')return {value,complete:true};if(!/[\x20-\x7e]/.test(ch)||ch==='\\')return null;value+=ch;}
+    return {value,complete:false};
+  };
+  skip();if(line[i++]!=='{')return false;
+  while(true){
+    skip();if(i===line.length)return true;
+    const key=string();if(!key)return false;
+    if(!key.complete)return fields.some(f=>!seen.has(f)&&f.startsWith(key.value));
+    if(!fields.includes(key.value)||seen.has(key.value))return false;seen.add(key.value);
+    skip();if(i===line.length)return true;if(line[i++]!==':')return false;
+    skip();if(i===line.length)return true;
+    if(key.value==='pid'){
+      const start=i;while(/[0-9]/.test(line[i]??''))i++;
+      const digits=line.slice(start,i);if(!/^[1-9][0-9]*$/.test(digits)||!tracePid(Number(digits)))return false;
+    }else{
+      const value=string();if(!value)return false;
+      const allowed=key.value==='event'?Object.keys(TRACE_CODES):key.value==='version'?['1.9.0','2.0.0']:Object.values(TRACE_CODES).flat();
+      if(!value.complete)return allowed.some(v=>v.startsWith(value.value));
+      if(!allowed.includes(value.value))return false;
+    }
+    skip();if(i===line.length)return true;
+    if(line[i++]!==',')return false;
+  }
+}
+export function decodeQaTrace(bytes,expectedPid){
+  if(!Buffer.isBuffer(bytes)||bytes.length>16384||!tracePid(expectedPid))fail('Invalid bounded QA trace');
+  const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes),lines=text.split('\n'),records=[];
+  if(lines.at(-1)==='')lines.pop();
+  if(lines.length>64)fail('Invalid bounded QA trace');
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];let value;
+    try{value=JSON.parse(line);}catch{
+      if(i===lines.length-1&&!text.endsWith('\n')&&incompleteTraceTail(line))break;
+      fail('Invalid bounded QA trace');
+    }
+    const keys=value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value):[];
+    // Accepted values need no JSON escapes; refusing escapes also makes the key
+    // count below detect duplicate fields without logging or retaining raw text.
+    if(line.includes('\\')||(line.match(/"[^"\\]*"\s*:/g)||[]).length!==keys.length||keys.length<3||keys.length>4||keys.some(k=>!['event','code','version','pid'].includes(k))||!Object.hasOwn(value,'event')||!Object.hasOwn(value,'version')||!Object.hasOwn(value,'pid'))fail('Invalid bounded QA trace');
+    if(!exact(/[a-z][A-Za-z0-9]{0,63}/,value.event)||!Object.hasOwn(TRACE_CODES,value.event)||!['1.9.0','2.0.0'].includes(value.version)||!tracePid(value.pid)||value.pid!==expectedPid)fail('Invalid bounded QA trace');
+    if(Object.hasOwn(value,'code')&&(!exact(/[A-Za-z][A-Za-z0-9]{0,63}/,value.code)||!TRACE_CODES[value.event].includes(value.code)))fail('Invalid bounded QA trace');
+    records.push({event:value.event,...(value.code===undefined?{}:{code:value.code}),version:value.version,pid:value.pid});
+  }
+  return records;
+}
+export async function collectQaTraces(runRoot,{list=dir=>fs.readdir(dir),read=regular}={}){
+  const records=[];
+  try{
+    const files=(await list(runRoot)).filter(name=>{
+      const match=typeof name==='string'&&/^qa-trace-([1-9][0-9]*)\.jsonl$/.exec(name);
+      return match&&match[0]===name&&tracePid(Number(match[1]));
+    }).sort().slice(0,8);
+    for(const name of files){
+      try{const pid=Number(/^qa-trace-([1-9][0-9]*)\.jsonl$/.exec(name)[1]);records.push(...decodeQaTrace(await read(path.join(runRoot,name),16384),pid));}
+      catch{/* A malformed/unavailable trace never hides the original QA failure. */}
+    }
+  }catch{/* Diagnostic discovery is best effort; never print raw errors/paths. */}
+  return records;
+}
 async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,capture=false}={}){
   return new Promise((resolve,reject)=>{
     let output='',settled=false;
@@ -166,12 +245,16 @@ export async function run(e=process.env){
       await ps('source',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],env);
       await ps('launch',[],env);
       const outcome=await waitForOutcome(path.join(p.runRoot,`outcome-${scenario}.json`),scenario);
+      console.log(`Validated native QA outcome: phase=${outcome.phase} version=${outcome.version}`);
       await ps('verify',['-ExpectedPayload',scenario==='success'?target.payloadSha256:source.payloadSha256,'-ExpectedVersion',outcome.version],env);
       await ps('uninstall',[],env);results.push({case:scenario,passed:true,outcome});
     }
     await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:1,controllerSha:c.controllerSha,scenario,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
     if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario));
-  }catch(error){await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:1,scenario,passed:false,cases:results,error:String(error.message).slice(0,2048)}),{flag:'wx'});throw error;}
+  }catch(error){
+    for(const record of await collectQaTraces(p.runRoot))console.log('QA trace: '+JSON.stringify(record));
+    await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:1,scenario,passed:false,cases:results,error:String(error.message).slice(0,2048)}),{flag:'wx'});throw error;
+  }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   if(process.argv.length!==3||process.argv[2]!=='run'){console.error('Only the manually authorized hosted guest run command is supported');process.exitCode=1;}
