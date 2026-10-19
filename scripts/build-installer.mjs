@@ -90,7 +90,9 @@ export async function runInstallerBuild(args=process.argv.slice(2)){
   for(const key of Object.keys(env))if(/^TAURI_(SIGNING_|PRIVATE_KEY|WINDOWS_CERTIFICATE)/.test(key))delete env[key];
   const target=options.target?['--target',options.target]:[];
   await execute([paths.cli,'build','--no-bundle','--no-sign','--ci',...target,'--','--locked',...(options.offline?['--offline']:[])],env);
-  await execute([paths.cli,'bundle','--bundles','nsis','--no-sign','--ci',...target],env);
+  // Keep the installed payload byte-identical to the independently pinned EXE.
+  // Our protocol-3 updater does not use Tauri's per-bundle-type updater marker.
+  await execute([paths.cli,'bundle','--bundles','nsis','--no-binary-patching','--no-sign','--ci',...target],env);
   // Tauri's intermediate bundle uses its numeric package version. Only the
   // published deliverable uses the public release label; bytes are unchanged.
   const artifact=path.join(paths.targetDir,...(options.target?[options.target]:[]),'release/bundle/nsis',`Nearly_${config.version}_x64-setup.exe`);
