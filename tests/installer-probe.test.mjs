@@ -12,6 +12,52 @@ test('mock lifecycle selects only desktop while the independent boundary keeps b
   assert.deepEqual(probe.probeShortcutChoices('boundary'),{start:0,desktop:0});
   assert.throws(()=>probe.probeShortcutChoices('other'));
 });
+test('shortcut path diagnostics remain finite booleans and invalid metadata never activates a reader',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref]$null,[ref]$null)
+foreach($name in @('Get-ShortcutPathObservation','Assert-Path','Assert-Regular','Assert-Choices')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+ if($fn.Count -ne 1){throw 'Metadata diagnostic function missing'}
+ Invoke-Expression $fn[0].Extent.Text
+}
+$Boundary=$false;$preferences='generated';$startShortcut='C:\generated\start.lnk';$desktopShortcut='C:\generated\Nearly.lnk';$script:mode='regular';$script:reads=0;$script:activated=0
+function Write-ProbeGate {}
+function Observe-Shortcut {$script:activated++}
+function Get-ItemProperty {param($LiteralPath)return [pscustomobject]@{StartMenuShortcut=0;DesktopShortcut=1}}
+function Test-Path {param($LiteralPath)if($LiteralPath -ceq $startShortcut){return $false};if($LiteralPath -ceq $desktopShortcut -and $script:mode -eq 'missing'){return $false};return $true}
+function Get-Item {
+ param($LiteralPath,[switch]$Force)
+ $script:reads++
+ if($LiteralPath -ceq $desktopShortcut){
+  if($script:mode -in @('throw','missing')){throw 'C:\sentinel-private-path'}
+  return [pscustomobject]@{PSIsContainer=($script:mode -eq 'directory');Attributes=$(if($script:mode -eq 'reparse'){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Archive});Length=$(if($script:mode -eq 'oversized'){67108865}else{256})}
+ }
+ return [pscustomobject]@{PSIsContainer=$true;Attributes=$(if($script:mode -eq 'ancestor' -and $LiteralPath -ceq 'C:\generated'){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Directory})}
+}
+$expectedKeys=@('absoluteLocal','canonicalExact','hasForwardSlash','hasExtraColon','exists','leafRegular','leafReparse','ancestorsSafe','lengthPositive','lengthBounded')
+foreach($mode in @('regular','directory','reparse','ancestor','oversized','missing','throw')){
+ $script:mode=$mode;$record=Get-ShortcutPathObservation $desktopShortcut
+ if((($record.Keys | Sort-Object) -join ',') -cne (($expectedKeys | Sort-Object) -join ',')){throw 'Unexpected diagnostic fields'}
+ foreach($value in $record.Values){if($value -isnot [bool]){throw 'Nonboolean metadata output'}}
+ $json=ConvertTo-Json -InputObject $record -Compress
+ if($json.Contains('sentinel') -or $json.Contains('C:')){throw 'Private metadata leaked'}
+ if($mode -eq 'regular') {if(!$record.leafRegular -or !$record.ancestorsSafe -or !$record.lengthPositive -or !$record.lengthBounded){throw 'Regular link metadata lost'};continue}
+ $before=$script:activated;$rejected=$false;try{Assert-Choices}catch{$rejected=$true}
+ if(!$rejected -or $script:activated -ne $before){throw 'Invalid metadata reached shortcut reader'}
+}
+$script:reads=0
+foreach($path in @('relative.lnk','C:\generated\..\Nearly.lnk','C:/generated/Nearly.lnk','C:\generated\Nearly.lnk:stream')){
+ $record=Get-ShortcutPathObservation $path
+ if($record.exists -or $record.leafRegular -or $record.ancestorsSafe){throw 'Unsafe path metadata inspected'}
+}
+if($script:reads -ne 0){throw 'Unsafe path reached metadata provider'}
+'Inert shortcut metadata diagnostic passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Inert shortcut metadata diagnostic passed/);assert.doesNotMatch(result.stdout,/sentinel-private-path/);
+});
 test('mock gate diagnostics expose only fixed stage/event enums',{skip:process.platform!=='win32'},()=>{
   const source=String.raw`
 $ErrorActionPreference='Stop'
@@ -77,6 +123,7 @@ function Assert-Path {}
 function Assert-Regular {}
 function Observe-Shortcut {$script:observed++}
 function Write-ProbeGate {}
+function Get-ShortcutPathObservation {return [ordered]@{exists=$script:exists}}
 function Test-Path {param($LiteralPath)return $LiteralPath -ceq 'desktop' -and $script:exists}
 Assert-Choices
 if($script:observed -ne 1){throw 'Selected installed shortcut was not observed'}
