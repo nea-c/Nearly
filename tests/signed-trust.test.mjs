@@ -26,7 +26,7 @@ test('bootstrap profile requires registered embedded public key with installatio
 
 test('Windows Git checkout preserves byte-pinned public key and historic public fixture',async t=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'nearly-trust-checkout-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
-  const files=['.github/updater-public-key.pub','tests/fixtures/reviewed-public-template.txt'];
+  const files=['.github/updater-public-key.pub','tests/fixtures/reviewed-public-template.txt','tests/fixtures/reviewed-public-installer-qa.txt'];
   await fs.copyFile(new URL('.gitattributes',root),path.join(dir,'.gitattributes'));
   const expected=[];for(const file of files){await fs.mkdir(path.dirname(path.join(dir,file)),{recursive:true});const bytes=await fs.readFile(new URL(file,root));expected.push(bytes);await fs.writeFile(path.join(dir,file),bytes);}
   const git=args=>execFileSync('git',['-C',dir,'-c','core.autocrlf=true',...args],{windowsHide:true,stdio:['ignore','pipe','pipe']});

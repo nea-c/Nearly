@@ -155,3 +155,14 @@ test('public download follows only trusted HTTPS hosts and never sends authentic
   globalThis.fetch=async()=>new Response(null,{status:302,headers:{location:'https://foreign.invalid/generated'}});
   await assert.rejects(()=>publisher.downloadPublic({...b,browser_download_url:url}),/redirect/);
 });
+
+test('exact reviewed hosted guest source history never exempts changed blobs or payloads',async()=>{
+ const source=await fs.readFile(new URL('./fixtures/reviewed-public-installer-qa.txt',import.meta.url));
+ assert.equal(sha(source),'06a67db742b5753eb05d9c9f0279c51ed060641f8f65e505f110e5100d38187d');
+ const record=b=>Buffer.concat([Buffer.from(commit+' blob '+b.length+'\n'),b,Buffer.from('\n')]);
+ assert.throws(()=>contracts.auditBytes(source),/privacy/i);
+ assert.equal(contracts.auditGitObjects(record(source)),1);
+ assert.throws(()=>contracts.auditGitObjects(record(Buffer.concat([source,Buffer.from('\n')]))),/privacy/i);
+ const privatePath=Buffer.from(['C:','Users','private-person','private-folder'].join(String.fromCharCode(92)));
+ assert.throws(()=>contracts.auditGitObjects(record(Buffer.concat([source,privatePath]))),/privacy/i);
+});

@@ -3,3 +3,5 @@ src/version.ts text eol=lf
 # These trust/history fixtures are hashed as exact bytes on Windows and Linux.
 .github/updater-public-key.pub text eol=lf
 tests/fixtures/reviewed-public-template.txt text eol=lf
+
+tests/fixtures/reviewed-public-installer-qa.txt text eol=lf
