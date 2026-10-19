@@ -7,8 +7,7 @@ The earlier implementation/status notes below describe their recorded stage.
 The signed release workflow is implemented in .github/workflows/release-signed-windows.yml.
 Local test results alone do not qualify Actions: inspect the exact manual run and
 its artifacts. Build/sign verification never executes setup or replaces the normal EXE.
-HANDOFF_RELEASE_VALIDATED is now true after separate activation approval. The source version is still 2.0.0; r2.0 already
-exists, so a future signed release needs a separately selected new version and notes.
+HANDOFF_RELEASE_VALIDATED is now true after separate activation approval. The explicitly approved release version is 3.0.0 / r3.0, with its notes in .github/release-notes/r3.0.md. Existing r1.0/r2.0 tags, Releases and assets must remain unchanged.
 
 ## Registered trust and custody
 
@@ -21,8 +20,8 @@ read back. Current implementation work only reads the public key and metadata.
 
 The public key ID is 32F9C8E24AEF3CCC; .github/updater-public-key.pub has SHA256
 2592845a518adb9df5b7773dd58672ea411b3038758bfaf2808a3cb13dcc8695.
-The native verifier embeds its exact 42 bytes; controller checks bind the public
-file, native bytes and false installation gate. Existing r1/r2 applications contain
+The native verifier embeds its exact 42 bytes; the current registered-production controller profile binds the public
+file, native bytes and enabled installation gate. Historical signed-bootstrap checks still require false. Existing r1/r2 applications contain
 no production trust anchor; the initial signed bootstrap needs manual installation.
 
 Evidence: task/updater-production-registration-verification.json and the metadata-only
