@@ -80,6 +80,7 @@ const TRACE_CODES=Object.freeze({
   supervisorAction:['StartStaging','VerifyCandidates','ApplyImage','ApplyUninstaller','ApplyRegistration','RestoreImage','RestoreUninstaller','RestoreRegistration','LaunchNew','RequestChildExit','RestartOld','Complete','ManualRepair'],
   supervisorChild:['NotStarted','LiveUnhealthy','LiveHealthy','Exited','Uncertain'],
   supervisorBlock:['rootLeaseInvalid','snapshotsChanged','settingsChanged','otherFileUsers','workerUncertain','childUncertain','childNotIdle','childExitTimedOut'],
+  fileUserHint:['scannerHint','webviewHint','childIdentityMismatch','unknown'],
   restoration:['verified','restartIssued','confirmed','rejected'],outcome:['succeeded','rolledBack','failed','writeFailed'],
 });
 const tracePid=p=>Number.isInteger(p)&&p>0&&p<=0xffffffff;
