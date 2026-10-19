@@ -68,7 +68,7 @@ export interface WindowRegistration {
   workspaces?: { id: string; connection?: Profile }[];
 }
 export interface StartupUpdateReport {state:string;latestVersion:string|null;canInstall:boolean;errorCode?:string|null}
-export interface UpdateRestartReport {phase:string;reason?:string;revision:number}
+export interface UpdateRestartReport {phase:string;reason?:string;revision:number;installerQa?:boolean}
 export interface UploadRequest { id: string; sessionId: string; sources: string[]; remote: string; recursive: boolean; interactive?: boolean }
 export interface TransferPrompt {token:string;source:string;destination:string;sourceDirectory:boolean;targetDirectory:boolean;canOverwrite:boolean}
 export interface UploadOutcome { status: "completed" | "partial" | "cancelled"; completed: number; bytes: number; transferredBytes?: number; skipped?: number; message: string }
@@ -81,7 +81,7 @@ interface Commands {
   run_download: {args:{request:{id:string;sessionId:string;sources:string[];local:string}};result:UploadOutcome};
   run_remote_drag: {args:{request:{id:string;sessionId:string;sources:string[]}};result:RemoteDragOutcome};
   update_restart_status: { args: undefined; result: UpdateRestartReport };
-  ack_update_restart_ready: { args: undefined; result: void };
+  ack_update_restart_ready: { args: {bootstrap?:boolean}|undefined; result: void };
   check_startup_update: { args: undefined; result: StartupUpdateReport };
   startup_update_status: { args: undefined; result: StartupUpdateReport };
   prepare_startup_update: { args: undefined; result: StartupUpdateReport };

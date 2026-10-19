@@ -7,6 +7,12 @@ const ENDPOINT:&str="https://api.github.com/repos/nea-c/Nearly/releases/latest";
 // Remains false until isolated signed NSIS installation, interrupted recovery
 // and restart-health verification are completed; key approval alone is not release approval.
 pub const HANDOFF_RELEASE_VALIDATED:bool=false;
+pub(crate) fn handoff_validated()->bool{
+    #[cfg(all(feature="installer-qa",windows))]
+    {crate::installer_qa::authorized()}
+    #[cfg(not(all(feature="installer-qa",windows)))]
+    {HANDOFF_RELEASE_VALIDATED}
+}
 const CURRENT_VERSION:&str=env!("CARGO_PKG_VERSION");
 #[derive(Clone,Debug,Serialize,PartialEq)]
 #[serde(rename_all="camelCase")]
@@ -28,21 +34,32 @@ impl StartupUpdate {
         inner.report.clone().unwrap_or_else(||report("checking",None))
     }
     pub async fn check(&self,label:&str)->Report{
+        #[cfg(all(feature="installer-qa",windows))]
+        {let _=label;return report("current",None)}
         if !self.begin_check(label){return report("alreadyChecked",None)}
         let body=fetch_latest().await;
         let (next,candidate)=match body {Ok(body)=>{
             let initial=evaluate(&body,CURRENT_VERSION);
             let candidate=Architecture::current().ok().and_then(|arch|ReleaseCandidate::from_github_metadata(&body,CURRENT_VERSION,arch).ok().flatten());
-            let next=if initial.latest_version.is_some()&&update_package::production_key().is_some(){if candidate.is_some(){report("available",initial.latest_version)}else{let mut r=report("error",initial.latest_version);r.error_code=Some("noCompatibleAsset");r}}else{initial};
+            let next=if initial.latest_version.is_some()&&update_package::runtime_key().is_some(){if candidate.is_some(){report("available",initial.latest_version)}else{let mut r=report("error",initial.latest_version);r.error_code=Some("noCompatibleAsset");r}}else{initial};
             (next,candidate)
         },Err(code)=>(report(code,None),None)};
         if let Ok(mut inner)=self.inner.lock(){inner.report=Some(next);inner.candidate=candidate;}
         self.status(label)
     }
+    #[cfg(all(feature="installer-qa",windows))]
+    pub(crate) fn qa_prepare(&self,label:&str)->Result<(),&'static str>{
+        let (candidate,stage)=update_package::qa_stage()?;
+        self.checked.store(true,Ordering::Release);self.cancel.store(false,Ordering::Release);
+        let mut i=self.inner.lock().map_err(|_|"updateUnavailable")?;
+        if i.busy||i.barrier.is_some()||i.staged.is_some(){return Err("updateBusy")}
+        let mut r=report("ready",Some(candidate.display_version()));r.can_install=handoff_validated();
+        i.owner=Some(label.into());i.dismissed=false;i.candidate=Some(candidate);i.staged=Some(stage);i.report=Some(r);Ok(())
+    }
     pub fn begin_prepare(&self,label:&str)->Result<Report,&'static str>{
         let mut i=self.inner.lock().map_err(|_|"updateUnavailable")?;
         if i.owner.as_deref()!=Some(label)||i.dismissed{return Err("notOwner")}
-        if update_package::production_key().is_none(){let r=report("signingNotConfigured",i.report.as_ref().and_then(|r|r.latest_version.clone()));i.report=Some(r.clone());return Ok(r)}
+        if update_package::runtime_key().is_none(){let r=report("signingNotConfigured",i.report.as_ref().and_then(|r|r.latest_version.clone()));i.report=Some(r.clone());return Ok(r)}
         if i.busy{return Err("updateBusy")}
         if i.candidate.is_none(){return Err("noCompatibleAsset")}
         self.cancel.store(false,Ordering::Release);i.staged=None;i.busy=true;
@@ -50,13 +67,13 @@ impl StartupUpdate {
     }
     pub async fn download(&self){
         let candidate=self.inner.lock().ok().and_then(|i|i.candidate.clone());
-        let result=match(candidate,update_package::production_key()){
+        let result=match(candidate,update_package::runtime_key()){
             (Some(c),Some(key))=>update_package::download_and_stage(&c,&key,&self.cancel).await,
             _=>Err(update_package::PackageError::SigningNotConfigured),
         };
         if let Ok(mut i)=self.inner.lock(){i.busy=false;let version=i.report.as_ref().and_then(|r|r.latest_version.clone());
             if i.dismissed||self.cancel.load(Ordering::Acquire){i.report=Some(report("cancelled",version));return}
-            match result{Ok(stage)=>{i.staged=Some(stage);let mut r=report("ready",version);r.can_install=HANDOFF_RELEASE_VALIDATED;i.report=Some(r)},Err(error)=>{let mut r=report("error",version);r.error_code=Some(error.code());i.report=Some(r)}}
+            match result{Ok(stage)=>{i.staged=Some(stage);let mut r=report("ready",version);r.can_install=handoff_validated();i.report=Some(r)},Err(error)=>{let mut r=report("error",version);r.error_code=Some(error.code());i.report=Some(r)}}
         }
     }
     pub fn cancel(&self,label:&str,dismiss:bool)->Report{
@@ -76,7 +93,7 @@ impl StartupUpdate {
     pub fn begin_settle(&self,label:&str,labels:Vec<String>)->Result<String,&'static str>{
         let mut i=self.inner.lock().map_err(|_|"updateUnavailable")?;
         if i.owner.as_deref()!=Some(label)||i.dismissed{return Err("notOwner")}
-        if update_package::production_key().is_none(){return Err("signingNotConfigured")}
+        if update_package::runtime_key().is_none(){return Err("signingNotConfigured")}
         if i.busy||i.staged.is_none()||i.report.as_ref().is_none_or(|r|r.state!="ready"){return Err("updateNotReady")}
         let mut bytes=[0u8;24];getrandom::fill(&mut bytes).map_err(|_|"updateUnavailable")?;
         let token=bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();
@@ -97,7 +114,7 @@ impl StartupUpdate {
     pub fn take_verified(&self,label:&str)->Result<(StagedInstaller,ReleaseCandidate,update_package::TrustedKey),&'static str>{
         let mut i=self.inner.lock().map_err(|_|"updateUnavailable")?;
         if i.owner.as_deref()!=Some(label)||i.dismissed||self.cancel.load(Ordering::Acquire){return Err("updateCancelled")}
-        let key=update_package::production_key().ok_or("signingNotConfigured")?;
+        let key=update_package::runtime_key().ok_or("signingNotConfigured")?;
         let candidate=i.candidate.clone().ok_or("noCompatibleAsset")?;
         let mut staged=i.staged.take().ok_or("updateNotReady")?;
         staged.reverify(&candidate,&key).map_err(|_|"invalidSignature")?;

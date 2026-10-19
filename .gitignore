@@ -130,3 +130,6 @@ Thumbs.db
 !/scripts/native-download-qa.mjs
 !/scripts/native-storage-qa.mjs
 !/scripts/native-explorer-download.ps1
+!/scripts/installer-qa.mjs
+!/scripts/installer-qa-guest.ps1
+!/docs/windows-installer-qa.md
