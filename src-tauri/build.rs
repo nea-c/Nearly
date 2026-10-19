@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=../version.json");
     // include_image! embeds generated RGBA; track the original PNG inputs too.
     for badge in ["sync", "done", "error", "paused"] {
