@@ -54,6 +54,13 @@ independent final checks. QA traces may include each of four fixed foreign-user
 hints once per process (scanner, WebView, child identity mismatch, unknown).
 Hints never authorize exclusions and never contain raw process/service names.
 
+If a retained process exits between the live wait and a failed image-path query,
+exit is accepted only after the same held handle again proves its exact creation
+identity, signaled termination and a valid exit code. A live query failure,
+mismatching successful path, changed identity or uncertain result still refuses.
+QA diagnostics include fixed failure-site and exit-race codes. This handling
+does not bypass file-user, root, snapshot or mutation checks.
+
 Default builds omit the QA module and embedded QA values. The production key and
 `HANDOFF_RELEASE_VALIDATED=false` remain unchanged. Passing this workflow is not
 authorization to enable production updates or publish QA fixtures. Local unit

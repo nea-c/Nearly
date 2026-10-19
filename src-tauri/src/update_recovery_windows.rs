@@ -1606,26 +1606,58 @@ impl LivePeer {
         })
     }
     fn exited(&self) -> Result<Option<u32>> {
-        if process_identity(self.process.0, self.identity.pid)? != self.identity {
-            return Err(Error::Uncertain);
-        }
-        match unsafe { WaitForSingleObject(self.process.0, 0) } {
-            258 => {
-                if process_path(self.process.0)? != self.path {
-                    return Err(Error::Uncertain);
-                }
-                Ok(None)
-            }
-            0 => {
+        observe_retained_exit(&self.identity, &self.path,
+            || process_identity(self.process.0, self.identity.pid),
+            || match unsafe { WaitForSingleObject(self.process.0, 0) } {
+                0 => Ok(true), 258 => Ok(false), _ => Err(Error::Uncertain),
+            },
+            || process_path(self.process.0),
+            || {
                 let mut code = 259;
-                if unsafe { GetExitCodeProcess(self.process.0, &mut code) } == 0 || code == 259 {
-                    return Err(Error::Uncertain);
+                if unsafe { GetExitCodeProcess(self.process.0, &mut code) } == 0 {
+                    Err(Error::Uncertain)
+                } else {
+                    Ok(code)
                 }
-                Ok(Some(code))
+            })
+    }
+}
+fn observe_retained_exit(
+    expected: &ProcessIdentity,
+    expected_path: &Path,
+    mut identity: impl FnMut() -> Result<ProcessIdentity>,
+    mut signaled: impl FnMut() -> Result<bool>,
+    path: impl FnOnce() -> Result<PathBuf>,
+    mut exit_code: impl FnMut() -> Result<u32>,
+) -> Result<Option<u32>> {
+    if identity()? != *expected { return Err(Error::Uncertain); }
+    let mut exited_after_path_failure = false;
+    if !signaled()? {
+        match path() {
+            Ok(observed) => {
+                if observed != expected_path { return Err(Error::Uncertain); }
+                return Ok(None);
             }
-            _ => Err(Error::Uncertain),
+            Err(error) => {
+                #[cfg(feature="installer-qa")]
+                crate::installer_qa::trace("peerObservation", "pathQueryFailed");
+                // The retained object can terminate between the live wait and
+                // path query. Recheck that same handle; never reopen by PID or
+                // accept a failed/mismatching path as proof of a live peer.
+                if identity()? != *expected { return Err(Error::Uncertain); }
+                if !signaled()? { return Err(error); }
+                exited_after_path_failure = true;
+            }
         }
     }
+    let code = exit_code()?;
+    if code == 259 { return Err(Error::Uncertain); }
+    #[cfg(feature="installer-qa")]
+    if exited_after_path_failure {
+        crate::installer_qa::trace("peerObservation", "exitAfterPathFailure");
+    }
+    let _ = exited_after_path_failure;
+    Ok(Some(code))
 }
 fn process_path(handle: RawHandle) -> Result<PathBuf> {
     let mut bytes = vec![0u16; 32768];
@@ -2920,6 +2952,12 @@ fn supervise(
 ) -> Result<()> {
     supervise_with(session, events, parent, package, &mut NativeSupervisorIo)
 }
+fn supervisor_observation<T>(result: Result<T>, site: &'static str) -> Result<T> {
+    #[cfg(feature="installer-qa")]
+    if result.is_err() { crate::installer_qa::trace("supervisorError", site); }
+    let _ = site;
+    result
+}
 fn supervise_with<I: SupervisorIo>(
     session: &mut RecoverySession,
     events: &RecoveryEvents,
@@ -2937,15 +2975,22 @@ fn supervise_with<I: SupervisorIo>(
     #[cfg(feature="installer-qa")]
     crate::installer_qa::trace("helper","started");
     loop {
-        if parent.exited()?.is_none() || !events.commit.is_set()? {
+        if supervisor_observation(parent.exited(), "parent")?.is_none() {
+            #[cfg(feature="installer-qa")]
+            crate::installer_qa::trace("supervisorError", "parent");
+            return Err(Error::Unsafe);
+        }
+        if !supervisor_observation(events.commit.is_set(), "commit")? {
+            #[cfg(feature="installer-qa")]
+            crate::installer_qa::trace("supervisorError", "commit");
             return Err(Error::Unsafe);
         }
         let child_state = match &child {
             None => ChildState::NotStarted,
-            Some((_, peer)) => match peer.exited()? {
+            Some((_, peer)) => match supervisor_observation(peer.exited(), "child")? {
                 Some(_) => ChildState::Exited,
                 None => {
-                    if events.healthy.is_set()? {
+                    if supervisor_observation(events.healthy.is_set(), "child")? {
                         ChildState::LiveHealthy
                     } else {
                         ChildState::LiveUnhealthy
@@ -2974,7 +3019,7 @@ fn supervise_with<I: SupervisorIo>(
             parent: ParentState::AuthorizedExited,
             worker: match &worker {
                 Some(w) => {
-                    if w.peer.exited()? == Some(0) {
+                    if supervisor_observation(w.peer.exited(), "worker")? == Some(0) {
                         WorkerState::ExitedZero
                     } else {
                         WorkerState::ExitedNonzero
@@ -2986,10 +3031,10 @@ fn supervise_with<I: SupervisorIo>(
             root_and_lease_verified: session.store.root.verify().is_ok(),
             snapshots_verified: session.validate_backups().is_ok(),
             candidates_verified: candidates,
-            no_other_users: settled_no_file_users(&session.store.root, allowed)?,
+            no_other_users: supervisor_observation(settled_no_file_users(&session.store.root, allowed), "fileUsers")?,
             failure_requested: failed,
             settings_compatible: session.settings_compatible(),
-            child_idle_and_settings_settled: events.idle.is_set()?,
+            child_idle_and_settings_settled: supervisor_observation(events.idle.is_set(), "idle")?,
             cooperative_exit_requested: close_requested.is_some(),
             child_exit_timed_out: close_requested
                 .is_some_and(|t: Instant| t.elapsed() > Duration::from_secs(5)),
@@ -2997,7 +3042,7 @@ fn supervise_with<I: SupervisorIo>(
             restored_this_session: restored,
             old_restart_attempted: session.record.old_restart_attempted,
         };
-        let observed = session.inspect_tuple()?;
+        let observed = supervisor_observation(session.inspect_tuple(), "tuple")?;
         let action=model::next_action(&session.record.engine, &observed, &facts);
         #[cfg(feature="installer-qa")]
         {
@@ -3129,7 +3174,7 @@ fn supervise_with<I: SupervisorIo>(
                 }
             }
             A::RequestChildExit => {
-                events.exit_request.set()?;
+                supervisor_observation(events.exit_request.set(), "exitRequest")?;
                 close_requested = Some(Instant::now());
             }
             A::RestartOld => {

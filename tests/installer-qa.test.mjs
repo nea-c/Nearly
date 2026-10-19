@@ -121,6 +121,16 @@ test('QA file-user hints accept four fixed codes and reject raw process, service
   }
   assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event:'fileUserHint',code:'scannerHint',version:'2.0.0',pid:42,process:'scanner.exe'})+'\n'),42));
 });
+test('QA peer and supervisor diagnostics accept only their fixed event-specific codes',()=>{
+  const mapping={peerObservation:['pathQueryFailed','exitAfterPathFailure'],supervisorError:['parent','commit','child','worker','fileUsers','idle','tuple','exitRequest']};
+  for(const [event,codes]of Object.entries(mapping))for(const code of codes){
+    const row={event,code,version:'2.0.0',pid:42};
+    assert.deepEqual(qa.decodeQaTrace(Buffer.from(JSON.stringify(row)+'\n'),42),[row]);
+  }
+  for(const [event,code]of [['peerObservation','parent'],['supervisorError','pathQueryFailed'],['peerObservation','unknown'],['supervisorError','ERROR_ACCESS_DENIED'],['supervisorError','C:\\private\\Nearly.exe'],['peerObservation','app.exe'],['supervisorError','a'.repeat(65)]]){
+    assert.throws(()=>qa.decodeQaTrace(Buffer.from(JSON.stringify({event,code,version:'2.0.0',pid:42})+'\n'),42));
+  }
+});
 test('QA trace collection reads at most eight exact PID files with a fixed size limit',async()=>{
   assert.equal(typeof qa.collectQaTraces,'function');
   const files=['authorization.json','qa-trace-0.jsonl','qa-trace-01.jsonl','qa-trace-4294967296.jsonl','qa-trace-42.jsonl\n','../qa-trace-42.jsonl',...Array.from({length:10},(_,i)=>`qa-trace-${i+1}.jsonl`)];

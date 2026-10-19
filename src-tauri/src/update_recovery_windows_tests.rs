@@ -9,6 +9,65 @@ fn retained_test_peer() -> LivePeer {
 }
 
 #[test]
+fn retained_exit_race_requires_a_second_exact_signaled_observation() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    let waits = Cell::new(0);
+    let identities = Cell::new(0);
+    let result = observe_retained_exit(&id, Path::new("owned.exe"), || {
+        identities.set(identities.get() + 1); Ok(id.clone())
+    }, || {
+        waits.set(waits.get() + 1); Ok(waits.get() == 2)
+    }, || Err(Error::Unsafe), || Ok(7));
+    assert_eq!(result.unwrap(), Some(7));
+    assert_eq!(waits.get(), 2);
+    assert_eq!(identities.get(), 2);
+}
+
+#[test]
+fn retained_exit_race_never_rescues_live_changed_or_uncertain_processes() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    for case in 0..6 {
+        let identities = Cell::new(0);
+        let waits = Cell::new(0);
+        let result = observe_retained_exit(&id, Path::new("owned.exe"), || {
+            identities.set(identities.get() + 1);
+            if identities.get() == 2 {
+                if case == 1 { return Ok(ProcessIdentity { pid: 42, created: 101 }); }
+                if case == 2 { return Err(Error::Unsafe); }
+            }
+            Ok(id.clone())
+        }, || {
+            waits.set(waits.get() + 1);
+            if waits.get() == 1 || case == 0 { return Ok(false); }
+            if case == 3 { return Err(Error::Uncertain); }
+            Ok(true)
+        }, || Err(Error::Unsafe), || {
+            if case == 4 { Err(Error::Uncertain) } else { Ok(259) }
+        });
+        assert!(result.is_err(), "case {case} must refuse");
+    }
+}
+
+#[test]
+fn retained_exit_race_never_rescues_a_successfully_mismatching_path() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    let waits = Cell::new(0);
+    assert!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()), || {
+        waits.set(waits.get() + 1); Ok(false)
+    }, || Ok(PathBuf::from("foreign.exe")), || panic!("not authorized")).is_err());
+    assert_eq!(waits.get(), 1);
+}
+
+#[test]
+fn retained_exit_normal_live_and_already_signaled_paths_are_preserved() {
+    let id = ProcessIdentity { pid: 42, created: 100 };
+    assert_eq!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()),
+        || Ok(false), || Ok(PathBuf::from("owned.exe")), || panic!("still live")).unwrap(), None);
+    assert_eq!(observe_retained_exit(&id, Path::new("owned.exe"), || Ok(id.clone()),
+        || Ok(true), || panic!("exited path is not required"), || Ok(0)).unwrap(), Some(0));
+}
+
+#[test]
 fn live_retained_child_waits_for_an_observed_clean_foreign_set() {
     let fixture = Fixture::new();
     let root = PinnedRoot::fixture(&fixture.0).unwrap();
