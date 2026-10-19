@@ -7,12 +7,14 @@ pub(crate) use crate::startup_update::HANDOFF_RELEASE_VALIDATED;
 #[cfg(windows)]
 pub(crate) use crate::update_recovery_windows::launch_verified_recovery;
 
+/// Convenience lookup for observation/layout checks. Mutation and journal
+/// admission must retain RegisteredInstallation until acquiring successor pins.
 pub(crate) fn installed_executable() -> Result<PathBuf,String> {
-    #[cfg(windows)] { native::installed_executable() }
+    #[cfg(windows)] { crate::install_root::RegisteredInstallation::capture().map(|root| root.executable()) }
     #[cfg(not(windows))] { Err("Installed update transactions require Windows".into()) }
 }
 
-pub struct LaunchedInstaller { pub child: Child, identity:crate::update_transaction::ProcessIdentity, #[cfg(windows)] abort:native::CancelOnDrop, #[cfg(windows)] _health_events:native::HealthEvents }
+pub struct LaunchedInstaller { pub child: Child, identity:crate::update_transaction::ProcessIdentity, #[cfg(windows)] abort:native::CancelOnDrop, #[cfg(windows)] _health_events:native::HealthEvents, #[cfg(windows)] _installation:crate::install_root::RegisteredInstallation }
 /// Only this module can attest that an attempt never obtained a child process.
 /// After spawn, even readiness failure is deliberately an uncertain outcome.
 #[derive(Debug)]
@@ -59,15 +61,6 @@ mod native {
         #[cfg(test)] fn OpenEventW(access:u32,inherit:i32,name:*const u16)->Handle;
         fn SetEvent(event:Handle)->i32;
     }
-    #[repr(C)] struct Guid { a:u32,b:u16,c:u16,d:[u8;8] }
-    #[link(name="shell32")]
-    unsafe extern "system" { fn SHGetKnownFolderPath(id:*const Guid,flags:u32,token:Handle,path:*mut *mut u16)->i32; }
-    #[link(name="ole32")]
-    unsafe extern "system" { fn CoTaskMemFree(memory:*const c_void); }
-    #[link(name="advapi32")]
-    unsafe extern "system" {
-        fn RegGetValueW(key: Handle, sub: *const u16, value: *const u16, flags: u32, kind: *mut u32, data: *mut c_void, bytes: *mut u32) -> i32;
-    }
     struct Event(Handle);
     // Kernel event handles permit cross-thread waits/signals. The owning wrapper
     // closes exactly once; CancelOnDrop mutation still requires exclusive access.
@@ -84,41 +77,13 @@ mod native {
     }
     impl Drop for CancelOnDrop { fn drop(&mut self) {if self.armed {unsafe {SetEvent(self.event.0);}}} }
     fn wide(s: &std::ffi::OsStr) -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() }
-    fn registry(value: &str) -> Result<String,String> {
-        let sub=wide(std::ffi::OsStr::new("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\local.syncfiles.native"));
-        let value=wide(std::ffi::OsStr::new(value));
-        let mut data=[0u16;32768]; let mut bytes=(data.len()*2) as u32;
-        // HKCU is a predefined sign-extended handle; read only REG_SZ in the
-        // architecture's installer view. Never create/change registration.
-        let flags=2 | if cfg!(target_pointer_width="64") { 0x10000 } else { 0x20000 };
-        let rc=unsafe { RegGetValueW((-2147483647isize) as Handle,sub.as_ptr(),value.as_ptr(),flags,std::ptr::null_mut(),data.as_mut_ptr().cast(),&mut bytes) };
-        if rc != 0 || bytes < 2 { return Err("Per-user installation registration is unavailable".into()); }
-        let count=(bytes as usize/2).saturating_sub(1);
-        String::from_utf16(&data[..count]).map_err(|_|"Invalid installation registration".into())
-    }
-    fn fixed_install_directory()->Result<PathBuf,String> {
-        let id=Guid {a:0xf1b32785,b:0x6fba,c:0x4fcf,d:[0x9d,0x55,0x7b,0x8e,0x7f,0x15,0x70,0x91]};
-        let mut path=std::ptr::null_mut();
-        if unsafe { SHGetKnownFolderPath(&id,0,std::ptr::null_mut(),&mut path) } < 0 || path.is_null() { return Err("Cannot resolve per-user LocalAppData".into()); }
-        let mut length=0;
-        unsafe { while *path.add(length)!=0 {length+=1;} }
-        let value=String::from_utf16(unsafe {std::slice::from_raw_parts(path,length)});
-        unsafe {CoTaskMemFree(path.cast());}
-        Ok(PathBuf::from(value.map_err(|_|"Invalid LocalAppData path")?).join("Nearly"))
-    }
-    pub fn installed_executable() -> Result<PathBuf,String> {
-        if registry("NearlyOwner")? != "local.syncfiles.native" { return Err("Unrecognized installation owner".into()); }
-        let fixed=fixed_install_directory()?;
-        let registered=PathBuf::from(registry("InstallLocation")?);
-        if std::fs::canonicalize(&fixed).map_err(|e|e.to_string())? != std::fs::canonicalize(registered).map_err(|e|e.to_string())? { return Err("Registered installation is not the fixed per-user location".into()); }
-        Ok(fixed.join("Nearly.exe"))
-    }
     pub fn launch(installer: &Path,nonce:&str) -> Result<LaunchedInstaller,LaunchFailure> {
         // Every fallible preparation step precedes the only spawn call.
-        let (event,abort,health_events,created)=(||->Result<_,String>{
+        let (event,abort,health_events,created,registration)=(||->Result<_,String>{
         validate_nonce(nonce)?;
         let current=std::env::current_exe().map_err(|e|e.to_string())?;
-        let installed=installed_executable()?;
+        let registration=crate::install_root::RegisteredInstallation::capture()?;
+        let installed=registration.executable();
         validate_sibling(installer,&current,&installed)?;
         let (mut c,mut e,mut k,mut u)=(FileTime::default(),FileTime::default(),FileTime::default(),FileTime::default());
         if unsafe { GetProcessTimes(GetCurrentProcess(),&mut c,&mut e,&mut k,&mut u) } == 0 { return Err("Cannot identify update parent".into()); }
@@ -126,14 +91,14 @@ mod native {
         let mut abort=CancelOnDrop {event:fresh_event("Abort",nonce)?,commit:None,armed:true};
         abort.commit=Some(fresh_event("Commit",nonce)?);
         let health_events=HealthEvents { _installed:fresh_event("Installed",nonce)?,_healthy:fresh_event("Healthy",nonce)? };
-        Ok((event,abort,health_events,((c.high as u64)<<32)|c.low as u64))
+        Ok((event,abort,health_events,((c.high as u64)<<32)|c.low as u64,registration))
         })().map_err(|message|LaunchFailure::before_spawn(nonce,message))?;
         let mut command=Command::new(installer);
         command.args(["/S".into(),"/NEARLYUPDATE".into(),"/NEARLYPROTOCOL=2".into(),format!("/NEARLYPARENT={}",std::process::id()),format!("/NEARLYCREATED={created}"),format!("/NEARLYREADY={nonce}")]);
         let mut child=spawn_installer(&mut command,nonce)?;
         let identity=identify_child(&child).map_err(LaunchFailure::after_spawn)?;
         wait_ready(&mut child,&event,Duration::from_secs(10))?;
-        Ok(LaunchedInstaller { child, identity, abort, _health_events:health_events })
+        Ok(LaunchedInstaller { child, identity, abort, _health_events:health_events, _installation:registration })
     }
     pub(super) struct HealthEvents {_installed:Event,_healthy:Event}
     fn fresh_event(kind:&str,nonce:&str)->Result<Event,String>{

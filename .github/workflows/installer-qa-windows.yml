@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   guest:
-    name: Fresh guest / ${{ matrix.scenario }}
+    name: Fresh guest / ${{ matrix.scenario }} / ${{ matrix.destination }}
     if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 180
@@ -25,6 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         scenario: [success, health-failure]
+        destination: [default, custom]
     permissions:
       contents: read
       actions: read
@@ -32,6 +33,7 @@ jobs:
       QA_CONTROLLER_SHA: ${{ inputs.controller_sha }}
       QA_CONFIRMATION: ${{ inputs.confirmation }}
       QA_SCENARIO: ${{ matrix.scenario }}
+      QA_DESTINATION: ${{ matrix.destination }}
       RUSTUP_TOOLCHAIN: 1.97.1
     defaults:
       run:
@@ -46,11 +48,12 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - name: Require exact manual confirmation before guest preparation
+        id: authorized
         run: |
           node --input-type=module -e "import {validateContext,validateScenario} from './scripts/installer-qa.mjs'; validateContext(process.env); validateScenario(process.env.QA_SCENARIO);"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Safe orchestration unit tests
-        run: node --test tests/installer-qa.test.mjs
+      - name: Safe orchestration, UI policy and evidence unit tests
+        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
       - name: Prepare locked build dependencies in this fresh guest
@@ -61,10 +64,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 fetch --locked --manifest-path src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Qualify pinned signed setup and ephemeral QA update/restart/recovery fixtures
+      - name: Qualify actual destination and shortcut UI plus ephemeral QA update/restart/recovery
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/installer-qa.mjs run
-      # Deliberately no upload, release, cache, deployment, or secret-bearing step.
-      # Public summaries contain case status only; fixture binaries and run token
-      # live exclusively on this disposable guest and must never be distributed.
+      - name: Export only validated public screenshots and bounded result records
+        id: evidence
+        if: always() && steps.authorized.outcome == 'success'
+        run: node scripts/installer-qa-evidence.mjs
+      - name: Retain actual UI evidence without fixture binaries or credentials
+        if: always() && steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nearly-installer-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scenario }}-${{ matrix.destination }}
+          path: ${{ runner.temp }}/nearly-installer-qa-${{ github.run_id }}-${{ github.run_attempt }}/public-evidence/
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+      # No Release, production signing, cache, deployment or secret-bearing step.
+      # Fixture binaries, settings and authorization remain only on the guest.

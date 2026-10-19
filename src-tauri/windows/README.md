@@ -28,14 +28,20 @@ The root packaging configuration must enable the `nsis` target and set:
 ```
 
 Do not configure external resources/binaries for this template: compile-time
-guards reject them. The install folder is fixed to the current user's
-`%LOCALAPPDATA%\Nearly`; `/D=` and stored alternative paths cannot redirect it.
+guards reject them. A fresh interactive install can select a dedicated local
+folder, defaulting to `%LOCALAPPDATA%\Nearly`. An existing owned registration fixes
+the destination for reinstall/update; `/D=` cannot relocate it.
 A create-new, delete-on-close write probe must succeed before payload extraction.
-There is no administrator mode, directory selector, or runtime bootstrapper.
+There is no administrator mode or runtime bootstrapper.
 Existing target EXE/uninstaller files require a matching owned uninstall
 registration and exact installation location before any overwrite. A settings-only
-folder is a valid reinstall target. Reparse-point target directories are rejected
-for both installation and uninstallation.
+default folder containing only recognized Nearly data is a valid reinstall target.
+Fresh custom folders must be empty/absent with an existing parent. Local fixed-drive
+path syntax, the entire directory chain, read-only security descriptors and payload
+file types are checked. Reparse points, shared-write folders and uncertain states
+are refused for installation/uninstallation. Pinned ancestor handles exclude delete
+sharing through mutation; no ACL is repaired or weakened. Existing default r3.0
+registration remains supported. This local candidate has not been published.
 
 ## Shortcuts and upgrades
 
@@ -72,12 +78,20 @@ Microsoft separately. It never downloads or executes a runtime installer.
 ## Settings and uninstall
 
 The Add/Remove Programs entry points to the automatically generated
-`%LOCALAPPDATA%\Nearly\uninstall.exe`. The uninstaller validates its fixed per-user
-location and owned registry marker, refuses a running app, removes only the known
+`<registered-install-directory>\uninstall.exe`. The uninstaller validates its per-user
+registered location and owned registry marker, refuses a running app, removes only the known
 main EXE, its own uninstaller, target-matching shortcuts, and its own uninstall
 registration. Directory removal is **nonrecursive**. EXE-adjacent `settings.json`,
 backups, user files, and WebView data are never packaged over or deleted. Shortcut
 preferences remain for later reinstall. No delete-user-data checkbox exists.
+
+The uninstaller also compares the actual executing module against the existing
+registered `uninstall.exe`, using complete bounded reads from regular single-link
+files held against writes/deletion. This rejects stale/modified copies even with
+NSIS's `_?=` directory override. NSIS's normal temporary copy and an identical
+byte-for-byte copy remain equivalent; the check does not prove original launch
+path. The registered image handle is released immediately before intentional
+self-deletion, while directory guards remain held.
 
 ## Verification and scope
 
@@ -88,6 +102,14 @@ compiles both installer and uninstaller using cached NSIS/plugins. It writes
 evidence to `test-results/nsis-template-compile/` and never executes the output.
 The fixture payload is deliberately not a working app; its generated setup is
 named `DO-NOT-RUN` and must not be distributed as the application installer.
+
+With `NEARLY_NSIS_ROOT` pointing to the existing compiler, set
+`NEARLY_NSIS_READONLY_QA=1` and run `npm run test:installer` to also execute the
+minimal `READONLY-ROOT-TEST.exe` unit harnesses. They contain no application
+payload, setup/uninstall section, registry writes, shortcuts or permission
+changes. They exercise actual System-plugin calls for path pins, synthetic
+in-memory ACLs and equal/different/missing uninstaller image reads. These unit
+processes do not qualify the actual setup pages or an installation lifecycle.
 
 Tests interpret the actual NSIS ownership/shortcut decision functions using only
 generated registry and filesystem facts. Static tests check independent choice persistence paths, running-app guards,

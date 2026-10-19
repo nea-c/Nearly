@@ -12,6 +12,42 @@ test('guest JSON comparison normalizes empty objects without running a guest act
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Pure generated JSON normalization passed/);
 });
+
+test('guest cleanup selects only exact generated settings and refuses foreign children without filesystem mutation',{skip:process.platform!=='win32'},()=>{
+  const script=`$ErrorActionPreference='Stop'
+  $ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_TEST_SOURCE,[ref]$null,[ref]$null)
+  $function=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-GeneratedCleanupPaths'},$true))
+  if($function.Count -ne 1){throw 'Pure cleanup selector missing'}
+  . ([scriptblock]::Create($function[0].Extent.Text))
+  $names=@('settings.json','history.json','bookmarks.json','sync-profiles.json','connections.json')
+  $children=@($names | ForEach-Object { $_; $_ -replace '\\.json$','.backup.json' })
+  $paths=@(Get-GeneratedCleanupPaths 'C:\\qa-owned' $names $children)
+  if($paths.Count -ne 10 -or $paths[0] -cne 'C:\\qa-owned\\settings.json'){throw 'Unexpected cleanup selection'}
+  foreach($bad in @(@($children[0..8]),@($children[0..8])+@('foreign.txt'),@($children[0..8])+@('..\\foreign.json'),@($children[0..8])+@($children[0]))){
+    $refused=$false
+    try { Get-GeneratedCleanupPaths 'C:\\qa-owned' $names $bad | Out-Null } catch { $refused=$true }
+    if(!$refused){throw 'Foreign or incomplete cleanup was accepted'}
+  }
+  'Pure cleanup selection passed'`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',script],{env:{...process.env,QA_TEST_SOURCE:fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Pure cleanup selection passed/);
+});
+
+test('preflight validates filesystem ancestry separately from registry freshness',{skip:process.platform!=='win32'},()=>{
+  const script=`$ErrorActionPreference='Stop'
+  $ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_TEST_SOURCE,[ref]$null,[ref]$null)
+  $function=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PreflightFileTargets'},$true))
+  if($function.Count -ne 1){throw 'Pure preflight selector missing'}
+  . ([scriptblock]::Create($function[0].Extent.Text))
+  $targets=@(Get-PreflightFileTargets 'D:\\temp\\owned' @{default='C:\\local\\Nearly';custom='C:\\local\\custom';drive='D:\\owned'} 'C:\\programs\\Nearly' 'C:\\desktop\\Nearly.lnk')
+  if($targets.Count -ne 6){throw 'Missing filesystem preflight target'}
+  foreach($target in $targets){if($target -cnotmatch '\\A[A-Za-z]:\\\\'){throw 'Non-filesystem target reached local path validation'}}
+  $source=[IO.File]::ReadAllText($env:QA_TEST_SOURCE)
+  if($source -notmatch 'foreach \\($target in $fileTargets\\) \\{ Assert-LocalPath $target \\}'.Replace('$','\\$')){throw 'Filesystem validator must use only classified file targets'}
+  'Pure preflight classification passed'`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',script],{env:{...process.env,QA_TEST_SOURCE:fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Pure preflight classification passed/);
+});
 test('fixture copy excludes generated roots while retaining dependency distribution files',()=>{
   assert.equal(typeof qa.copyFixturePath,'function');
   for(const name of ['','src/app.ts','node_modules/vite/dist/node/cli.js','node_modules/example/build/index.js','src-tauri/vendor/example/target.rs'])assert.equal(qa.copyFixturePath(name),true,name);
@@ -33,6 +69,28 @@ test('plan fixes source provenance and refuses path overrides',()=>{
   assert.equal(qa.validatePlan(p,c),true);
   for(const [key,value]of [['runRoot','D:\\foreign'],['sourceVersion','2.0.0'],['targetVersion','3.0.0'],['artifactId','1'],['installerSha256','0'.repeat(64)],['runAttempt','2']])assert.throws(()=>qa.validatePlan({...p,[key]:value},c));
   assert.throws(()=>qa.validatePlan({...p,extra:true},c));
+});
+
+test('destination selection derives exact guest-owned Unicode paths and rejects overrides',()=>{
+  const c=qa.validateContext(env(),'win32');
+  for(const kind of ['default','custom']){
+    const p=qa.createPlan(c,kind);
+    assert.equal(p.schemaVersion,2);assert.equal(p.destinationKind,kind);
+    assert.equal(p.installRoot,p.destinations[kind]);
+    assert.equal(qa.validatePlan(p,c,kind),true);
+    assert.throws(()=>qa.validatePlan({...p,destinations:{...p.destinations,custom:'D:\\foreign'}},c,kind));
+    assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations.drive},c,kind));
+  }
+  const p=qa.createPlan(c,'custom');
+  assert.match(p.installRoot,/日本語 space/);assert.match(p.destinations.drive,/^D:\\/);
+  for(const kind of [undefined,'','drive','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
+});
+
+test('UI qualification covers every independent checkbox pair in both actual languages',()=>{
+  const cases=qa.uiCases();
+  assert.equal(cases.length,8);
+  assert.deepEqual(new Set(cases.map(c=>`${c.language}:${c.start}:${c.desktop}`)),new Set(['en:0:0','en:0:1','en:1:0','en:1:1','ja:0:0','ja:0:1','ja:1:0','ja:1:1']));
+  assert.equal(new Set(cases.map(c=>c.name)).size,8);
 });
 test('a guest selects exactly one explicit scenario and reports only that lifecycle case',()=>{
   assert.equal(typeof qa.validateScenario,'function');
@@ -82,8 +140,10 @@ test('five settings fixtures carry complete manifests and generated offline data
 });
 test('bounded outcome validation rejects timeouts, wrong version and failed recovery',()=>{
   assert.equal(typeof qa.validateOutcome,'function');
-  assert.equal(qa.validateOutcome({schemaVersion:1,scenario:'success',phase:'succeeded',version:'2.0.0'},'success'),true);
-  assert.equal(qa.validateOutcome({schemaVersion:1,scenario:'health-failure',phase:'rolledBack',version:'1.9.0'},'health-failure'),true);
+  assert.equal(qa.validateOutcome({schemaVersion:2,destinationKind:'default',scenario:'success',phase:'succeeded',version:'2.0.0'},'success'),true);
+  assert.equal(qa.validateOutcome({schemaVersion:2,destinationKind:'custom',scenario:'health-failure',phase:'rolledBack',version:'1.9.0'},'health-failure','custom'),true);
+  assert.throws(()=>qa.validateOutcome({schemaVersion:2,destinationKind:'default',scenario:'success',phase:'succeeded',version:'2.0.0'},'success','custom'));
+  assert.throws(()=>qa.validateOutcome({schemaVersion:2,destinationKind:'custom',scenario:'success',phase:'succeeded',version:'2.0.0',error:'failed'},'success','custom'));
   for(const o of [null,{}, {schemaVersion:1,scenario:'success',phase:'failed',version:'2.0.0'}, {schemaVersion:1,scenario:'health-failure',phase:'succeeded',version:'2.0.0'}])assert.throws(()=>qa.validateOutcome(o,'success'));
 });
 test('wait deadline fails closed with inert injected clock and no setup execution',async()=>{
@@ -143,11 +203,15 @@ test('QA trace collection reads at most eight exact PID files with a fixed size 
   assert.deepEqual(await qa.collectQaTraces('owned-root',{list:async()=>['qa-trace-42.jsonl\n','authorization.json','../qa-trace-42.jsonl','qa-trace-042.jsonl'],read:async()=>{unexpectedReads++;throw Error('must not read');}}),[]);
   assert.equal(unexpectedReads,0);
 });
-test('workflow remains manual, read-only, pinned and publishes no QA artifact',async()=>{
+test('workflow remains manual, read-only and uploads only validated public evidence',async()=>{
   const text=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
   assert.match(text,/workflow_dispatch:/);assert.match(text,/controller_sha:/);assert.match(text,/confirmation:/);
-  assert.doesNotMatch(text,/secrets\.|contents: write|actions: write|upload-artifact|pull_request:|push:/);
+  assert.doesNotMatch(text,/secrets\.|contents: write|actions: write|pull_request:|push:/);
+  assert.match(text,/upload-artifact@[a-f0-9]{40}/);assert.match(text,/public-evidence/);
+  assert.match(text,/installer-qa-evidence\.mjs/);
   assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs run/);
   assert.match(text,/fail-fast: false/);assert.match(text,/scenario: \[success, health-failure\]/);
   assert.match(text,/QA_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
+  assert.match(text,/destination: \[default, custom\]/);
+  assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
 });

@@ -158,15 +158,16 @@ impl NativeContext {
         }
         #[cfg(windows)]
         {
-            let installed =
-                crate::update_handoff::installed_executable().map_err(|_| Error::Unsafe)?;
-            let current = std::env::current_exe().map_err(|_| Error::Io)?;
-            if dunce::canonicalize(&installed).map_err(|_| Error::Io)?
-                != dunce::canonicalize(current).map_err(|_| Error::Io)?
-            {
+            let installation = crate::install_root::RegisteredInstallation::capture()
+                .map_err(|_| Error::Unsafe)?;
+            if !installation.is_current().map_err(|_| Error::Unsafe)? {
                 return Err(Error::Unsafe);
             }
-            windows_impl::capture(installed.parent().ok_or(Error::Unsafe)?)
+            // Keep admission guards until capture owns its overlapping pins.
+            let mut context = windows_impl::capture(installation.root())?;
+            Arc::get_mut(&mut context.0).ok_or(Error::Unsafe)?._directories
+                .extend(installation.into_guards());
+            Ok(context)
         }
         #[cfg(not(windows))]
         {

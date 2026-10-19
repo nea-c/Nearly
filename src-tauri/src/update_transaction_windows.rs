@@ -199,7 +199,10 @@ pub(crate) fn hash_file(file: &mut File, limit: u64) -> Result<(u64, String)> {
 }
 pub(crate) fn directory(path: &Path, access: u32) -> Result<File> {
     let file = OpenOptions::new()
-        .access_mode(access)
+        // Metadata-only handles do not reliably participate in Windows
+        // delete sharing. FILE_LIST_DIRECTORY makes these namespace pins
+        // effective against rename/delete until the owning context drops.
+        .access_mode(access | 1)
         .share_mode(3)
         .custom_flags(DIRECTORY | REPARSE)
         .open(path)
