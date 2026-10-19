@@ -1,3 +1,5 @@
+import {assertProductionDefaults,assertProductionPayload} from './production-build-policy.mjs';
+import {readInstallationGate} from '../.github/scripts/release-trust.mjs';
 import {checkVersions,displayVersion} from './version.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -79,6 +81,8 @@ export async function runInstallerBuild(args=process.argv.slice(2)){
   await checkVersions();
   if(process.platform!=='win32'||process.arch!=='x64')throw Error('This installer target requires a Windows x64 build host');
   const options=buildOptions(args);
+  await assertProductionDefaults(root);
+  const updaterInstallationEnabled=await readInstallationGate(root);
   if(options.target&&options.target!=='x86_64-pc-windows-msvc')throw Error('The reviewed installer currently targets Windows x64 only');
   const config=JSON.parse(await fs.readFile(path.join(root,'src-tauri/tauri.conf.json'),'utf8'));
   validateInstallerPolicy(config);
@@ -90,6 +94,7 @@ export async function runInstallerBuild(args=process.argv.slice(2)){
   for(const key of Object.keys(env))if(/^TAURI_(SIGNING_|PRIVATE_KEY|WINDOWS_CERTIFICATE)/.test(key))delete env[key];
   const target=options.target?['--target',options.target]:[];
   await execute([paths.cli,'build','--no-bundle','--no-sign','--ci',...target,'--','--locked',...(options.offline?['--offline']:[])],env);
+  assertProductionPayload(await fs.readFile(paths.artifact));
   // Keep the installed payload byte-identical to the independently pinned EXE.
   // Our protocol-3 updater does not use Tauri's per-bundle-type updater marker.
   await execute([paths.cli,'bundle','--bundles','nsis','--no-binary-patching','--no-sign','--ci',...target],env);
@@ -99,7 +104,7 @@ export async function runInstallerBuild(args=process.argv.slice(2)){
   const result=await publishInstaller(root,artifact,{version:config.version,identifier:config.identifier,
     payloadArchitecture:'x64',installMode:'currentUser',installDirectory:'$LOCALAPPDATA\\Nearly',
     uninstaller:'$LOCALAPPDATA\\Nearly\\uninstall.exe',shortcutsIndependent:true,settingsIncluded:false,
-    adjacentSettingsPreserved:true,updaterInstallationEnabled:false,embeddedApplicationSha256:hash(await fs.readFile(paths.artifact))});
+    adjacentSettingsPreserved:true,updaterInstallationEnabled,embeddedApplicationSha256:hash(await fs.readFile(paths.artifact))});
   console.log(`Built installer ${result.path} (${result.sha256})`);return result;
 }
 

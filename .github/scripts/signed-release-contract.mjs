@@ -1,3 +1,4 @@
+import {assertProductionPayload} from '../../scripts/production-build-policy.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -34,10 +35,11 @@ export function validateArtifact(a,r,{id,role,digest:zipDigest,repositoryId}){
   return true;
 }
 export async function createUnsignedBundle(root,output,r,{payloadPath,tree}){
-  await verifyVersionAndGates(root,r,{profile:'signed-bootstrap'});if(!oid(tree))fail('Exact source tree required');
+  await verifyVersionAndGates(root,r,{profile:'registered-production'});if(!oid(tree))fail('Exact source tree required');
   const name=expectedName(r),installer=await regular(path.join(root,'build',name)),payload=await regular(payloadPath),metadata=JSON.parse(await regular(path.join(root,'build/installer-build-info.json'),131072));
   pe(installer,0x14c);pe(payload,0x8664);
-  if(metadata.version!==r.version||metadata.displayVersion!==r.tag||metadata.identifier!=='local.syncfiles.native'||metadata.payloadArchitecture!=='x64'||metadata.installMode!=='currentUser'||metadata.settingsIncluded!==false||metadata.adjacentSettingsPreserved!==true||metadata.updaterInstallationEnabled!==false||metadata.updaterProtocol!==3||metadata.signed!==false||metadata.bytes!==installer.length||metadata.sha256!==sha256(installer)||metadata.embeddedApplicationSha256!==sha256(payload))fail('Signed bootstrap installer metadata mismatch');
+  assertProductionPayload(payload);
+  if(metadata.version!==r.version||metadata.displayVersion!==r.tag||metadata.identifier!=='local.syncfiles.native'||metadata.payloadArchitecture!=='x64'||metadata.installMode!=='currentUser'||metadata.settingsIncluded!==false||metadata.adjacentSettingsPreserved!==true||metadata.updaterInstallationEnabled!==true||metadata.updaterProtocol!==3||metadata.signed!==false||metadata.bytes!==installer.length||metadata.sha256!==sha256(installer)||metadata.embeddedApplicationSha256!==sha256(payload))fail('Registered production installer metadata mismatch');
   auditBytes(installer,[root,process.env.USERPROFILE,process.env.GITHUB_WORKSPACE,process.env.RUNNER_TEMP]);auditBytes(payload,[root,process.env.USERPROFILE,process.env.GITHUB_WORKSPACE,process.env.RUNNER_TEMP]);
   const check=Buffer.from(`${sha256(installer)}  ${name}\n`),m={schemaVersion:1,kind:'unsigned-updater',...Object.fromEntries(bindings.map(k=>[k,r[k]])),tree,publicKeySha256,payload:descriptor('Nearly.exe',payload),assets:[descriptor(name,installer),descriptor(name+'.sha256',check)]};
   await fs.mkdir(output);for(const [filename,bytes]of [[name,installer],[name+'.sha256',check],['Nearly.exe',payload],['unsigned-manifest.json',canonical(m)]])await fs.writeFile(path.join(output,filename),bytes,{flag:'wx'});
@@ -49,7 +51,7 @@ export async function verifyUnsignedBundle(dir,r,{manifestHash,artifactId,allowS
   const m=await manifest(dir,'unsigned-manifest.json',manifestHash);baseManifest(m,r,'unsigned-updater',['payload','assets']);
   const checked=await assets(dir,m.assets,[name,name+'.sha256']);checksum(checked,name);
   keys(m.payload,['name','bytes','sha256']);if(m.payload.name!=='Nearly.exe'||!digest(m.payload.sha256)||!Number.isSafeInteger(m.payload.bytes)||m.payload.bytes<=0)fail('Invalid payload descriptor');
-  const payload=await regular(path.join(dir,'Nearly.exe'));if(payload.length!==m.payload.bytes||sha256(payload)!==m.payload.sha256)fail('Final payload differs');pe(payload,0x8664);auditBytes(payload);
+  const payload=await regular(path.join(dir,'Nearly.exe'));if(payload.length!==m.payload.bytes||sha256(payload)!==m.payload.sha256)fail('Final payload differs');pe(payload,0x8664);assertProductionPayload(payload);auditBytes(payload);
   return{manifest:m,assets:checked,payload};
 }
 export async function createSigningPlan(dir,output,r,options){

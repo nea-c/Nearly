@@ -24,10 +24,10 @@ export async function main(args,env=process.env){
     await loadTrustedPublicKey(control);await collectToolInputs(control,r);
     const checked=await verifySigningPolicy(r,api());validateWorkflowRun(await api().get(`/actions/runs/${r.runId}/attempts/${r.runAttempt}`),r);
     await output({'repository-id':checked.repositoryId});
-    if(env.GITHUB_STEP_SUMMARY)await fs.appendFile(env.GITHUB_STEP_SUMMARY,`Manual signed workflow (${r.mode}): ${r.tag}, source ${r.commit}, controller ${r.workflowCommit}, run ${r.runId}/${r.runAttempt}. Signing requires the nea-c Environment approval. Inspect the workflow/SHA/artifacts and full main PR/admin/force/delete settings; Environment is not a workflow allowlist. Installation gate stays false. verify-signature retains artifacts only and cannot publish a Release.\n`);
-  }else if(command==='preflight')await auditSource(path.resolve(first),r,{profile:'signed-bootstrap'});
+    if(env.GITHUB_STEP_SUMMARY)await fs.appendFile(env.GITHUB_STEP_SUMMARY,`Manual signed workflow (${r.mode}): ${r.tag}, source ${r.commit}, controller ${r.workflowCommit}, run ${r.runId}/${r.runAttempt}. Signing requires the nea-c Environment approval. Inspect the workflow/SHA/artifacts and full main PR/admin/force/delete settings; Environment is not a workflow allowlist. Installation requires the enabled production gate and registered public key. verify-signature retains artifacts only and cannot publish a Release.\n`);
+  }else if(command==='preflight')await auditSource(path.resolve(first),r,{profile:'registered-production'});
   else if(command==='package'){
-    const root=path.resolve(first),tree=await auditSource(root,r,{profile:'signed-bootstrap'});if(!env.CARGO_TARGET_DIR)throw Error('Owned Cargo target required');
+    const root=path.resolve(first),tree=await auditSource(root,r,{profile:'registered-production'});if(!env.CARGO_TARGET_DIR)throw Error('Owned Cargo target required');
     const result=await createUnsignedBundle(root,path.resolve(second),r,{tree,payloadPath:path.join(env.CARGO_TARGET_DIR,'release/Nearly.exe')});await output({'manifest-sha256':result.manifestHash});
   }else if(command==='tools'){
     if(!env.CARGO_TARGET_DIR||!env.NEARLY_EXTRACTOR_DIRECTORY)throw Error('Prepared owned tool paths required');

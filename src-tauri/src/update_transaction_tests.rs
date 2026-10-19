@@ -140,10 +140,10 @@ fn pending(
 }
 
 #[test]
-fn production_context_is_disabled_without_both_existing_release_gates() {
+fn enabled_production_context_still_rejects_unregistered_test_executable() {
     assert!(matches!(
         NativeContext::capture_current_install(),
-        Err(Error::Disabled)
+        Err(Error::Unsafe | Error::Io)
     ));
 }
 #[test]

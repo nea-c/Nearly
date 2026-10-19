@@ -1,8 +1,9 @@
 # Native update handoff
 
-Production installation remains disabled: the registered public key is embedded but
-`HANDOFF_RELEASE_VALIDATED` is false. This describes protocol3 code, not
-qualification of a real signed installer.
+Production handoff is enabled after separate activation approval. The fixed
+registered public key and all protocol3 admission checks remain mandatory.
+Hosted QA-feature installation, restart and rollback evidence is recorded in
+windows-installer-qa.md; it does not qualify an ordinary-PC production installation.
 
 The coordinator retains the verified sibling installer and ancestor locks,
 seals global work admission and settles settings. Only the fixed registered
@@ -49,7 +50,8 @@ Cleanup likewise requires fresh native proofs and never uses wildcard deletion.
 
 Tests use generated owned files, isolated registry keys and harmless copied test
 children. Source interpreters and cached NSIS compilation do not execute setup.
-Real NSIS self-extraction, installation, upgrade, uninstall, power interruption
-and settings/shortcut preservation still require separately approved disposable
-Windows qualification. Key creation, ACL changes and secret registration are
-separate approvals; key approval alone does not enable installation.
+Hosted isolated Windows run 39202794997 passed signed setup/reinstall/uninstall,
+settings and shortcut preservation, and QA-feature success/health-failure rollback.
+The production-enabled variant is validated separately without local execution.
+Power interruption and long-duration stability remain unqualified. Key creation,
+ACL changes, secret registration and release publication require separate approval.

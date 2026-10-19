@@ -2,7 +2,7 @@
 
 The native process checks the latest stable `nea-c/Nearly` release once per launch. Draft, prerelease and beta versions are excluded. Canonical public `rX.Y` tags map to internal `X.Y.0`; numeric SemVer precedence handles multi-digit versions. Patch, prerelease and build aliases are rejected (see versioning.md). Metadata requests use HTTPS, reject redirects, and have an eight-second/128 KiB budget. Offline failures leave the app usable.
 
-The localized Update now/Later UI, verified package staging and native handoff coordinator are implemented. **Self-update remains disabled in this build:** the registered public key is embedded but `HANDOFF_RELEASE_VALIDATED` is false. Update now remains disabled. Install IPC rejects the unqualified installation gate before settings changes or process launch. Later is process-only; no snooze setting is saved.
+The localized Update now/Later UI, verified package staging and native handoff coordinator are implemented. **Production handoff is enabled** after explicit activation approval and isolated signed NSIS installation/rollback/restart-health QA. The fixed registered public key remains mandatory. Only a newer release with a valid matching signature and payload can be installed, after the existing global idle/settings checks. No new release is published by this change. Later is process-only; no snooze setting is saved.
 
 ## Trust and staging
 
@@ -10,7 +10,7 @@ Candidates require a canonical stable `rX.Y` tag with internal `<version>` equal
 
 Tauri's base64 minisign document is verified with maintained ring Ed25519 and RustCrypto BLAKE2b primitives. Both file and global comment signatures must verify. Exactly one authenticated `version:`, `file:` and `payload-sha256:` must match the candidate and running payload, preventing replay and architecture relabelling. The NSIS bootstrapper is PE32/x86; its payload architecture is bound by the signed exact filename. Sign releases using the canonical public filename (for example `file:Nearly_r1.0_x64-setup.exe`), while the authenticated version field remains internal (`version:1.0.0`).
 
-Verified bytes are saved under a random, exclusively created sibling name beside the actual Nearly.exe. There is no fallback to Temp or elevation. Reparse checks, ancestor locks, native file identity and handle-based re-verification protect creation and launch. Unrelated paths are never overwritten or deleted. Downloads currently buffer the bounded package in memory.
+Verified bytes are saved with its authenticated canonical filename in an exclusively created random transaction directory beside the actual Nearly.exe. There is no fallback to Temp or elevation. Reparse checks, ancestor locks, native file identity and handle-based re-verification protect creation and launch. Unrelated paths are never overwritten or deleted. Downloads currently buffer the bounded package in memory.
 
 ## Shutdown and handoff
 
@@ -34,7 +34,7 @@ The new application starts under a native probation gate. Settings load and UI r
 
 ## Limits and release prerequisites
 
-Pre-exit settings rollback and a conditional post-exit binary/registry inverse are implemented behind the disabled installation gate. Restoration requires exact owned file/value proofs and no unknown users. A live failed child may receive a cooperative exit request only after atomic admission sealing, idle checks and settled settings; it is never killed. Busy, unknown, timed-out or conflicting state retains recovery material for manual repair. Succeeded is irreversible. Old-version restart additionally requires fresh restoration proof, unchanged compatible actual settings and a durable at-most-once attempt. External `SYNCFILES_CONFIG_DIR` locations are unsupported by this updater.
+Pre-exit settings rollback and a conditional post-exit binary/registry inverse are implemented with the enabled production installation gate and fixed trust checks. Restoration requires exact owned file/value proofs and no unknown users. A live failed child may receive a cooperative exit request only after atomic admission sealing, idle checks and settled settings; it is never killed. Busy, unknown, timed-out or conflicting state retains recovery material for manual repair. Succeeded is irreversible. Old-version restart additionally requires fresh restoration proof, unchanged compatible actual settings and a durable at-most-once attempt. External `SYNCFILES_CONFIG_DIR` locations are unsupported by this updater.
 
 Cleanup requires fresh native ownership and process-exit evidence; persisted flags alone never authorize it. Unknown files are retained and no wildcard cleanup is used. Offline recovery without retained live worker/helper exit proofs conservatively reports uncertainty rather than continuing or restarting. The generated tests do not establish recovery from arbitrary power loss or qualify actual NSIS execution.
 

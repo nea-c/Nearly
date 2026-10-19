@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {createToolBundle,verifyToolBundle} from '../.github/scripts/signed-tool-contract.mjs';
 const project=fileURLToPath(new URL('../',import.meta.url)),sha=b=>createHash('sha256').update(b).digest('hex');
-const required=['.github/signing-dependencies.json','.github/updater-public-key.pub','.github/scripts/prepare-signing-tools.ps1','.github/scripts/signed-tool-contract.mjs','.github/scripts/signed-release-contract.mjs','.github/scripts/release-contract.mjs','.github/scripts/release-trust.mjs','tools/updater-signer/Cargo.toml','tools/updater-signer/Cargo.lock','tools/updater-signer/build.rs','tools/updater-signer/src/lib.rs','tools/updater-signer/src/main.rs','src-tauri/src/update_package.rs'];
+const required=['scripts/production-build-policy.mjs','.github/signing-dependencies.json','.github/updater-public-key.pub','.github/scripts/prepare-signing-tools.ps1','.github/scripts/signed-tool-contract.mjs','.github/scripts/signed-release-contract.mjs','.github/scripts/release-contract.mjs','.github/scripts/release-trust.mjs','tools/updater-signer/Cargo.toml','tools/updater-signer/Cargo.lock','tools/updater-signer/build.rs','tools/updater-signer/src/lib.rs','tools/updater-signer/src/main.rs','src-tauri/src/update_package.rs'];
 test('trusted tool bundle binds clean controller Git tree, complete inputs, exact executable bytes and dependency lock',async t=>{
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),'nearly-tool-contract-'));t.after(()=>fs.rm(temp,{recursive:true,force:true}));
   const root=path.join(temp,'control'),pair=path.join(temp,'pair');await fs.mkdir(pair);await fs.mkdir(root);
@@ -22,7 +22,9 @@ test('trusted tool bundle binds clean controller Git tree, complete inputs, exac
   git(['init','-b','main']);git(['add','.']);git(['-c','user.name=Generated fixture','-c','user.email=fixture@users.noreply.github.com','commit','-m','Generated trusted-tool fixture']);
   const r={repository:'nea-c/Nearly',workflowCommit:git(['rev-parse','HEAD']),runId:'123',runAttempt:'2',mode:'verify-signature'},out=path.join(temp,'bundle');
   const result=await createToolBundle(root,out,r,{signerPath:signer,extractorDirectory:pair});
-  assert.equal((await verifyToolBundle(root,out,r,{manifestHash:result.manifestHash})).assets.length,3);
+  const verified=await verifyToolBundle(root,out,r,{manifestHash:result.manifestHash});
+  assert.equal(verified.assets.length,3);
+  assert.ok(verified.inputs.sources.some(s=>s.name==='scripts/production-build-policy.mjs'),'QA payload policy must be bound in trusted source closure');
   await assert.rejects(()=>verifyToolBundle(root,out,{...r,mode:'release'},{manifestHash:result.manifestHash}));
   await assert.rejects(()=>verifyToolBundle(root,out,{...r,runAttempt:'3'},{manifestHash:result.manifestHash}));
   await fs.writeFile(path.join(out,'7z.dll'),Buffer.from('tampered'));await assert.rejects(()=>verifyToolBundle(root,out,r,{manifestHash:result.manifestHash}));

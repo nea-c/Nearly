@@ -9,29 +9,40 @@ pub enum NativeSyncState {
     Stopped,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TaskbarState { Idle, Working, CaughtUp, Error }
+pub enum TaskbarState { Idle, Working, CaughtUp, Error, Paused }
 pub fn aggregate(states: impl IntoIterator<Item = NativeSyncState>, starts_pending: bool) -> TaskbarState {
     let mut working = starts_pending;
     let mut caught_up = false;
+    let mut stopped = false;
     for state in states {
         match state {
             NativeSyncState::Error => return TaskbarState::Error,
             NativeSyncState::Scanning | NativeSyncState::Working | NativeSyncState::Stopping => working = true,
             NativeSyncState::CaughtUp => caught_up = true,
-            NativeSyncState::Stopped => (),
+            NativeSyncState::Stopped => stopped = true,
         }
     }
     if working { TaskbarState::Working }
     else if caught_up { TaskbarState::CaughtUp }
+    else if stopped { TaskbarState::Paused }
     else { TaskbarState::Idle }
 }
 #[cfg(test)]
 mod tests {
     use super::{aggregate, NativeSyncState::*, TaskbarState as T};
     #[test]
-    fn no_jobs_and_only_stopped_jobs_are_idle() {
+    fn stopped_jobs_have_a_distinct_presentation_without_changing_live_priorities() {
+        assert_eq!(aggregate([Stopped], false), T::Paused);
         assert_eq!(aggregate([], false), T::Idle);
-        assert_eq!(aggregate([Stopped, Stopped], false), T::Idle);
+        assert_eq!(aggregate([Stopped, Working], false), T::Working);
+        assert_eq!(aggregate([Stopped, CaughtUp], false), T::CaughtUp);
+        assert_eq!(aggregate([Stopped, Error], false), T::Error);
+        assert_eq!(aggregate([Stopped], true), T::Working);
+    }
+    #[test]
+    fn no_jobs_hide_the_badge_and_only_stopped_jobs_show_pause() {
+        assert_eq!(aggregate([], false), T::Idle);
+        assert_eq!(aggregate([Stopped, Stopped], false), T::Paused);
     }
     #[test]
     fn only_all_live_jobs_caught_up_get_a_checkmark() {
@@ -56,7 +67,7 @@ mod tests {
     #[test]
     fn retry_then_caught_up_then_new_work_then_cancel_are_distinct() {
         let sequence = [Error, Working, CaughtUp, Working, Stopping, Stopped, Scanning];
-        let expected = [T::Error, T::Working, T::CaughtUp, T::Working, T::Working, T::Idle, T::Working];
+        let expected = [T::Error, T::Working, T::CaughtUp, T::Working, T::Working, T::Paused, T::Working];
         for (phase, expected) in sequence.into_iter().zip(expected) {
             assert_eq!(aggregate([phase], false), expected);
         }

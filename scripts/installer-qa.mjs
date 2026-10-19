@@ -1,4 +1,5 @@
 // Manual hosted-guest qualification only. Importing this module has no effects.
+import {qaBinaryMarker} from './production-build-policy.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -202,6 +203,7 @@ async function buildFixture(p,version,signer,token,baseEnv){
   await execute(process.execPath,[cli,'build','--no-bundle','--features','installer-qa','--ci','--no-sign','--','--offline','--locked'],{cwd:dir,env,timeoutMs:3600000});
   await execute(process.execPath,[cli,'bundle','--bundles','nsis','--no-binary-patching','--no-sign','--ci'],{cwd:dir,env,timeoutMs:300000});
   const payload=await regular(path.join(env.CARGO_TARGET_DIR,'release/Nearly.exe'));
+  if(!payload.includes(Buffer.from(qaBinaryMarker)))throw Error('QA build marker missing; refusing ambiguous fixture');
   const setupBytes=await regular(path.join(env.CARGO_TARGET_DIR,'release/bundle/nsis',`Nearly_${version}_x64-setup.exe`));
   // Snapshot the exact setup before the next sequential build reuses this target
   // tree. Never rely on the loose Nearly.exe after the next version is compiled.

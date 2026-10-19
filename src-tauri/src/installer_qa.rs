@@ -54,6 +54,7 @@ mod guest {
         let mut bytes=Vec::new();(&mut file).take(max as u64+1).read_to_end(&mut bytes).map_err(|_|"qaFile")?;if bytes.len()>max{return Err("qaFile")};Ok(bytes)
     }
     fn load()->Result<Context,&'static str>{
+        std::hint::black_box("NEARLY-INSTALLER-QA-ONLY-v1");
         let e:HashMap<String,String>=std::env::vars().collect();
         let temp=e.get("RUNNER_TEMP").ok_or("qaContext")?;
         let run=e.get("GITHUB_RUN_ID").filter(|s|id(s)).ok_or("qaContext")?;

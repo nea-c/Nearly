@@ -420,8 +420,8 @@ mod health_tests {
         assert!(matching_active(Some(&n), &n));
     }
     #[test]
-    fn real_production_gates_remain_disabled() {
-        assert!(!crate::startup_update::HANDOFF_RELEASE_VALIDATED);
+    fn real_production_gates_are_enabled_with_registered_key() {
+        assert!(crate::startup_update::HANDOFF_RELEASE_VALIDATED);
         assert!(crate::update_package::production_key().is_some());
     }
 }
@@ -431,6 +431,11 @@ mod coordinator_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     #[test]
+    fn production_constructor_selects_enabled_runtime_without_starting_discovery() {
+        let rt=Runtime::new(Startup::Ordinary);assert_eq!(rt.0.enabled,crate::startup_update::handoff_validated());
+        assert!(!rt.0.inner.lock().unwrap().started);
+    }
+    #[test]
     fn disabled_startup_and_health_routes_have_no_notifications_or_native_discovery() {
         let count = Arc::new(AtomicUsize::new(0));
         for startup in [
@@ -438,7 +443,7 @@ mod coordinator_tests {
             Startup::Invalid,
             Startup::Health("a".repeat(32)),
         ] {
-            let rt = Runtime::new(startup);
+            let rt = Runtime::create(startup, false);
             let notices = count.clone();
             rt.start(Arc::new(move |_| {
                 notices.fetch_add(1, Ordering::SeqCst);

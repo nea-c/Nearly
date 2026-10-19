@@ -1,4 +1,4 @@
-name: Manual signed Windows bootstrap release
+name: Manual signed Windows release
 run-name: Nearly signed ${{ inputs.version }} / ${{ inputs.mode }} / ${{ inputs.commit }}
 on:
   workflow_dispatch:
@@ -136,7 +136,7 @@ jobs:
           path: source
           fetch-depth: 0
           persist-credentials: false
-      - name: Audit clean source, main ancestry, canonical version and registered-key bootstrap gate
+      - name: Audit clean source, main ancestry, canonical version and registered production gate
         run: node control/.github/scripts/signed-release.mjs preflight source
       - name: Prepare reviewed portable tools before target builds and tests
         run: |
@@ -182,7 +182,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test:ui:production
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build bootstrap NSIS without running setup
+      - name: Build production NSIS without running setup
         working-directory: source
         run: npm run build:installer -- --offline --locked
       - id: package

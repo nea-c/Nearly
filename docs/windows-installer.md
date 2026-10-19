@@ -22,7 +22,7 @@ Verification includes browser geometry/regression checks, source policy tests, f
 
 See [the template and provenance](../src-tauri/windows/README.md) for exact ownership rules and limitations.
 
-The updater handoff, authenticated sibling staging and localized UI are implemented behind two disabled production prerequisites (trusted key and isolated handoff validation). No production update install is enabled. See startup-updates.md; manual setup installation itself also remains untested on this host.
+Production updater handoff is enabled with the fixed registered public key after explicit activation approval. The isolated hosted success and rollback cases passed; see windows-installer-qa.md. No installer is executed on this host, and production activation does not publish a release.
 
 Setup and uninstaller captions, branding, installed-app DisplayVersion, and installer file/product version strings use the public `rX.Y` release label. Numeric Windows version resources use `X.Y.0.0`. The separate `NearlyInternalVersion` registry value uses `X.Y.0`, preserving numeric downgrade checks and compatibility with older numeric DisplayVersion registrations. All values derive from version.json; see versioning.md.
 

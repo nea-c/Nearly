@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]
-pub struct Job { pub id:String, pub workspace_id:String, pub job:Option<Value> }
+pub struct Job { pub id:String, pub workspace_id:String, pub job:Option<Value>, #[serde(skip)] stopped:bool }
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct Transfer { pub token:String, pub workspace_id:String, pub source_label:String, pub target_label:String, pub phase:String, pub payload:Value, pub target_kind:String, pub target_index:Option<usize>, pub before_id:Option<String> }
@@ -78,11 +78,12 @@ impl Registry {
     pub fn owner(&self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;if self.owners.get(id).is_some_and(|o|o==label){Ok(())}else{Err("Workspace belongs to another window".into())}}
     pub fn mutable(&self,label:&str,id:&str)->Result<(),String>{self.owner(label,id)?;if self.pending(label){Err("Workspace transfer is pending".into())}else{Ok(())}}
     pub fn owned(&self,label:&str)->Vec<String>{self.owners.iter().filter(|(_,o)|o.as_str()==label).map(|(id,_)|id.clone()).collect()}
+    pub fn has_stopped_sync(&self,label:&str)->bool{self.jobs.values().any(|j|j.stopped&&self.owners.get(&j.workspace_id).is_some_and(|owner|owner==label))}
     pub fn job_ids(&self,label:&str)->Vec<String>{self.jobs.values().filter(|j|self.owners.get(&j.workspace_id).is_some_and(|o|o==label)).map(|j|j.id.clone()).chain(self.provisional.iter().filter(|(_,o)|o.as_str()==label).map(|(id,_)|id.clone())).collect()}
-    pub fn prepare_job(&mut self,label:&str,id:&str,workspace:Option<&str>)->Result<(),String>{self.registered(label)?;if self.pending(label){return Err("Window transfer is pending".into());}identifier(id)?;if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=w||j.job.is_some());}if self.jobs.len()+self.provisional.len()>=256&&!self.jobs.contains_key(id)&&!self.provisional.contains_key(id){return Err("Job descriptor limit reached".into());}if self.jobs.contains_key(id)||self.provisional.contains_key(id){self.job_owner(label,id)?;return Ok(());}if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:w.into(),job:None});}else{self.provisional.insert(id.into(),label.into());}Ok(())}
-    pub fn finish_job(&mut self,id:&str){if let Some(j)=self.jobs.get_mut(id){j.job=None;}self.provisional.remove(id);}
-    pub fn describe_job(&mut self,id:&str,job:Value){if let Some(j)=self.jobs.get_mut(id){j.job=Some(job);}}
-    pub fn bind_job(&mut self,label:&str,id:&str,workspace:&str)->Result<(),String>{self.mutable(label,workspace)?;self.job_owner(label,id)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=workspace||j.job.is_some());self.provisional.remove(id);self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:workspace.into(),job:None});Ok(())}
+    pub fn prepare_job(&mut self,label:&str,id:&str,workspace:Option<&str>)->Result<(),String>{self.registered(label)?;if self.pending(label){return Err("Window transfer is pending".into());}identifier(id)?;if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=w||j.job.is_some());}if self.jobs.len()+self.provisional.len()>=256&&!self.jobs.contains_key(id)&&!self.provisional.contains_key(id){return Err("Job descriptor limit reached".into());}if self.jobs.contains_key(id)||self.provisional.contains_key(id){self.job_owner(label,id)?;return Ok(());}if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:w.into(),job:None,stopped:false});}else{self.provisional.insert(id.into(),label.into());}Ok(())}
+    pub fn finish_job(&mut self,id:&str){if let Some(j)=self.jobs.get_mut(id){j.stopped|=j.job.is_some();j.job=None;}self.provisional.remove(id);}
+    pub fn describe_job(&mut self,id:&str,job:Value){if let Some(j)=self.jobs.get_mut(id){j.stopped=false;j.job=Some(job);}}
+    pub fn bind_job(&mut self,label:&str,id:&str,workspace:&str)->Result<(),String>{self.mutable(label,workspace)?;self.job_owner(label,id)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=workspace||j.job.is_some());self.provisional.remove(id);self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:workspace.into(),job:None,stopped:false});Ok(())}
     pub fn job_mutable(&self,label:&str,id:&str)->Result<(),String>{self.job_owner(label,id)?;if let Some(job)=self.jobs.get(id){self.mutable(label,&job.workspace_id)}else if self.pending(label){Err("Window transfer is pending".into())}else{Ok(())}}
     pub fn job_owner(&self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;if let Some(j)=self.jobs.get(id){self.owner(label,&j.workspace_id)}else if self.provisional.get(id).is_some_and(|o|o==label){Ok(())}else{Err("Job belongs to another window".into())}}
     pub fn scoped(map:&mut HashMap<String,String>,label:&str,id:&str,create:bool)->Result<(),String>{identifier(id)?;match map.get(id){Some(o)if o==label=>Ok(()),Some(_)=>Err("Request belongs to another window".into()),None if create=>{map.insert(id.into(),label.into());Ok(())},_=>Err("Unknown request".into())}}
@@ -162,6 +163,16 @@ fn validate_view_state(v:&Value,w:&serde_json::Map<String,Value>)->Result<(),Str
 use super::*;
 fn setup()->Registry{let mut r=Registry::default();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","tab").unwrap();r}
 fn payload()->Value{serde_json::json!({"version":1,"workspace":{"id":"tab"}})}
+#[test]fn stopped_badge_is_window_scoped_survives_transfer_and_clears_with_its_workspace(){
+ let mut r=setup();assert!(!r.has_stopped_sync("main"));
+ r.prepare_job("main","job",Some("tab")).unwrap();r.finish_job("job");assert!(!r.has_stopped_sync("main"),"cancelled preparation is not a stopped sync");
+ r.describe_job("job",serde_json::json!({"id":"job"}));r.finish_job("job");assert!(r.has_stopped_sync("main"));assert!(!r.has_stopped_sync("other"));
+ let wire=serde_json::to_value(r.bootstrap("main").unwrap()).unwrap();assert_eq!(wire["jobs"][0],serde_json::json!({"id":"job","workspaceId":"tab","job":null}));
+ let t=r.begin("main","tab",payload()).unwrap();r.bootstrap(&t.target_label).unwrap();r.commit(&t.target_label,&t.token).unwrap();
+ assert!(!r.has_stopped_sync("main"));assert!(r.has_stopped_sync(&t.target_label));
+ r.describe_job("job",serde_json::json!({"id":"job"}));assert!(!r.has_stopped_sync(&t.target_label),"resumed live sync clears pause artwork");r.finish_job("job");assert!(r.has_stopped_sync(&t.target_label));
+ r.release(&t.target_label,"tab").unwrap();assert!(!r.has_stopped_sync(&t.target_label));assert!(r.job_ids(&t.target_label).is_empty());
+}
 #[test]fn health_probation_rejects_every_user_admission_in_all_windows(){
  let mut r=setup();r.enter_health_probation();
  for label in ["main","other"]{

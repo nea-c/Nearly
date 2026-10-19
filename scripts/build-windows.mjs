@@ -1,3 +1,4 @@
+import {assertProductionEnvironment,assertProductionDefaults,assertProductionPayload} from './production-build-policy.mjs';
 import {checkVersions} from './version.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +12,7 @@ export const projectRoot = path.resolve(
 );
 
 export function buildOptions(args, env = process.env) {
+  assertProductionEnvironment(env);
   let offline = false,
     target = env.CARGO_BUILD_TARGET || undefined;
   for (let i = 0; i < args.length; i++) {
@@ -60,6 +62,7 @@ const exists = async (file) => {
 // moves every previous output into a unique backup directory without deleting it.
 export async function publishBuild(root, artifact, config, target) {
   const binary = await fs.readFile(artifact);
+  assertProductionPayload(binary);
   if (binary.length < 64 || binary[0] !== 0x4d || binary[1] !== 0x5a)
     throw Error(
       "Build output is missing or is not a nonempty Windows executable",
@@ -128,6 +131,7 @@ export async function runBuild(args = process.argv.slice(2)) {
   if (process.platform !== "win32")
     throw Error("Windows builds require a Windows host with MSVC tools");
   const options = buildOptions(args);
+  await assertProductionDefaults(projectRoot);
   const paths = buildPaths(projectRoot, options);
   const config = JSON.parse(
     await fs.readFile(
