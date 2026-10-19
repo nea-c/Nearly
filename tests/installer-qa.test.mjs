@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:'C:\\Users\\runneradmin\\AppData\\Local',QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('guest JSON comparison normalizes empty objects without running a guest action',{skip:process.platform!=='win32'},()=>{
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./installer-qa-normalize.ps1',import.meta.url)),'-Source',fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);
+  assert.match(r.stdout,/Pure generated JSON normalization passed/);
+});
 test('fixture copy excludes generated roots while retaining dependency distribution files',()=>{
   assert.equal(typeof qa.copyFixturePath,'function');
   for(const name of ['','src/app.ts','node_modules/vite/dist/node/cli.js','node_modules/example/build/index.js','src-tauri/vendor/example/target.rs'])assert.equal(qa.copyFixturePath(name),true,name);

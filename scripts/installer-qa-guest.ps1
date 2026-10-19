@@ -89,7 +89,7 @@ function Normalize-JsonValue($Value) {
   if ($null -eq $Value) { return $null }
   if ($Value -is [System.Management.Automation.PSCustomObject]) {
     $normalized=[ordered]@{}
-    foreach ($key in @($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)) { $normalized[$key]=Normalize-JsonValue $Value.$key }
+    foreach ($property in @($Value.PSObject.Properties | Sort-Object -Property Name -CaseSensitive)) { $normalized[$property.Name]=Normalize-JsonValue $property.Value }
     return $normalized
   }
   if ($Value -is [array]) { return ,@($Value | ForEach-Object { Normalize-JsonValue $_ }) }
