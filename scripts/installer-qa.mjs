@@ -104,9 +104,15 @@ export function fixtureBuildPaths(p,version){
   if(![p.sourceVersion,p.targetVersion].includes(version))fail('Unexpected fixture build version');
   return {sourceDir:path.win32.join(p.runRoot,`source-${version}`),targetDir:path.win32.join(p.runRoot,'build-target'),setupPath:path.win32.join(p.runRoot,'fixture-installers',`Nearly_${version}_x64-setup.exe`)};
 }
+export function copyFixturePath(relative){
+  const parts=relative.split(/[\\/]/);
+  // Exclude only workspace outputs. Packages contain executable JS in nested
+  // dist/build directories, which must remain intact in each source copy.
+  return !['.git','build','dist','.test-build','.superpowers','.agents','.codex','.aws','.ssh','test-results','playwright-report'].includes(parts[0])&&!(parts[0]==='src-tauri'&&parts[1]==='target');
+}
 async function buildFixture(p,version,signer,token,baseEnv){
   const paths=fixtureBuildPaths(p,version),dir=paths.sourceDir;
-  await fs.cp(root,dir,{recursive:true,errorOnExist:true,force:false,filter:src=>!path.relative(root,src).split(path.sep).some(n=>['.git','target','build','dist','.superpowers','test-results','playwright-report'].includes(n))});
+  await fs.cp(root,dir,{recursive:true,errorOnExist:true,force:false,filter:src=>copyFixturePath(path.relative(root,src))});
   await fs.writeFile(path.join(dir,'version.json'),JSON.stringify({version})+'\n');
   const env={...baseEnv,NEARLY_QA_BUILD_TOKEN:token,NEARLY_QA_CONTROLLER_SHA:p.controllerSha,NEARLY_QA_PUBLIC_KEY:signer.publicRaw.toString('base64'),CARGO_TARGET_DIR:paths.targetDir};
   await execute(process.execPath,['scripts/sync-version.mjs'],{cwd:dir,env});
@@ -148,6 +154,7 @@ export async function run(e=process.env){
     await fs.mkdir(path.join(p.runRoot,'settings'));
     for(const [name,bytes]of Object.entries(settingsFixture()))await fs.writeFile(path.join(p.runRoot,'settings',name),bytes,{flag:'wx'});
     await ps('production',['-Setup',path.join(signed,'Nearly_r2.0_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);results.push({case:'signed-production-setup-uninstall',passed:true});
+    console.log('Signed production setup/reinstall/uninstall: all four shortcut choices and generated settings preservation passed.');
     const signer=createFixtureSigner(),token=randomBytes(32).toString('hex');
     const source=await buildFixture(p,p.sourceVersion,signer,token,baseEnv),target=await buildFixture(p,p.targetVersion,signer,token,baseEnv);
     const targetBytes=await regular(target.setup),signature=signer.sign(targetBytes,target.payloadSha256);

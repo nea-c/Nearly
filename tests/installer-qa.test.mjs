@@ -5,6 +5,13 @@ import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:'C:\\Users\\runneradmin\\AppData\\Local',QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('fixture copy excludes generated roots while retaining dependency distribution files',()=>{
+  assert.equal(typeof qa.copyFixturePath,'function');
+  for(const name of ['','src/app.ts','node_modules/vite/dist/node/cli.js','node_modules/example/build/index.js','src-tauri/vendor/example/target.rs'])assert.equal(qa.copyFixturePath(name),true,name);
+  for(const name of ['.git/config','dist/index.html','build/Nearly.exe','.test-build/api.js','test-results/report.json','src-tauri/target/release/Nearly.exe','.codex/config.toml'])assert.equal(qa.copyFixturePath(name),false,name);
+  assert.equal(qa.copyFixturePath('node_modules\\vite\\dist\\node\\cli.js'),true);
+  assert.equal(qa.copyFixturePath('src-tauri\\target\\release\\Nearly.exe'),false);
+});
 test('manual controller SHA, hosted Windows and explicit confirmation are mandatory',()=>{
   assert.equal(typeof qa.validateContext,'function');
   assert.equal(qa.validateContext(env(),'win32').controllerSha,sha);
