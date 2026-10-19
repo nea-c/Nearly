@@ -33,6 +33,14 @@ function Assert-Regular([string]$Path,[long]$Maximum=67108864) {
   $item=Get-Item -LiteralPath $Path -Force
   if ($item.PSIsContainer -or $item.Length -le 0 -or $item.Length -gt $Maximum) { throw 'Invalid lifecycle file' }
 }
+function Assert-MockBytes([byte[]]$Bytes) {
+  $expected=[Text.Encoding]::UTF8.GetBytes('non-executable generated shell-link control')
+  if ($Bytes.Length -ne 43 -or [Convert]::ToBase64String($Bytes) -cne [Convert]::ToBase64String($expected)) { throw 'Invalid exact plain-text mock fixture' }
+}
+function Assert-MockFixture {
+  Assert-Regular $mock 43
+  Assert-MockBytes ([IO.File]::ReadAllBytes($mock))
+}
 function Get-ShortcutPathObservation([string]$Path) {
   $record=[ordered]@{absoluteLocal=$false;canonicalExact=$false;hasForwardSlash=$false;hasExtraColon=$false;exists=$false;leafRegular=$false;leafReparse=$false;ancestorsSafe=$false;lengthPositive=$false;lengthBounded=$false}
   try {
@@ -215,7 +223,7 @@ if ($Boundary) {
     if ($report.result -ceq 'rejected') {
       foreach ($target in @($install,$registration,$preferences,$startDirectory,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Rejected boundary mutated owned state' } }
     } else {
-      Assert-Regular $mock 80
+      Assert-MockFixture
       Assert-Installed
     }
     Write-ProbeEvent 'boundary' 'verified' 0
@@ -230,9 +238,7 @@ $script:phase='installed'
 try {
   Write-ProbeEvent 'installed' 'start'
   Write-ProbeGate 'fixture' 'start'
-  Assert-Regular $setup; Assert-Regular $mock 80
-  $bytes=[IO.File]::ReadAllBytes($mock)
-  if ($bytes.Length -ne 80 -or [BitConverter]::ToUInt16($bytes,0) -ne 0x5a4d -or [BitConverter]::ToUInt32($bytes,60) -ne 64 -or [BitConverter]::ToUInt32($bytes,64) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes,68) -ne 0x8664) { throw 'Invalid nonlaunchable mock fixture' }
+  Assert-Regular $setup; Assert-MockFixture
   Write-ProbeGate 'fixture' 'verified'
   Assert-Installed
   $originalCreated=(Get-Item -LiteralPath $install -Force).CreationTimeUtc.Ticks

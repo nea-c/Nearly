@@ -136,9 +136,29 @@ $script:desktop=1;$rejected=$false;try{Assert-Choices}catch{$rejected=$true};if(
   const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Inert retained shortcut preference model passed/);
 });
-test('mock payload has only bounded PE headers and cannot be mistaken for an application',()=>{
-  const bytes=probe.mockPayload();assert.equal(bytes.length,80);assert.equal(bytes.readUInt16LE(0),0x5a4d);assert.equal(bytes.readUInt32LE(60),64);assert.equal(bytes.readUInt32LE(64),0x4550);assert.equal(bytes.readUInt16LE(68),0x8664);
-  assert.equal(bytes.readUInt16LE(70),0);assert.ok(bytes.length<64+24,'even the full PE file header is absent');
+test('mock payload is exactly the non-executable UTF8 shell-link control with no MZ or PE header',()=>{
+  const bytes=probe.mockPayload(),expected=Buffer.from('non-executable generated shell-link control','utf8');
+  assert.equal(bytes.length,43);assert.deepEqual(bytes,expected);assert.equal(bytes.toString('utf8'),'non-executable generated shell-link control');
+  assert.notEqual(bytes.readUInt16LE(0),0x5a4d);assert.equal(bytes.includes(Buffer.from([0x50,0x45,0,0])),false);
+});
+test('guest requires the exact 43-byte control and rejects malformed PE, altered bytes and trailing newline',{skip:process.platform!=='win32'},()=>{
+  const source=String.raw`
+$ErrorActionPreference='Stop'
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:QA_PROBE_GUEST,[ref]$null,[ref]$null)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-MockBytes'},$true)
+if($fn.Count -ne 1){throw 'Exact fixture validator missing'}
+Invoke-Expression $fn[0].Extent.Text
+$expected=[Text.Encoding]::UTF8.GetBytes('non-executable generated shell-link control')
+Assert-MockBytes $expected
+$altered=[byte[]]$expected.Clone();$altered[0]=[byte]78
+$old=[byte[]]::new(80);$old[0]=77;$old[1]=90
+foreach($bad in @($altered,$old,[Text.Encoding]::UTF8.GetBytes("non-executable generated shell-link control"+[char]10),[byte[]]::new(0))){
+ $rejected=$false;try{Assert-MockBytes $bad}catch{$rejected=$true};if(!$rejected){throw 'Inexact fixture accepted'}
+}
+'Exact plaintext fixture model passed'
+`;
+  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{env:{...process.env,QA_PROBE_GUEST:fileURLToPath(new URL('../scripts/installer-ui-probe-guest.ps1',import.meta.url))},encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  assert.equal(result.status,0,result.stderr||result.error?.message);assert.match(result.stdout,/Exact plaintext fixture model passed/);
 });
 test('strict rendering retains actual pages, ownership guards and independent shortcut code',()=>{
   const rendered=probe.renderProbeTemplate(template,paths);
