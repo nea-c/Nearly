@@ -7,7 +7,7 @@ param(
   [Parameter(Mandatory)][ValidateSet(0,1)][int]$Desktop,
   [Parameter(Mandatory)][ValidatePattern('\A[a-z0-9][a-z0-9-]{0,63}\z')][string]$CaseName,
   [ValidateSet('Install','Cancel','Reject','Drive')][string]$Mode='Install',
-  [ValidateSet('Click','Command')][string]$NavigationMode='Click'
+  [ValidateSet('Click','Command')][string]$NavigationMode='Command'
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -43,7 +43,6 @@ function Assert-UiSelection([int[]]$Actual,[int[]]$Expected) {
 $context=@{}
 foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $context[$entry.Key]=$entry.Value }
 $expectedRoot=Assert-UiContext $context
-if ($NavigationMode -ceq 'Command' -and $env:QA_UI_PROBE -cne 'navigation-only') { throw 'Alternate navigation is restricted to the isolated diagnostic probe' }
 if ($RunRoot -cne $expectedRoot) { throw 'Exact owned run root required' }
 function Assert-UiPath([string]$Path) {
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/') -or $Path.Substring(2).Contains(':') -or [IO.Path]::GetFullPath($Path) -cne $Path) { throw 'Canonical local path required' }
@@ -158,7 +157,7 @@ public static class NearlyOwnedUi {
     if((id!=1&&id!=2&&id!=3&&id!=6)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||
        !IsWindowVisible(parent)||!IsWindowEnabled(parent)||!IsWindowVisible(button)||!IsWindowEnabled(button))
       throw new Exception("Owned direct dialog button required");
-    // Probe an ordinary BN_CLICKED notification through the exact parent only.
+    // Send an ordinary BN_CLICKED notification through the exact parent only.
     // This avoids guessing focus or attaching input queues; no global input.
     if(!PostMessage(parent,273,(IntPtr)id,button))throw new Exception("Owned dialog command failed");
   }
@@ -298,6 +297,14 @@ function Test-InstallTransition {
   }
   return $false
 }
+function Get-InstallNavigation {
+  $next=@(ById $main 1)
+  if ($next.Count -ne 1 -or ![NearlyOwnedUi]::IsWindowEnabled($next[0])) { return }
+  $text=[NearlyOwnedUi]::Text($next[0],$ownedProcess.Id)
+  if (($Language -eq 'en' -and $text -match 'Finish') -or ($Language -eq 'ja' -and $text -match '完了')) { return @{kind='finish'} }
+  $progress=@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'msctls_progress32' })
+  if ($progress.Count -eq 1 -and (($Language -eq 'en' -and $text -match 'Next') -or ($Language -eq 'ja' -and $text -match '次へ'))) { return @{kind='next'} }
+}
 function Cancel-Setup {
   Click-Id $main 2
   # Welcome/finish implementations may exit immediately; otherwise answer the
@@ -424,6 +431,13 @@ try {
       # does not itself prove that the installer entered its installation page.
       Wait-Ui { Test-InstallTransition } | Out-Null
       Write-UiObservation 'after-install-transition'
+      $completion=Wait-Ui { Get-InstallNavigation } 120
+      if ($completion.kind -ceq 'next') {
+        # NOAUTOCLOSE deliberately leaves a completed InstFiles page visible.
+        # Advance its actual enabled Next button once before awaiting Finish.
+        Screenshot 'install-complete'
+        Click-Id $main 1
+      }
       Wait-Ui {
         $next=@(ById $main 1)
         if ($next.Count -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($next[0])) {

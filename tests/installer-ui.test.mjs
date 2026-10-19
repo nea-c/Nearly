@@ -5,6 +5,43 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+test('completed installation advances with Next only after progress and localized enabled navigation',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public static string Kind="msctls_progress32", Caption="&Next >";public static bool Enabled=false;
+ public static string Class(IntPtr h,int pid){return Kind;}
+ public static string Text(IntPtr h,int pid){return Caption;}
+ public static bool IsWindowEnabled(IntPtr h){return Enabled;}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-InstallNavigation'},$true)
+if($fn.Count -ne 1){throw 'Completion navigation predicate missing'}
+Invoke-Expression $fn[0].Extent.Text
+function Controls {return [IntPtr]2}
+function ById {return [IntPtr]3}
+$main=[IntPtr]1;$ownedProcess=[pscustomobject]@{Id=7};$Language='en'
+if($null -ne (Get-InstallNavigation)){throw 'Disabled Next was accepted during extraction'}
+[NearlyOwnedUi]::Enabled=$true
+if((Get-InstallNavigation).kind -cne 'next'){throw 'Observed completed InstFiles Next not accepted'}
+[NearlyOwnedUi]::Kind='Button'
+if($null -ne (Get-InstallNavigation)){throw 'Next outside InstFiles was accepted'}
+[NearlyOwnedUi]::Caption='&Finish'
+if((Get-InstallNavigation).kind -cne 'finish'){throw 'Direct Finish not accepted'}
+[NearlyOwnedUi]::Caption='Install';if($null -ne (Get-InstallNavigation)){throw 'Install was accepted as completion'}
+$Language='ja';[NearlyOwnedUi]::Kind='msctls_progress32';[NearlyOwnedUi]::Caption='次へ(&N) >'
+if((Get-InstallNavigation).kind -cne 'next'){throw 'Japanese Next not accepted'}
+[NearlyOwnedUi]::Caption='完了(&F)'
+if((Get-InstallNavigation).kind -cne 'finish'){throw 'Japanese Finish not accepted'}
+'Completed installation navigation model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Completed installation navigation model passed/);
+});
 test('install transition requires a visible progress control or localized Finish, not absent shortcuts',{skip:process.platform!=='win32'},()=>{
  const source=String.raw`
 $ErrorActionPreference='Stop'
