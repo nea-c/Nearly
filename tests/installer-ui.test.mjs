@@ -5,6 +5,66 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.url));
+test('install transition requires a visible progress control or localized Finish, not absent shortcuts',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public static string Kind="none", Caption="";
+ public static string Class(IntPtr h,int pid){return Kind;}
+ public static string Text(IntPtr h,int pid){return Caption;}
+ public static bool IsWindowEnabled(IntPtr h){return true;}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-InstallTransition'},$true)
+if($fn.Count -ne 1){throw 'Positive transition predicate missing'}
+Invoke-Expression $fn[0].Extent.Text
+function Controls {return [IntPtr]2}
+function ById {return [IntPtr]3}
+$main=[IntPtr]1;$ownedProcess=[pscustomobject]@{Id=7};$Language='en'
+if(Test-InstallTransition){throw 'Absence alone must not prove page transition'}
+[NearlyOwnedUi]::Caption='Install';if(Test-InstallTransition){throw 'Still on shortcut page'}
+[NearlyOwnedUi]::Kind='msctls_progress32';if(!(Test-InstallTransition)){throw 'Visible real progress fingerprint missing'}
+[NearlyOwnedUi]::Kind='Button';[NearlyOwnedUi]::Caption='&Finish';if(!(Test-InstallTransition)){throw 'Fast completion fingerprint missing'}
+'Positive page transition model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Positive page transition model passed/);
+});
+test('navigation command probe targets only an enabled owned direct dialog button',{skip:process.platform!=='win32'},()=>{
+  let csharp=fs.readFileSync(script,'utf8').match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp);
+  csharp=csharp.replace('public delegate bool EnumProc',`public static int ModelPosts=0; public static bool ModelEnabled=true,ModelResult=true; public static IntPtr ModelParent=(IntPtr)1;
+  public delegate bool EnumProc`);
+  const native=(name,code)=>{const re=new RegExp(String.raw`\[DllImport\("user32\.dll"[^\]]*\)\]\s*(?:public )?static extern [^\n;]+ ${name}\([^;]*\);`);assert.match(csharp,re);csharp=csharp.replace(re,code);};
+  native('GetWindowThreadProcessId','static uint GetWindowThreadProcessId(IntPtr h,out uint pid){pid=h==(IntPtr)1||h==(IntPtr)2?7u:9u;return 1;}');
+  native('GetParent','static IntPtr GetParent(IntPtr h){return ModelParent;}');
+  native('GetDlgCtrlID','public static int GetDlgCtrlID(IntPtr h){return 1;}');
+  native('IsWindowVisible','public static bool IsWindowVisible(IntPtr h){return true;}');
+  native('IsWindowEnabled','public static bool IsWindowEnabled(IntPtr h){return ModelEnabled;}');
+  native('PostMessage','static bool PostMessage(IntPtr h,uint msg,IntPtr w,IntPtr l){if(h!=(IntPtr)1||msg!=273||w!=(IntPtr)1||l!=(IntPtr)2)throw new Exception("Incorrect direct dialog notification");ModelPosts++;return ModelResult;}');
+  csharp=csharp.replace(/\[DllImport\([^\]]+\)\]\s*((?:public )?static) extern ([^\n;]+);/g,'$1 $2 {throw new Exception("Unmodeled native call");}');
+  assert.doesNotMatch(csharp,/DllImport|\bextern\b/);
+  const source=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+[NearlyOwnedUi]::Command([IntPtr]1,[IntPtr]2,7,1)
+if([NearlyOwnedUi]::ModelPosts -ne 1){throw 'Command not queued once'}
+foreach($case in @('foreign','parent','disabled','id')){
+ $before=[NearlyOwnedUi]::ModelPosts;$rejected=$false
+ [NearlyOwnedUi]::ModelParent=$(if($case -eq 'parent'){[IntPtr]8}else{[IntPtr]1})
+ [NearlyOwnedUi]::ModelEnabled=$case -ne 'disabled'
+ try{[NearlyOwnedUi]::Command([IntPtr]1,$(if($case -eq 'foreign'){[IntPtr]3}else{[IntPtr]2}),7,$(if($case -eq 'id'){2}else{1}))}catch{$rejected=$true}
+ if(!$rejected -or [NearlyOwnedUi]::ModelPosts -ne $before){throw "Unsafe command accepted: $case"}
+}
+[NearlyOwnedUi]::ModelParent=[IntPtr]1;[NearlyOwnedUi]::ModelEnabled=$true;[NearlyOwnedUi]::ModelResult=$false
+$rejected=$false;try{[NearlyOwnedUi]::Command([IntPtr]1,[IntPtr]2,7,1)}catch{$rejected=$true}
+if(!$rejected){throw 'Queue failure ignored'}
+'Owned navigation command model passed'
+`;
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Owned navigation command model passed/);
+});
 test('failure inventory emits only bounded IDs and known control kinds, never window text',{skip:process.platform!=='win32'},()=>{
   const source=String.raw`
 $ErrorActionPreference='Stop'

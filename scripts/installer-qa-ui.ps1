@@ -6,7 +6,8 @@ param(
   [Parameter(Mandatory)][ValidateSet(0,1)][int]$Start,
   [Parameter(Mandatory)][ValidateSet(0,1)][int]$Desktop,
   [Parameter(Mandatory)][ValidatePattern('\A[a-z0-9][a-z0-9-]{0,63}\z')][string]$CaseName,
-  [ValidateSet('Install','Cancel','Reject','Drive')][string]$Mode='Install'
+  [ValidateSet('Install','Cancel','Reject','Drive')][string]$Mode='Install',
+  [ValidateSet('Click','Command')][string]$NavigationMode='Click'
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -42,6 +43,7 @@ function Assert-UiSelection([int[]]$Actual,[int[]]$Expected) {
 $context=@{}
 foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $context[$entry.Key]=$entry.Value }
 $expectedRoot=Assert-UiContext $context
+if ($NavigationMode -ceq 'Command' -and $env:QA_UI_PROBE -cne 'navigation-only') { throw 'Alternate navigation is restricted to the isolated diagnostic probe' }
 if ($RunRoot -cne $expectedRoot) { throw 'Exact owned run root required' }
 function Assert-UiPath([string]$Path) {
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/') -or $Path.Substring(2).Contains(':') -or [IO.Path]::GetFullPath($Path) -cne $Path) { throw 'Canonical local path required' }
@@ -108,6 +110,9 @@ public static class NearlyOwnedUi {
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder text, int length);
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GuiThreadInfo info);
   [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int index);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
   [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
@@ -116,6 +121,9 @@ public static class NearlyOwnedUi {
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out Rect rect);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] struct GuiThreadInfo {
+    public int Size, Flags; public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret; public Rect CaretRect;
+  }
   public static void AssertOwner(IntPtr h, int pid) {
     uint actual; GetWindowThreadProcessId(h,out actual);
     if(h==IntPtr.Zero || actual!=(uint)pid) throw new WindowChangedException(pid,actual);
@@ -144,6 +152,21 @@ public static class NearlyOwnedUi {
   public static void Click(IntPtr h,int pid) {
     AssertOwner(h,pid);if(!IsWindowVisible(h)||!IsWindowEnabled(h))throw new Exception("Control not interactable");
     if(!PostMessage(h,245,IntPtr.Zero,IntPtr.Zero))throw new Exception("Owned control click failed");
+  }
+  public static void Command(IntPtr parent,IntPtr button,int pid,int id) {
+    AssertOwner(parent,pid);AssertOwner(button,pid);
+    if((id!=1&&id!=2&&id!=3&&id!=6)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||
+       !IsWindowVisible(parent)||!IsWindowEnabled(parent)||!IsWindowVisible(button)||!IsWindowEnabled(button))
+      throw new Exception("Owned direct dialog button required");
+    // Probe an ordinary BN_CLICKED notification through the exact parent only.
+    // This avoids guessing focus or attaching input queues; no global input.
+    if(!PostMessage(parent,273,(IntPtr)id,button))throw new Exception("Owned dialog command failed");
+  }
+  public static bool[] Activation(IntPtr h,int pid) {
+    AssertOwner(h,pid);uint actual;uint thread=GetWindowThreadProcessId(h,out actual);
+    var info=new GuiThreadInfo();info.Size=Marshal.SizeOf(typeof(GuiThreadInfo));
+    if(!GetGUIThreadInfo(thread,ref info))throw new Exception("Owned activation observation unavailable");
+    return new[]{info.Active==h,GetForegroundWindow()==h};
   }
   public static bool Checkbox(IntPtr h,int pid) {AssertOwner(h,pid);int type=GetWindowLong(h,-16)&15;return Class(h,pid)=="Button"&&(type==2||type==3);}
   public static void Show(IntPtr h,int pid) {
@@ -197,7 +220,23 @@ function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
 function Controls([IntPtr]$Parent) { Assert-Process; return [NearlyOwnedUi]::Windows($ownedProcess.Id,$Parent) }
 function ById([IntPtr]$Parent,[int]$Id) { return @(Controls $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id }) }
 function One-Control([object[]]$Items) { if ($Items.Count -ne 1) { $caller=(Get-PSCallStack)[1].ScriptLineNumber; throw "Expected exactly one owned visible control; count=$($Items.Count), caller=$caller" }; return [IntPtr]$Items[0] }
-function Click-Id([IntPtr]$Parent,[int]$Id) { [NearlyOwnedUi]::Click((One-Control @(ById $Parent $Id)),$ownedProcess.Id) }
+function Click-Id([IntPtr]$Parent,[int]$Id) {
+  $button=One-Control @(ById $Parent $Id)
+  if ($NavigationMode -ceq 'Command') { [NearlyOwnedUi]::Command($Parent,$button,$ownedProcess.Id,$Id) }
+  else { [NearlyOwnedUi]::Click($button,$ownedProcess.Id) }
+}
+function Write-UiObservation([string]$Point) {
+  try {
+    $active=[NearlyOwnedUi]::Activation($main,$ownedProcess.Id)
+    $checks=@(Controls $main | Where-Object { [NearlyOwnedUi]::Checkbox($_,$ownedProcess.Id) })
+    $shortcuts=@($checks | Where-Object { [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Start }).Count -eq 1
+    $next=@(ById $main 1)
+    $nextEnabled=$next.Count -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($next[0])
+    $modals=@(Controls ([IntPtr]::Zero) | Where-Object { $_ -ne $main }).Count
+    $record=[ordered]@{point=$Point;navigation=$NavigationMode;active=$active[0];foreground=$active[1];shortcuts=$shortcuts;nextEnabled=$nextEnabled;ownedOtherWindows=$modals;payloadPresent=(Test-Path -LiteralPath (Join-Path $InstallRoot 'Nearly.exe'));uninstallerPresent=(Test-Path -LiteralPath (Join-Path $InstallRoot 'uninstall.exe'));registrationPresent=(Test-Path -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native')}
+    Write-Host ('QA UI transition observation: '+(ConvertTo-Json -InputObject $record -Compress))
+  } catch { Write-Host 'QA UI transition observation unavailable' }
+}
 function Failure-ControlSnapshot([IntPtr]$Window) {
   $entries=[Collections.Generic.List[object]]::new()
   foreach ($control in @(Controls $Window | Select-Object -First 64)) {
@@ -248,6 +287,16 @@ function Shortcut-States {
 function Wait-Shortcuts {
   Wait-Ui { $all=@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Start }); if ($all.Count -eq 1) { return $true } } | Out-Null
   Shortcut-Controls | Out-Null
+}
+function Test-InstallTransition {
+  $progress=@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'msctls_progress32' })
+  if ($progress.Count -eq 1) { return $true }
+  $next=@(ById $main 1)
+  if ($next.Count -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($next[0])) {
+    $text=[NearlyOwnedUi]::Text($next[0],$ownedProcess.Id)
+    if (($Language -eq 'en' -and $text -match 'Finish') -or ($Language -eq 'ja' -and $text -match '完了')) { return $true }
+  }
+  return $false
 }
 function Cancel-Setup {
   Click-Id $main 2
@@ -369,7 +418,12 @@ try {
     if ($Mode -eq 'Cancel') { $stage='cancel'; Cancel-Setup; $result='cancelled' }
     else {
       $stage='install'
+      Write-UiObservation 'before-install'
       Click-Id $main 1
+      # Observe actual departure separately from completion. A queued BM_CLICK
+      # does not itself prove that the installer entered its installation page.
+      Wait-Ui { Test-InstallTransition } | Out-Null
+      Write-UiObservation 'after-install-transition'
       Wait-Ui {
         $next=@(ById $main 1)
         if ($next.Count -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($next[0])) {
@@ -391,6 +445,7 @@ try {
   # Preserve only owned-window pixels and bounded numeric/known-kind metadata.
   # Never read arbitrary captions or let diagnostics replace the original error.
   $failureWindow=if ($main -ne [IntPtr]::Zero) { $main } else { $languageWindow }
+  if ($main -ne [IntPtr]::Zero) { Write-UiObservation 'failure' }
   if ($failureWindow -ne [IntPtr]::Zero) {
     try { Write-Host ('QA UI failure controls: '+(ConvertTo-Json -InputObject @(Failure-ControlSnapshot $failureWindow) -Depth 3 -Compress)) } catch {}
     try { Screenshot 'failure' $failureWindow } catch {}
