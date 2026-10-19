@@ -8,6 +8,57 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('known rejection dialogs select the actual owned OK control and await dismissal without guessing ID',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public sealed class WindowChangedException:Exception{}
+ public static string Mode="ok";public static int Id=2,Inputs=0,Queries=0;public static bool Gone=false;
+ public static string Class(IntPtr h,int pid){if(pid!=7)throw new Exception("Foreign PID");if(Gone&&h==(IntPtr)1)throw new Exception("Destroyed modal queried");if(Mode=="race"&&Queries++==0)throw new WindowChangedException();return h==(IntPtr)10?"#32770":h==(IntPtr)1?(Mode=="dialog"?"Edit":"#32770"):h==(IntPtr)2?"Static":"Button";}
+ public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
+ public static IntPtr Parent(IntPtr h,int pid){return Mode=="parent"?(IntPtr)9:(IntPtr)1;}
+ public static int GetDlgCtrlID(IntPtr h){return Id;}
+ public static bool IsWindowVisible(IntPtr h){return Mode!="hidden";}
+ public static bool IsWindowEnabled(IntPtr h){return true;}
+ public static void Command(IntPtr parent,IntPtr button,int pid,int id){Input(parent,button,pid,id);}
+ public static void ClickDirect(IntPtr parent,IntPtr button,int pid,int id){Input(parent,button,pid,id);}
+ static void Input(IntPtr parent,IntPtr button,int pid,int id){if(parent!=(IntPtr)1||button!=(IntPtr)3||pid!=7||id!=Id||id<1||id>2)throw new Exception("Unapproved input");Inputs++;Gone=true;}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-RejectionButton','Dismiss-Rejection','Wait-Ui')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+ if($fn.Count -ne 1){throw 'Rejection helper missing'}
+ Invoke-Expression $fn[0].Extent.Text
+}
+function Assert-Process {}
+function Controls([IntPtr]$Parent){if($Parent -eq [IntPtr]::Zero){if(![NearlyOwnedUi]::Gone){return [IntPtr]1};$script:postQueries++;if($script:postQueries -eq 1){return [IntPtr]1};return};if([NearlyOwnedUi]::Mode -eq 'duplicate'){return @([IntPtr]2,[IntPtr]3,[IntPtr]4)};return @([IntPtr]2,[IntPtr]3)}
+function Failure-ControlSnapshot {return @(@{kind='button';id=2;enabled=$true})}
+function Write-UiObservation {}
+$ownedProcess=[pscustomobject]@{Id=7};$captions=@{Reject='known rejection'};$main=[IntPtr]10;$NavigationMode='Command'
+foreach($mode in @('caption','message','dialog','duplicate','hidden','parent')){
+ [NearlyOwnedUi]::Mode=$mode
+ if($null -ne (Get-RejectionButton ([IntPtr]1))){throw ('Unsafe modal accepted: '+$mode)}
+}
+[NearlyOwnedUi]::Mode='ok';[NearlyOwnedUi]::Id=6
+if($null -ne (Get-RejectionButton ([IntPtr]1))){throw 'Foreign button ID accepted'}
+foreach($mode in @('ok','amp','race')){
+ [NearlyOwnedUi]::Mode=$mode;[NearlyOwnedUi]::Id=2;[NearlyOwnedUi]::Gone=$false;$script:postQueries=0
+ Dismiss-Rejection ([IntPtr]1)
+ if($script:postQueries -lt 2){throw 'Modal disappearance was not awaited'}
+}
+[NearlyOwnedUi]::Mode='ok';[NearlyOwnedUi]::Id=1;[NearlyOwnedUi]::Gone=$false;$NavigationMode='Click';$script:postQueries=0
+Dismiss-Rejection ([IntPtr]1)
+if([NearlyOwnedUi]::Inputs -ne 4){throw 'Known OK button not selected exactly once per dismissal'}
+'Known rejection modal model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Known rejection modal model passed/);assert.doesNotMatch(r.stdout,/untrusted path secret/);
+});
 test('ordinary cancellation keeps exit1 while an observed destination refusal preserves exit5',{skip:process.platform!=='win32'},()=>{
  const source=String.raw`
 $ErrorActionPreference='Stop'

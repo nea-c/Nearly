@@ -159,7 +159,11 @@ test("per-user selected private writable install, manual WebView prerequisite, n
   assert.match(template, /RequestExecutionLevel user/);
   assert.doesNotMatch(template, /RequestExecutionLevel (?:admin|highest)|WriteReg\w+ HKLM|DeleteReg\w+ HKLM/);
   assert.doesNotMatch(template, /DeleteAppData|RmDir\s+\/(?:r|REBOOTOK)|Delete\s+[^\r\n]*\*|File\s+[^\r\n]*settings\.json/i);
-  assert.match(template, /GetFullPathName \$NearlyDefaultRoot "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"/);
+  assert.match(template, /Call NearlySetDefaultRoot/);
+  const defaultCalculation=template.match(/Function NearlySetDefaultRoot\r?\n([\s\S]*?)FunctionEnd/)[1];
+  assert.match(defaultCalculation,/kernel32::GetFullPathNameW\(w "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"/);
+  assert.match(defaultCalculation,/IntCmp \$0 \$\{NSIS_MAX_STRLEN\} nearly_default_bad nearly_default_good nearly_default_bad/);
+  assert.doesNotMatch(defaultCalculation,/CreateDirectory|GetFullPathName /);
   assert.match(template, /"\{\{install_webview2_mode\}\}" != ""/);
   assert.match(template, /Function NearlyRequireWebView/);
   assert.match(template, /WebView2 Runtime is required/);

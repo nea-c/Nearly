@@ -134,6 +134,7 @@ public static class NearlyOwnedUi {
     return found.ToArray();
   }
   public static string Class(IntPtr h,int pid) {AssertOwner(h,pid);var b=new StringBuilder(256);GetClassName(h,b,b.Capacity);return b.ToString();}
+  public static IntPtr Parent(IntPtr h,int pid) {AssertOwner(h,pid);return GetParent(h);}
   public static IntPtr Send(IntPtr h,int pid,uint msg,IntPtr w,IntPtr l) {
     AssertOwner(h,pid);IntPtr result;
     if(SendMessageTimeout(h,msg,w,l,2,2000,out result)==IntPtr.Zero)throw new Exception("Owned control message timed out");
@@ -160,6 +161,13 @@ public static class NearlyOwnedUi {
     // Send an ordinary BN_CLICKED notification through the exact parent only.
     // This avoids guessing focus or attaching input queues; no global input.
     if(!PostMessage(parent,273,(IntPtr)id,button))throw new Exception("Owned dialog command failed");
+  }
+  public static void ClickDirect(IntPtr parent,IntPtr button,int pid,int id) {
+    AssertOwner(parent,pid);AssertOwner(button,pid);
+    if((id!=1&&id!=2)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||Class(button,pid)!="Button"||
+       !IsWindowVisible(parent)||!IsWindowEnabled(parent)||!IsWindowVisible(button)||!IsWindowEnabled(button))
+      throw new Exception("Owned direct rejection button required");
+    Click(button,pid);
   }
   public static bool[] Activation(IntPtr h,int pid) {
     AssertOwner(h,pid);uint actual;uint thread=GetWindowThreadProcessId(h,out actual);
@@ -223,6 +231,41 @@ function Click-Id([IntPtr]$Parent,[int]$Id) {
   $button=One-Control @(ById $Parent $Id)
   if ($NavigationMode -ceq 'Command') { [NearlyOwnedUi]::Command($Parent,$button,$ownedProcess.Id,$Id) }
   else { [NearlyOwnedUi]::Click($button,$ownedProcess.Id) }
+}
+function Get-RejectionButton([IntPtr]$Window) {
+  if (@(Controls ([IntPtr]::Zero) | Where-Object { $_ -eq $Window }).Count -ne 1 -or [NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770') { return }
+  $children=@(Controls $Window)
+  $message=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Static' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Reject })
+  if ($message.Count -ne 1) { return }
+  $buttons=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::IsWindowVisible($_) -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -cin @('OK','&OK') })
+  if ($buttons.Count -ne 1) { return }
+  $button=[IntPtr]$buttons[0]
+  $id=[NearlyOwnedUi]::GetDlgCtrlID($button)
+  if ($id -notin @(1,2) -or [NearlyOwnedUi]::Parent($button,$ownedProcess.Id) -ne $Window -or ![NearlyOwnedUi]::IsWindowEnabled($button)) { return }
+  return @{button=$button;id=$id}
+}
+function Dismiss-Rejection([IntPtr]$Window) {
+  $caller=(Get-PSCallStack)[1].ScriptLineNumber
+  try {
+    Wait-Ui { Get-RejectionButton $Window } | Out-Null
+    Write-Host ('QA UI rejection modal controls: '+(ConvertTo-Json -InputObject @(Failure-ControlSnapshot $Window) -Depth 3 -Compress))
+    # Re-read after diagnostics; input still checks the current exact direct
+    # parent and actual ID rather than assuming MessageBox uses IDOK=1.
+    $target=Wait-Ui { Get-RejectionButton $Window }
+    Write-UiObservation 'before-reject-ok'
+    if ($NavigationMode -ceq 'Command') { [NearlyOwnedUi]::Command($Window,$target.button,$ownedProcess.Id,$target.id) }
+    else { [NearlyOwnedUi]::ClickDirect($Window,$target.button,$ownedProcess.Id,$target.id) }
+    Wait-Ui {
+      $remaining=@(Controls ([IntPtr]::Zero) | Where-Object { $_ -eq $Window })
+      # Never query ownership of the already-destroyed modal HWND.
+      return $remaining.Count -eq 0 -and [NearlyOwnedUi]::Class($main,$ownedProcess.Id) -ceq '#32770' -and [NearlyOwnedUi]::IsWindowEnabled($main)
+    } | Out-Null
+    Write-UiObservation 'after-reject-ok'
+  } catch {
+    $inputLine=$_.InvocationInfo.ScriptLineNumber
+    try { Write-Host ('QA UI rejection failure controls: '+(ConvertTo-Json -InputObject @(Failure-ControlSnapshot $Window) -Depth 3 -Compress)) } catch {}
+    throw "Known rejection dialog dismissal failed; caller=$caller, inputLine=$inputLine"
+  }
 }
 function Write-UiObservation([string]$Point) {
   try {
@@ -381,10 +424,10 @@ try {
   if ($modal -ne [IntPtr]::Zero) {
     $stage='destination-rejection'
     Screenshot 'destination-rejected' $modal
-    Click-Id $modal 1
-    Wait-Ui { [NearlyOwnedUi]::IsWindowEnabled($main) } | Out-Null
+    Dismiss-Rejection $modal
     # A confirmed admission rejection retains the installer's error level 5.
     # Ordinary cancellation elsewhere still requires the distinct code 1.
+    Write-UiObservation 'before-reject-cancel'
     Cancel-Setup -ExpectedExitCode 5
     $result='rejected'
   } else {

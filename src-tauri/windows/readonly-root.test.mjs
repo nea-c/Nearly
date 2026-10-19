@@ -6,6 +6,29 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const source=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8');
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
+
+test('default destination calculation accepts an absent generated leaf without creating it', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
+ const output=path.join(root,'test-results','nsis-readonly-default');fs.mkdirSync(output,{recursive:true});
+ const parent=path.join(output,'generated parent 日本語');fs.mkdirSync(parent,{recursive:true});
+ const target=path.join(parent,'absent Nearly');assert.equal(fs.existsSync(target),false);
+ const nsis=process.env.NEARLY_NSIS_ROOT;assert.ok(nsis,'Use the existing cached compiler only');
+ const calc=source.match(/Function NearlySetDefaultRoot\r?\n([\s\S]*?)FunctionEnd/);
+ assert.ok(calc,'Actual default calculation required');
+ const original=calc[1];
+ const needle='$LOCALAPPDATA\\${PRODUCTNAME}';assert.equal(original.split(needle).length,2);
+ const body=original.replace(needle,target);
+ const exe=path.join(output,'DEFAULT-READONLY-TEST.exe');
+ const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\nVar NearlyDefaultRoot\nFunction NearlyRejectRoot\n SetErrorLevel 5\n Quit\nFunctionEnd\nFunction NearlySetDefaultRoot\n${body}\nFunctionEnd\nSection\n Call NearlySetDefaultRoot\n StrCmp $NearlyDefaultRoot "${target}" +3\n  SetErrorLevel 9\n  Quit\n SetErrorLevel 0\nSectionEnd\n`;
+ assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im);
+ const nsi=path.join(output,'default-readonly.nsi');fs.writeFileSync(nsi,script);
+ const compile=spawnSync(path.join(nsis,'Bin','makensis.exe'),['/V2','/INPUTCHARSET','UTF8',nsi],{encoding:'utf8',windowsHide:true,env:{...process.env,NSISDIR:nsis},timeout:30000});
+ fs.writeFileSync(path.join(output,'compile.log'),`${compile.stdout}\n${compile.stderr}`);assert.equal(compile.status,0,compile.stderr||compile.stdout);
+ // The generated program only computes a path and exits. Never setup/uninstall.
+ const run=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:15000});
+ fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({status:run.status,error:run.error?.message},null,2));
+ assert.equal(run.status,0,run.error?.message||'An absent default must retain its exact nonempty path');
+ assert.equal(fs.existsSync(target),false,'Path calculation must not create the default installation');
+});
 test('read-only native System ABI harness exercises pinned ancestors and inherited ACL rejection', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
  const output=path.join(root,'test-results','nsis-readonly-root');fs.mkdirSync(output,{recursive:true});
  const nsis=process.env.NEARLY_NSIS_ROOT;

@@ -484,6 +484,21 @@ FunctionEnd
 !insertmacro NearlyRootFunctions ""
 !insertmacro NearlyRootFunctions "un."
 
+; NSIS GetFullPathName requires the final filesystem entry to exist. The
+; default may be absent when an owned installation uses a custom directory.
+; Win32 computes the lexical absolute name without creating any directory.
+Function NearlySetDefaultRoot
+  System::Call 'kernel32::GetFullPathNameW(w "$LOCALAPPDATA\${PRODUCTNAME}", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i.r0'
+  StrCmp $0 0 nearly_default_bad
+  IntCmp $0 ${NSIS_MAX_STRLEN} nearly_default_bad nearly_default_good nearly_default_bad
+  nearly_default_good:
+  StrCmp $1 "" nearly_default_bad
+  StrCpy $NearlyDefaultRoot $1
+  Return
+  nearly_default_bad:
+  Call NearlyRejectRoot
+FunctionEnd
+
 Function NearlyResolveRegistration
   StrCpy $NearlyRegisteredRoot ""
   ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyOwner"
@@ -1144,7 +1159,7 @@ Function .onInit
   StrCpy $NearlyFindData 0
   !insertmacro NearlyContext
   StrCpy $NearlyRequestedRoot $INSTDIR
-  GetFullPathName $NearlyDefaultRoot "$LOCALAPPDATA\${PRODUCTNAME}"
+  Call NearlySetDefaultRoot
   Call NearlyResolveRegistration
   ${GetParameters} $0
   ClearErrors
