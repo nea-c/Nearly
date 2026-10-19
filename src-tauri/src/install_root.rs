@@ -264,8 +264,11 @@ mod native {
             }
         }
         #[test] fn generated_custom_root_payload_current_identity_and_namespace_guards(){
-            let root=std::env::temp_dir().join(format!("nearly-install-root-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-            std::fs::create_dir(&root).unwrap();
+            let raw_root=std::env::temp_dir().join(format!("nearly-install-root-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir(&raw_root).unwrap();
+            // Hosted TEMP may use an 8.3 alias. Positive namespace checks need
+            // the actual long path; the product must still reject that alias.
+            let root=dunce::canonicalize(&raw_root).unwrap();
             std::fs::write(root.join("Nearly.exe"),b"fixture image").unwrap();
             std::fs::write(root.join("uninstall.exe"),b"fixture uninstaller").unwrap();
             let value=root.to_str().unwrap();
@@ -275,6 +278,11 @@ mod native {
             // tested with synthetic descriptors above without changing ACLs.
             let installation=RegisteredInstallation{root:root.clone(),_guards:root.ancestors().map(|path|fs::directory(path,0x81).unwrap()).collect()};
             assert!(validate_final_root_name(&root,&installation._guards[0]).is_ok());
+            let raw_name:Vec<_>=raw_root.as_os_str().encode_wide().collect();
+            let final_name:Vec<_>=root.as_os_str().encode_wide().collect();
+            if unsafe{CompareStringOrdinal(raw_name.as_ptr(),raw_name.len() as i32,final_name.as_ptr(),final_name.len() as i32,1)}!=2 {
+                assert!(validate_final_root_name(&raw_root,&installation._guards[0]).is_err(),"short-path aliases must stay rejected");
+            }
             assert!(validate_final_root_name(&root.with_extension("other"),&installation._guards[0]).is_err());
             let image=OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x00200000).open(root.join("Nearly.exe")).unwrap();
             assert!(fs::regular(&image).is_ok());
