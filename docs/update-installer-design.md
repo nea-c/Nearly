@@ -1,6 +1,10 @@
 # Signed installer updates beside Nearly.exe
 
-Status: implementation behind disabled production gates, with generated tests and separate real-install qualification outstanding. The distribution choice is a per-user NSIS installer. A downloaded update installer must be stored in the same directory as the currently running Nearly.exe, and installation must preserve adjacent settings and the user's two shortcut choices. This document does not authorize generating signing keys, publishing releases, running an installer, or changing a user installation.
+Current activation status (2026-10-19): the approved production gate is enabled with the unchanged registered public key. Hosted isolated QA run 39202794997 passed signed installation, restart health, rollback and uninstall in separate fresh Windows guests. This is QA-feature evidence; the production-enabled variant receives separate build/test validation. No ordinary PC installation, power-loss qualification, real SFTP or long-duration result is claimed. Production builders reject QA inputs and QA-marked payloads. The signed controller uses the explicit registered-production trust profile; historical signed-bootstrap still requires a disabled gate. Validation mode never signs or publishes.
+
+The earlier implementation/status notes below describe their recorded stage.
+
+Historical implementation status (2026-10-17): implementation behind disabled production gates, with generated tests and separate real-install qualification outstanding. The distribution choice is a per-user NSIS installer. A downloaded update installer must be stored in the same directory as the currently running Nearly.exe, and installation must preserve adjacent settings and the user's two shortcut choices. This document does not authorize generating signing keys, publishing releases, running an installer, or changing a user installation.
 
 ## Official API boundary
 

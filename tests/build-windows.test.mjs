@@ -114,10 +114,12 @@ test(
       fileURLToPath(new URL("../scripts/build-windows.mjs", import.meta.url)),
       path.join(root, "scripts", "build-windows.mjs"),
     );
+    await fs.copyFile(path.join(projectRoot, 'scripts/production-build-policy.mjs'), path.join(root, 'scripts/production-build-policy.mjs'));
     await fs.mkdir(path.join(root, 'src'));
     await fs.copyFile(path.join(projectRoot, 'version.json'), path.join(root, 'version.json'));
     await fs.copyFile(path.join(projectRoot, 'scripts/version.mjs'), path.join(root, 'scripts/version.mjs'));
     for (const [name, content] of await versionFiles()) await fs.writeFile(path.join(root, name), content);
+    await fs.appendFile(path.join(root, "src-tauri/Cargo.toml"), "\n[features]\ninstaller-qa = []\n");
     await fs.writeFile(
       path.join(root, "src-tauri", "target", "release", "Nearly.exe"),
       "stale release",

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {verifyBootstrapTrust} from './release-trust.mjs';
+import {verifyBootstrapTrust,verifyProductionTrust} from './release-trust.mjs';
 
 export const repository = 'nea-c/Nearly';
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -62,6 +62,7 @@ export function auditGitObjects(raw) {
 export async function verifyVersionAndGates(root, request, {profile='legacy'}={}) {
   const v = JSON.parse(await fs.readFile(path.join(root, 'version.json'), 'utf8'));
   if (JSON.stringify(Object.keys(v)) !== '["version"]' || v.version !== request.version) fail('Requested release and source version differ');
+  if(profile==='registered-production'){await verifyProductionTrust(root);return;}
   if(profile==='signed-bootstrap'){await verifyBootstrapTrust(root);return;}
   if(profile!=='legacy')fail('Unknown release trust profile');
   const key = await fs.readFile(path.join(root, 'src-tauri/src/update_package.rs'), 'utf8');

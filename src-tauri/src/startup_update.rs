@@ -4,9 +4,9 @@ use crate::update_package::{self, Architecture, ReleaseCandidate, StagedInstalle
 use serde::Serialize;
 use std::{collections::HashSet,sync::{atomic::{AtomicBool,Ordering},Mutex},time::{Duration,Instant}};
 const ENDPOINT:&str="https://api.github.com/repos/nea-c/Nearly/releases/latest";
-// Remains false until isolated signed NSIS installation, interrupted recovery
-// and restart-health verification are completed; key approval alone is not release approval.
-pub const HANDOFF_RELEASE_VALIDATED:bool=false;
+// Enabled after isolated signed installation, rollback/restart-health QA and
+// explicit production activation approval. Power-loss qualification remains open.
+pub const HANDOFF_RELEASE_VALIDATED:bool=true;
 pub(crate) fn handoff_validated()->bool{
     #[cfg(all(feature="installer-qa",windows))]
     {crate::installer_qa::authorized()}

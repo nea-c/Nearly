@@ -1,9 +1,13 @@
 # Manual signed Windows releases
 
+Current activation status (2026-10-19): the approved production gate is enabled with the unchanged registered public key. Hosted isolated QA run 39202794997 passed signed installation, restart health, rollback and uninstall in separate fresh Windows guests. This is QA-feature evidence; the production-enabled variant receives separate build/test validation. No ordinary PC installation, power-loss qualification, real SFTP or long-duration result is claimed. Production builders reject QA inputs and QA-marked payloads. The signed controller uses the explicit registered-production trust profile; historical signed-bootstrap still requires a disabled gate. Validation mode never signs or publishes.
+
+The earlier implementation/status notes below describe their recorded stage.
+
 The signed release workflow is implemented in .github/workflows/release-signed-windows.yml.
 Local test results alone do not qualify Actions: inspect the exact manual run and
 its artifacts. Build/sign verification never executes setup or replaces the normal EXE.
-HANDOFF_RELEASE_VALIDATED remains false. The source version is still 2.0.0; r2.0 already
+HANDOFF_RELEASE_VALIDATED is now true after separate activation approval. The source version is still 2.0.0; r2.0 already
 exists, so a future signed release needs a separately selected new version and notes.
 
 ## Registered trust and custody
@@ -110,7 +114,7 @@ The official26.04 distribution/output hashes were inspected using existing22.01.
 Downloaded new reader/bootstrap binaries have not run locally. New Actions job/API,
 bootstrap/26.04 behavior, actual signed NSIS installation, clean installed Windows,
 reboot/recovery and long-duration stability are unqualified. No automatic installation
-claim follows from local signing/packaging tests. Source gate remains false.
+claim follows from local signing/packaging tests. At that historical signing stage, the source gate remained false.
 
 Separate authorization is needed before committing/pushing or opening integration
 work, dispatching validate/release, publishing a new version, executing NSIS in a

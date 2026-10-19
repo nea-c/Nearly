@@ -87,14 +87,23 @@ test('final packaging adapter binds real build metadata and rejects drift before
   for(const file of ['.github/updater-public-key.pub','src-tauri/src/update_package.rs','src-tauri/src/startup_update.rs'])await fs.copyFile(new URL('../'+file,import.meta.url),path.join(root,file));
   await fs.writeFile(path.join(root,'version.json'),JSON.stringify({version:f.r.version}));
   await fs.copyFile(path.join(f.bundle,f.file),path.join(root,'build',f.file));
-  const meta={version:f.r.version,displayVersion:f.r.tag,identifier:'local.syncfiles.native',payloadArchitecture:'x64',installMode:'currentUser',settingsIncluded:false,adjacentSettingsPreserved:true,updaterInstallationEnabled:false,updaterProtocol:3,signed:false,bytes:f.installer.length,sha256:sha(f.installer),embeddedApplicationSha256:f.m.payload.sha256};
+  const meta={version:f.r.version,displayVersion:f.r.tag,identifier:'local.syncfiles.native',payloadArchitecture:'x64',installMode:'currentUser',settingsIncluded:false,adjacentSettingsPreserved:true,updaterInstallationEnabled:true,updaterProtocol:3,signed:false,bytes:f.installer.length,sha256:sha(f.installer),embeddedApplicationSha256:f.m.payload.sha256};
   const info=path.join(root,'build/installer-build-info.json'),options={payloadPath:path.join(f.bundle,'Nearly.exe'),tree:f.m.tree};
   await fs.writeFile(info,JSON.stringify(meta));
   const output=path.join(f.dir,'packaged'),result=await contract.createUnsignedBundle(root,output,f.r,options);
   await contract.verifyUnsignedBundle(output,f.r,{manifestHash:result.manifestHash,artifactId:'41'});
-  for(const change of [{updaterProtocol:2},{signed:true},{updaterInstallationEnabled:true},{embeddedApplicationSha256:'f'.repeat(64)},{sha256:'f'.repeat(64)}]){
+  for(const change of [{updaterProtocol:2},{signed:true},{updaterInstallationEnabled:false},{embeddedApplicationSha256:'f'.repeat(64)},{sha256:'f'.repeat(64)}]){
     await fs.writeFile(info,JSON.stringify({...meta,...change}));
     const rejected=path.join(f.dir,'rejected');await assert.rejects(()=>contract.createUnsignedBundle(root,rejected,f.r,options));
     assert.equal(await fs.stat(rejected).then(()=>true,()=>false),false);
   }
+});
+
+test('signing-plan rejects a QA-marked payload even with consistent manifest hashes',async t=>{
+ const f=await unsignedFixture(t),payload=await fs.readFile(path.join(f.bundle,'Nearly.exe'));
+ payload.write('NEARLY-INSTALLER-QA-ONLY-v1',128);f.m.payload.sha256=sha(payload);
+ await fs.writeFile(path.join(f.bundle,'Nearly.exe'),payload);
+ const bytes=contract.canonical(f.m);await fs.writeFile(path.join(f.bundle,'unsigned-manifest.json'),bytes);
+ await assert.rejects(()=>contract.createSigningPlan(f.bundle,path.join(f.dir,'qa-plan.json'),f.r,{manifestHash:sha(bytes),artifactId:'41'}),/QA-only/);
+ assert.equal(await fs.stat(path.join(f.dir,'qa-plan.json')).then(()=>true,()=>false),false);
 });

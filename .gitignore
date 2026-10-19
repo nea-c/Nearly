@@ -133,3 +133,4 @@ Thumbs.db
 !/scripts/installer-qa.mjs
 !/scripts/installer-qa-guest.ps1
 !/docs/windows-installer-qa.md
+!/scripts/production-build-policy.mjs

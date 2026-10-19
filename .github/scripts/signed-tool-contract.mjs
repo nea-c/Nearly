@@ -4,14 +4,14 @@ import {execFileSync} from 'node:child_process';
 import {sha256,auditBytes,assertSafeSourcePath} from './release-contract.mjs';
 import {regular,canonical,oid,digest,pe} from './signed-release-contract.mjs';
 import {publicKeySha256,loadTrustedPublicKey} from './release-trust.mjs';
-const inputs=['.github/signing-dependencies.json','.github/updater-public-key.pub','.github/scripts/prepare-signing-tools.ps1','.github/scripts/signed-tool-contract.mjs','.github/scripts/signed-release-contract.mjs','.github/scripts/release-contract.mjs','.github/scripts/release-trust.mjs','tools/updater-signer/Cargo.toml','tools/updater-signer/Cargo.lock','tools/updater-signer/build.rs','tools/updater-signer/src/lib.rs','tools/updater-signer/src/main.rs','src-tauri/src/update_package.rs'];
+const inputs=['scripts/production-build-policy.mjs','.github/signing-dependencies.json','.github/updater-public-key.pub','.github/scripts/prepare-signing-tools.ps1','.github/scripts/signed-tool-contract.mjs','.github/scripts/signed-release-contract.mjs','.github/scripts/release-contract.mjs','.github/scripts/release-trust.mjs','tools/updater-signer/Cargo.toml','tools/updater-signer/Cargo.lock','tools/updater-signer/build.rs','tools/updater-signer/src/lib.rs','tools/updater-signer/src/main.rs','src-tauri/src/update_package.rs'];
 const names=['nearly-updater-signer.exe','7z.exe','7z.dll'];
 const fail=m=>{throw Error(m);};
 export async function collectToolInputs(root,r){
   const git=(...args)=>execFileSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true}).trim();
   if(git('rev-parse','HEAD')!==r.workflowCommit||git('status','--porcelain=v1','--untracked-files=all'))fail('Trusted controller checkout changed');
   const tree=git('rev-parse','HEAD^{tree}');if(!oid(tree))fail('Invalid controller tree');
-  const tracked=git('ls-files','-z','--','.github','tools/updater-signer','src-tauri/src/update_package.rs').split('\0').filter(Boolean).sort();
+  const tracked=git('ls-files','-z','--','.github','tools/updater-signer','src-tauri/src/update_package.rs','scripts/production-build-policy.mjs').split('\0').filter(Boolean).sort();
   if(inputs.some(name=>!tracked.includes(name)))fail('Incomplete trusted build source closure');
   const sources=[];for(const name of tracked){assertSafeSourcePath(name);sources.push({name,sha256:sha256(await regular(path.join(root,name),16*1024*1024))});}
   return{controllerTree:tree,sources};

@@ -1,5 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=../version.json");
+    // include_image! embeds generated RGBA; track the original PNG inputs too.
+    for badge in ["sync", "done", "error", "paused"] {
+        println!("cargo:rerun-if-changed=icons/badges/{badge}.png");
+    }
     let source = include_str!("../version.json");
     let canonical: String = source.chars().filter(|c| !c.is_whitespace()).collect();
     let version = env!("CARGO_PKG_VERSION");

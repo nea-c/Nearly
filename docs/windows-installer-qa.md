@@ -62,9 +62,10 @@ mismatching successful path, changed identity or uncertain result still refuses.
 QA diagnostics include fixed failure-site and exit-race codes. This handling
 does not bypass file-user, root, snapshot or mutation checks.
 
-Default builds omit the QA module and embedded QA values. The production key and
-`HANDOFF_RELEASE_VALIDATED=false` remain unchanged. Passing this workflow is not
-authorization to enable production updates or publish QA fixtures. Local unit
-tests and compilation do not qualify real installation, restart, or rollback;
-only completed hosted cases establish those results, and do not establish
-long-duration stability or interrupted-power recovery.
+Default builds omit the QA module and embedded QA values. The production key is unchanged.
+Production handoff activation was separately approved after run 39202794997
+passed both success and health-failure rollback in fresh hosted Windows guests.
+The production-enabled variant receives its own build/test validation; this
+QA-feature evidence does not qualify a production install on an ordinary PC.
+Passing QA alone does not authorize activation or publication. Long-duration
+stability and interrupted-power recovery remain unqualified.

@@ -502,13 +502,13 @@ mod tests {
         assert_eq!(verify(&bytes,&s,&k,&c),Err(PackageError::Architecture));
     }
     #[test]
-    fn registered_public_key_is_embedded_without_enabling_installation() {
+    fn registered_public_key_matches_enabled_production_installation() {
         let public=include_str!("../../.github/updater-public-key.pub");
         let bytes=STANDARD.decode(public.lines().nth(1).unwrap()).unwrap();
         assert!(production_key().is_some());
         assert_eq!(production_key().unwrap().bytes.as_slice(),bytes.as_slice());
         assert_eq!(sha256(public.as_bytes()),"2592845a518adb9df5b7773dd58672ea411b3038758bfaf2808a3cb13dcc8695");
-        assert!(!crate::startup_update::HANDOFF_RELEASE_VALIDATED);
+        assert!(crate::startup_update::HANDOFF_RELEASE_VALIDATED);
     }
     #[test]
     fn validates_fixed_release_urls_sizes_duplicates_and_precedence() {
