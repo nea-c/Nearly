@@ -49,6 +49,14 @@ export function auditGitObjects(raw) {
       // Only these byte-identical, already-public source blobs contain reviewed
       // synthetic/public-folder examples. Payload audit never uses exceptions.
       const examples = {
+        // Frozen public hosted-guest test revisions; only this synthetic VM root.
+        '06a67db742b5753eb05d9c9f0279c51ed060641f8f65e505f110e5100d38187d': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '50fca964891933b21d713f6b0af288796609c5ddfbaa5f819a454515fb4d106b': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '8b5a8d9da5c204152912b6b22c414a03f083db801d7c2a831ebc81be32ce4dcc': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '8d8d2111b2ab0acdf704e9d014ae16777ddc982fbe24d16b3727faa6727cabb1': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '32d2837a6bd565df59f73c76a0baa3a99b493e8af1f28cf632c49f59285738e3': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '372ed73f659ddb72390135f391141461771c4065026bffe908b3453fb29cd428': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
+        '50b699e9f008e42bc7fa90acc9dd4d399835a7266f005347c1f93b4db05a2fbf': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
         e4ba4a3e32f236b5037afc0951bc01301eeb7f986b4764f026f7c82b9c04b92e: [['c:', 'users', 'fixture', 'appdata', 'local', 'nearly'].join('/')],
         '78272bd40b8a783c0ab94e4bcb400fd947ba306a7575f2bbbbccb7478f40447f': [['c:', 'users', 'public', 'desktop', 'app.lnk'].join('/')],
       };
