@@ -9,7 +9,9 @@ test('diagnosis workflow is one isolated read-only guest and preserves the ordin
  const text=fs.readFileSync(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
  assert.match(text,/diagnosis_only:\s+description:[^\n]+\s+type: boolean\s+default: false/);
  const diagnosis=text.match(/^  root-diagnosis:\r?\n([\s\S]*?)(?=^  guest:)/m)?.[1];assert.ok(diagnosis);
- assert.match(diagnosis,/if: inputs\.diagnosis_only &&/);assert.match(diagnosis,/runs-on: windows-2025/);
+ assert.match(diagnosis,/if: inputs\.diagnosis_only &&/);
+ assert.match(text,/diagnose_windows_2022:\s+description:[^\n]+\s+type: boolean\s+default: false/);
+ assert.match(diagnosis,/runs-on: \$\{\{ inputs\.diagnose_windows_2022 && 'windows-2022' \|\| 'windows-2025' \}\}/);
  assert.doesNotMatch(diagnosis,/matrix:|prepare-windows|installer-qa\.mjs (?:preflight|guard-probe|run|production)|npm ci|cargo|rustup|Start-Process|Set-Acl|upload-artifact|GH_TOKEN/);
  assert.match(diagnosis,/actions\/checkout@d23441a48e516b6c34aea4fa41551a30e30af803/);
  assert.match(diagnosis,/ref: \$\{\{ github\.workflow_sha \}\}/);assert.match(diagnosis,/persist-credentials: false/);
@@ -18,6 +20,7 @@ test('diagnosis workflow is one isolated read-only guest and preserves the ordin
  assert.ok(validation>0&&invocation>validation);assert.match(diagnosis,/if \(\$LASTEXITCODE -ne 0\)/);
  assert.match(diagnosis,/if \(!\$inventory.complete\)/);
  const guest=text.slice(text.indexOf('  guest:'));
+ assert.match(guest,/runs-on: windows-2025/);assert.doesNotMatch(guest,/diagnose_windows_2022/);
  assert.match(guest,/if: [^\r\n]+&& !inputs\.diagnosis_only/);
  assert.match(guest,/phase: \[candidate\]/);assert.match(guest,/scenario: \[success, health-failure\]/);
  const destinations=/destination: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(guest);
