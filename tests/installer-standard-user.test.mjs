@@ -18,6 +18,12 @@ test('launcher proves restricted medium same-user child before resuming and neve
   assert.ok(source.indexOf('VerifyStandard(childToken')<source.indexOf('ResumeThread(child.hThread)'));
   assert.doesNotMatch(source,/SetNamedSecurityInfo|SetSecurityInfo|SetFileSecurity|LogonUser|CreateProcessWithLogon|net user|runas/i);
 });
+test('pre-resume startup diagnostics evaluate real descriptors without changing desktop permissions',async()=>{
+  const source=await fs.readFile(helper,'utf8');
+  for(const marker of ['EmitStartupAccessDiagnostics','GetUserObjectSecurity','GetSecurityInfo','AccessCheck','DuplicateTokenEx','tokenDefaultDacl','windowStation','desktopAccess','childProcess','childThread','grantedMask','minimumMask','mandatoryLabelRid','noWriteUp','LabelAccess'])assert.ok(source.includes(marker),marker);
+  assert.ok(source.indexOf('EmitStartupAccessDiagnostics(filtered,current,child.hProcess,child.hThread)')<source.indexOf('ResumeThread(child.hThread)'));
+  assert.doesNotMatch(source,/SetUserObjectSecurity|SetNamedSecurityInfo|SetSecurityInfo|SetFileSecurity/);
+});
 test('native launcher compiles and pure argument/token models run without invoking Windows launcher',{skip:process.platform!=='win32'},async()=>{
   const source=await fs.readFile(helper,'utf8').catch(()=>null);assert.ok(source,'Native standard-user launcher is missing');
   const command=`$ErrorActionPreference='Stop'\nAdd-Type -Path ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fileURLToPath(helper)).toString('base64')}')))\n[NearlyQaStandardUser]::PureSelfTest()\n'Pure standard-user launcher models passed'`;

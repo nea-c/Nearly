@@ -54,6 +54,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Safe orchestration, UI policy and evidence unit tests
         run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs
+      - name: Prove standard-user guest startup before dependency preparation
+        run: node scripts/installer-qa.mjs preflight
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
       - name: Prepare locked build dependencies in this fresh guest

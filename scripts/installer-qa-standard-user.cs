@@ -17,12 +17,35 @@ public static class NearlyQaStandardUser {
   [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct StartupInfo {public uint cb;public string Reserved;public string Desktop;public string Title;public uint X,Y,XSize,YSize,XCount,YCount,Fill,Flags;public ushort Show,Reserved2;public IntPtr ReservedData,Input,Output,Error;}
   [StructLayout(LayoutKind.Sequential)] struct StartupInfoEx {public StartupInfo Info;public IntPtr Attributes;}
   [StructLayout(LayoutKind.Sequential)] struct ProcessInfo {public IntPtr hProcess,hThread;public uint ProcessId,ThreadId;}
+  [StructLayout(LayoutKind.Sequential)] struct GenericMapping {public uint Read,Write,Execute,All;}
+  struct AccessProof {
+    public bool Allowed,MinimumAllowed;public uint GrantedMask,DesiredMask,MinimumMask,Error;
+    public string Json(){return "{\"allowed\":"+(Allowed?"true":"false")+",\"minimumAllowed\":"+(MinimumAllowed?"true":"false")+",\"grantedMask\":"+GrantedMask+",\"desiredMask\":"+DesiredMask+",\"minimumMask\":"+MinimumMask+",\"error\":"+Error+"}";}
+  }
+  struct LabelProof {
+    public bool Present;public uint Rid,Policy,Error;
+    public string Json(){return "{\"present\":"+(Present?"true":"false")+",\"mandatoryLabelRid\":"+Rid+",\"policyMask\":"+Policy+",\"noWriteUp\":"+((Policy&1)!=0?"true":"false")+",\"error\":"+Error+"}";}
+  }
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr h);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,uint kind,IntPtr buffer,uint length,out uint needed);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetTokenInformation(IntPtr token,uint kind,IntPtr buffer,uint length);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr source,uint flags,uint disableCount,[In] SidAttributes[] disable,uint deleteCount,IntPtr delete,uint restrictedCount,IntPtr restricted,out IntPtr token);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr source,uint access,IntPtr attributes,uint level,uint kind,out IntPtr token);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool AccessCheck(IntPtr descriptor,IntPtr token,uint desired,ref GenericMapping mapping,IntPtr privileges,ref uint privilegeBytes,out uint granted,[MarshalAs(UnmanagedType.Bool)]out bool allowed);
+  [DllImport("advapi32.dll")] static extern void MapGenericMask(ref uint desired,ref GenericMapping mapping);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern uint GetSecurityInfo(IntPtr handle,uint type,uint info,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool InitializeSecurityDescriptor(IntPtr descriptor,uint revision);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetSecurityDescriptorOwner(IntPtr descriptor,IntPtr owner,bool defaulted);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetSecurityDescriptorGroup(IntPtr descriptor,IntPtr group,bool defaulted);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetSecurityDescriptorDacl(IntPtr descriptor,bool present,IntPtr dacl,bool defaulted);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor,out bool present,out IntPtr sacl,out bool defaulted);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr OpenWindowStationW(string name,bool inherit,uint access);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr OpenDesktopW(string name,uint flags,bool inherit,uint access);
+  [DllImport("user32.dll",SetLastError=true)] static extern bool GetUserObjectSecurity(IntPtr handle,ref uint info,IntPtr descriptor,uint bytes,out uint needed);
+  [DllImport("user32.dll")] static extern bool CloseWindowStation(IntPtr handle);
+  [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr handle);
   [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool ConvertStringSidToSidW(string value,out IntPtr sid);
   [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
   [DllImport("advapi32.dll")] static extern bool CopySid(uint length,IntPtr destination,IntPtr source);
@@ -49,6 +72,73 @@ public static class NearlyQaStandardUser {
   static void AdminState(IntPtr token,IntPtr admin,out bool enabled,out bool denyOnly){enabled=false;denyOnly=false;IntPtr data=Info(token,2);try{int count=Marshal.ReadInt32(data),offset=(int)Marshal.OffsetOf(typeof(GroupsOne),"First"),size=Marshal.SizeOf(typeof(SidAttributes));if(count<0||count>4096)throw new Exception("Bounded token groups required");for(int i=0;i<count;i++){SidAttributes item=Marshal.PtrToStructure<SidAttributes>(IntPtr.Add(data,offset+i*size));if(EqualSid(item.Sid,admin)){enabled=(item.Attributes&SE_GROUP_ENABLED)!=0;denyOnly=(item.Attributes&SE_GROUP_USE_FOR_DENY_ONLY)!=0;return;}}}finally{Marshal.FreeHGlobal(data);}}
   static void RequireStandard(bool elevated,uint integrity,bool adminEnabled,bool sameUser,bool sameSession){if(elevated||integrity!=8192||adminEnabled||!sameUser||!sameSession)throw new Exception("Expected same-user non-elevated medium token");}
   static bool VerifyStandard(IntPtr token,IntPtr parent,IntPtr admin){bool enabled,deny;AdminState(token,admin,out enabled,out deny);RequireStandard(Scalar(token,TokenElevation)!=0,Integrity(token),enabled,SameUser(token,parent),Scalar(token,12)==Scalar(parent,12));if(Scalar(token,12)==0)throw new Exception("Interactive user session required");return deny;}
+  static AccessProof DescriptorAccess(IntPtr descriptor,IntPtr impersonation,int kind){
+    GenericMapping mapping=DiagnosticMapping(kind);uint desired=0x02000000,minimum=DiagnosticMinimum(kind);
+    uint bytes=4096,granted;bool allowed;IntPtr privileges=Marshal.AllocHGlobal((int)bytes);
+    try{bool success=AccessCheck(descriptor,impersonation,desired,ref mapping,privileges,ref bytes,out granted,out allowed);return new AccessProof{Allowed=success&&allowed&&(granted&mapping.All)==mapping.All,MinimumAllowed=success&&allowed&&(granted&minimum)==minimum,GrantedMask=success?granted:0,DesiredMask=mapping.All,MinimumMask=minimum,Error=success?0:unchecked((uint)Marshal.GetLastWin32Error())};}finally{Marshal.FreeHGlobal(privileges);}
+  }
+  // User object mappings are published in Microsoft's window-station/desktop
+  // security-and-access-rights documentation. Kernel maps are type-specific:
+  // process query/VM vs thread context/query and their respective write rights.
+  static GenericMapping DiagnosticMapping(int kind){
+    switch(kind){
+      case 0:return new GenericMapping{Read=0x20303,Write=0x2001c,Execute=0x20060,All=0xf037f};
+      case 1:return new GenericMapping{Read=0x20041,Write=0x200be,Execute=0x20100,All=0xf01ff};
+      case 2:return new GenericMapping{Read=0x20410,Write=0x203eb,Execute=0x120000,All=0x1fffff};
+      case 3:return new GenericMapping{Read=0x20048,Write=0x203b3,Execute=0x120000,All=0x1fffff};
+      default:throw new ArgumentException("Unknown diagnostic object kind");
+    }
+  }
+  static uint DiagnosticMinimum(int kind){switch(kind){case 0:return 0x22;case 1:return 0xc3;case 2:return 0x100400;case 3:return 0x100040;default:throw new ArgumentException("Unknown diagnostic object kind");}}
+  static AccessProof UserObjectAccess(IntPtr handle,IntPtr impersonation,int kind){
+    if(handle==IntPtr.Zero)return new AccessProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};
+    uint info=7,needed;GetUserObjectSecurity(handle,ref info,IntPtr.Zero,0,out needed);
+    if(needed==0||needed>1048576)return new AccessProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};IntPtr descriptor=Marshal.AllocHGlobal((int)needed);
+    try{if(!GetUserObjectSecurity(handle,ref info,descriptor,needed,out needed))return new AccessProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};return DescriptorAccess(descriptor,impersonation,kind);}finally{Marshal.FreeHGlobal(descriptor);}
+  }
+  static AccessProof KernelObjectAccess(IntPtr handle,IntPtr impersonation,int kind){
+    IntPtr owner,group,dacl,sacl,descriptor;uint error=GetSecurityInfo(handle,6,7,out owner,out group,out dacl,out sacl,out descriptor);
+    if(error!=0)return new AccessProof{Error=error};try{return DescriptorAccess(descriptor,impersonation,kind);}finally{LocalFree(descriptor);}
+  }
+  static AccessProof DefaultDaclAccess(IntPtr token,IntPtr impersonation){
+    IntPtr dacl=Info(token,6),user=Info(token,1),descriptor=Marshal.AllocHGlobal(64);
+    try{Check(InitializeSecurityDescriptor(descriptor,1),"Initialize private diagnostic descriptor");Check(SetSecurityDescriptorOwner(descriptor,Marshal.ReadIntPtr(user),false),"Set diagnostic owner in memory");Check(SetSecurityDescriptorGroup(descriptor,Marshal.ReadIntPtr(user),false),"Set diagnostic group in memory");Check(SetSecurityDescriptorDacl(descriptor,true,Marshal.ReadIntPtr(dacl),false),"Set diagnostic DACL in memory");return DescriptorAccess(descriptor,impersonation,2);}finally{Marshal.FreeHGlobal(descriptor);Marshal.FreeHGlobal(user);Marshal.FreeHGlobal(dacl);}
+  }
+  // LABEL_SECURITY_INFORMATION is read-only and needs READ_CONTROL rather than
+  // enabling SeSecurityPrivilege. Unavailable labels remain explicit unknowns.
+  static LabelProof ParseLabel(IntPtr descriptor){
+    bool present,defaulted;IntPtr acl;if(!GetSecurityDescriptorSacl(descriptor,out present,out acl,out defaulted))return new LabelProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};
+    if(!present||acl==IntPtr.Zero)return new LabelProof();
+    int bytes=unchecked((ushort)Marshal.ReadInt16(acl,2)),count=unchecked((ushort)Marshal.ReadInt16(acl,4)),offset=8;
+    if(bytes<8)return new LabelProof{Error=1336};
+    for(int i=0;i<count;i++){
+      if(offset>bytes-4)return new LabelProof{Error=1336};IntPtr ace=IntPtr.Add(acl,offset);int size=unchecked((ushort)Marshal.ReadInt16(ace,2));if(size<4||size>bytes-offset)return new LabelProof{Error=1336};
+      if(Marshal.ReadByte(ace)==0x11){
+        // SYSTEM_MANDATORY_LABEL_ACE: header, mask, S-1-16-RID.
+        if(size!=20||Marshal.ReadByte(ace,8)!=1||Marshal.ReadByte(ace,9)!=1||Marshal.ReadByte(ace,15)!=16)return new LabelProof{Error=1337};
+        for(int n=10;n<15;n++)if(Marshal.ReadByte(ace,n)!=0)return new LabelProof{Error=1337};
+        return new LabelProof{Present=true,Rid=unchecked((uint)Marshal.ReadInt32(ace,16)),Policy=unchecked((uint)Marshal.ReadInt32(ace,4))};
+      }
+      offset+=size;
+    }
+    return new LabelProof();
+  }
+  static LabelProof LabelAccess(IntPtr handle,bool userObject){
+    if(handle==IntPtr.Zero)return new LabelProof{Error=6};
+    if(userObject){uint info=0x10,needed;GetUserObjectSecurity(handle,ref info,IntPtr.Zero,0,out needed);if(needed==0||needed>1048576)return new LabelProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};IntPtr sd=Marshal.AllocHGlobal((int)needed);try{if(!GetUserObjectSecurity(handle,ref info,sd,needed,out needed))return new LabelProof{Error=unchecked((uint)Marshal.GetLastWin32Error())};return ParseLabel(sd);}finally{Marshal.FreeHGlobal(sd);}}
+    IntPtr owner,group,dacl,sacl,descriptor;uint error=GetSecurityInfo(handle,6,0x10,out owner,out group,out dacl,out sacl,out descriptor);if(error!=0)return new LabelProof{Error=error};try{return ParseLabel(descriptor);}finally{LocalFree(descriptor);}
+  }
+  static void EmitStartupAccessDiagnostics(IntPtr filtered,IntPtr parent,IntPtr process,IntPtr thread){
+    IntPtr impersonation=IntPtr.Zero,station=IntPtr.Zero,desktop=IntPtr.Zero;
+    try{
+      Check(DuplicateTokenEx(filtered,TOKEN_QUERY|4,IntPtr.Zero,2,2,out impersonation),"Duplicate own filtered token for read-only AccessCheck");
+      station=OpenWindowStationW("WinSta0",false,0x20000);AccessProof stationProof=UserObjectAccess(station,impersonation,0);
+      desktop=OpenDesktopW("Default",0,false,0x20000);AccessProof desktopProof=UserObjectAccess(desktop,impersonation,1);
+      AccessProof defaultProof=DefaultDaclAccess(filtered,impersonation),processProof=KernelObjectAccess(process,impersonation,2),threadProof=KernelObjectAccess(thread,impersonation,3);
+      Console.WriteLine("{\"schemaVersion\":1,\"kind\":\"installerQaStartupAccess\",\"windowStation\":"+stationProof.Json()+",\"desktopAccess\":"+desktopProof.Json()+",\"tokenDefaultDacl\":"+defaultProof.Json()+",\"childProcess\":"+processProof.Json()+",\"childThread\":"+threadProof.Json()+"}");
+      Console.WriteLine("{\"schemaVersion\":1,\"kind\":\"installerQaStartupLabels\",\"windowStation\":"+LabelAccess(station,true).Json()+",\"desktopAccess\":"+LabelAccess(desktop,true).Json()+",\"childProcess\":"+LabelAccess(process,false).Json()+",\"childThread\":"+LabelAccess(thread,false).Json()+"}");
+    }finally{if(desktop!=IntPtr.Zero)CloseDesktop(desktop);if(station!=IntPtr.Zero)CloseWindowStation(station);if(impersonation!=IntPtr.Zero)CloseHandle(impersonation);}
+  }
   static void SetOwnerAndMedium(IntPtr token,IntPtr parent){IntPtr user=Info(parent,1),owner=Marshal.AllocHGlobal(IntPtr.Size),medium=IntPtr.Zero,label=IntPtr.Zero;try{Marshal.WriteIntPtr(owner,Marshal.ReadIntPtr(user));Check(SetTokenInformation(token,4,owner,(uint)IntPtr.Size),"Set filtered token owner");Check(ConvertStringSidToSidW("S-1-16-8192",out medium),"Medium integrity SID");uint sidSize=GetLengthSid(medium);int header=Marshal.SizeOf(typeof(SidAttributes));label=Marshal.AllocHGlobal(header+(int)sidSize);IntPtr sid=IntPtr.Add(label,header);Check(CopySid(sidSize,sid,medium),"Copy medium integrity SID");Marshal.StructureToPtr(new SidAttributes{Sid=sid,Attributes=0x20},label,false);Check(SetTokenInformation(token,TokenIntegrityLevel,label,(uint)header+sidSize),"Set medium integrity");}finally{Marshal.FreeHGlobal(user);Marshal.FreeHGlobal(owner);if(label!=IntPtr.Zero)Marshal.FreeHGlobal(label);if(medium!=IntPtr.Zero)LocalFree(medium);}}
   public static string Quote(string argument){if(argument==null||argument.IndexOf('\0')>=0)throw new ArgumentException("Invalid argument");StringBuilder result=new StringBuilder("\"");int slashes=0;foreach(char c in argument){if(c=='\\'){slashes++;continue;}if(c=='\"'){result.Append('\\',slashes*2+1).Append(c);}else{result.Append('\\',slashes).Append(c);}slashes=0;}return result.Append('\\',slashes*2).Append('"').ToString();}
   static string Command(string executable,string script,string[] arguments){StringBuilder command=new StringBuilder(Quote(executable));foreach(string value in new[]{"-NoProfile","-NonInteractive","-File",script})command.Append(' ').Append(Quote(value));foreach(string value in arguments)command.Append(' ').Append(Quote(value));if(command.Length>=32767)throw new ArgumentException("Bounded command line required");return command.ToString();}
@@ -67,6 +157,7 @@ public static class NearlyQaStandardUser {
       environment=GetEnvironmentStringsW();Check(environment!=IntPtr.Zero,"Copy exact controller environment");
       Check(CreateProcessAsUserW(filtered,executable,new StringBuilder(Command(executable,script,arguments)),IntPtr.Zero,IntPtr.Zero,true,CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW,environment,directory,ref startup,out child),"Create same-user guest suspended");
       Check(OpenProcessToken(child.hProcess,TOKEN_QUERY,out childToken),"Inspect suspended guest token");bool denyOnly=VerifyStandard(childToken,current,admin);
+      EmitStartupAccessDiagnostics(filtered,current,child.hProcess,child.hThread);
       Console.WriteLine("{\"schemaVersion\":1,\"kind\":\"installerQaStandardUser\",\"tokenElevation\":0,\"integrityRid\":8192,\"administratorsEnabled\":false,\"administratorsDenyOnly\":"+(denyOnly?"true":"false")+",\"sameUser\":true,\"sameSession\":true,\"desktop\":\"winsta0\\\\default\",\"childPid\":"+child.ProcessId+"}");
       Check(ResumeThread(child.hThread)!=0xffffffff,"Resume verified guest");resumed=true;uint wait=WaitForSingleObject(child.hProcess,checked((uint)timeoutSeconds*1000));if(wait==258)throw new TimeoutException("Standard-user guest timeout; processes and log retained for hosted evidence");Check(wait==0,"Wait for exact guest process");uint code;Check(GetExitCodeProcess(child.hProcess,out code),"Read exact guest exit code");return unchecked((int)code);
     } finally {
@@ -78,6 +169,8 @@ public static class NearlyQaStandardUser {
     }
   }
   public static void PureSelfTest(){
+    for(int kind=0;kind<4;kind++){GenericMapping mapping=DiagnosticMapping(kind);if(mapping.Read==mapping.All||mapping.Write==mapping.All||mapping.Execute==mapping.All||(DiagnosticMinimum(kind)&mapping.All)!=DiagnosticMinimum(kind))throw new Exception("Invalid object-specific generic mapping");}
+    if(DiagnosticMapping(0).Read!=0x20303||DiagnosticMapping(0).Write!=0x2001c||DiagnosticMapping(0).Execute!=0x20060||DiagnosticMapping(1).Read!=0x20041||DiagnosticMapping(1).Write!=0x200be||DiagnosticMapping(1).Execute!=0x20100||DiagnosticMinimum(0)!=0x22||DiagnosticMinimum(1)!=0xc3||DiagnosticMapping(2).Read==DiagnosticMapping(3).Read)throw new Exception("Object-specific diagnostic masks regressed");
     if(Quote("")!="\"\""||Quote("a b")!="\"a b\""||Quote("a\"b")!="\"a\\\"b\""||Quote("C:\\end\\")!="\"C:\\end\\\\\"")throw new Exception("CRT quoting failed");
     if(Command("C:\\pwsh.exe","C:\\日本語 space\\guest.ps1",new[]{"-Action","ui"}).IndexOf("日本語 space",StringComparison.Ordinal)<0)throw new Exception("Unicode argument lost");
     RequireStandard(false,8192,false,true,true);foreach(int invalid in new[]{0,1,2,3,4}){bool rejected=false;try{RequireStandard(invalid==0,invalid==1?12288u:8192u,invalid==2,invalid!=3,invalid!=4);}catch{rejected=true;}if(!rejected)throw new Exception("Unsafe token proof accepted");}

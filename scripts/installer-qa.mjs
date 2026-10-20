@@ -311,11 +311,18 @@ export function settingsFixture(){
   const s=JSON.parse(files['settings.json']);for(const n of settingsNames.slice(1))s.manifest[n].sha256=hash(files[n]);files['settings.json']=JSON.stringify(s,null,2);
   return files;
 }
+function guestRunner(p,baseEnv){
+  const guest=path.join(root,'scripts/installer-qa-guest.ps1');
+  const launcher=path.join(root,'scripts/installer-qa-standard-user.ps1');
+  return async(action,args=[],env=baseEnv)=>execute('pwsh',['-NoProfile','-NonInteractive','-File',launcher,'-GuestScript',guest,'-GuestArgumentsBase64',Buffer.from(JSON.stringify(['-Action',action,'-RunRoot',p.runRoot,...args])).toString('base64'),'-TimeoutSeconds','300'],{env,timeoutMs:320000});
+}
+export async function preflight(e=process.env){
+  const c=validateContext(e),destination=validateDestination(e.QA_DESTINATION);validateScenario(e.QA_SCENARIO);
+  return guestRunner(createPlan(c,destination),cleanChildEnv(e))('preflight');
+}
 export async function run(e=process.env){
   const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION),p=createPlan(c,destination);validatePlan(p,c,destination);
-  const guest=path.join(root,'scripts/installer-qa-guest.ps1'),baseEnv=cleanChildEnv(e);
-  const launcher=path.join(root,'scripts/installer-qa-standard-user.ps1');
-  const ps=async(action,args=[],env=baseEnv)=>execute('pwsh',['-NoProfile','-NonInteractive','-File',launcher,'-GuestScript',guest,'-GuestArgumentsBase64',Buffer.from(JSON.stringify(['-Action',action,'-RunRoot',p.runRoot,...args])).toString('base64'),'-TimeoutSeconds','300'],{env,timeoutMs:320000});
+  const baseEnv=cleanChildEnv(e),ps=guestRunner(p,baseEnv);
   // Preflight checks canonical/reparse-free ancestry and absence before any run-root write.
   await ps('preflight');await fs.mkdir(p.runRoot);await fs.writeFile(path.join(p.runRoot,'plan.json'),canonical(p),{flag:'wx'});
   const results=[];
@@ -369,6 +376,6 @@ export async function run(e=process.env){
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  if(process.argv.length!==3||process.argv[2]!=='run'){console.error('Only the manually authorized hosted guest run command is supported');process.exitCode=1;}
-  else run().catch(error=>{console.error(error.message);process.exitCode=1;});
+  if(process.argv.length!==3||!['run','preflight'].includes(process.argv[2])){console.error('Only manually authorized hosted guest commands are supported');process.exitCode=1;}
+  else (process.argv[2]==='preflight'?preflight():run()).catch(error=>{console.error(error.message);process.exitCode=1;});
 }

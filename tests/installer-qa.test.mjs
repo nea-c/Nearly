@@ -13,6 +13,11 @@ test('dedicated private-directory branch runs only exact manually confirmed host
  for(const ref of ['refs/heads/codex/other','refs/pull/1/merge','refs/heads/codex/private-install-directory-extra'])assert.throws(()=>qa.validateContext({...e,GITHUB_REF:ref},'win32'));
  const p=qa.createPlan(qa.validateContext(e,'win32'),'drive');assert.equal(p.installRoot,p.destinations.drive);assert.equal(qa.validatePlan(p,qa.validateContext(e,'win32'),'drive'),true);
 });
+test('standard-user preflight fails closed before dependencies or guest mutations',async()=>{
+ assert.equal(typeof qa.preflight,'function');await assert.rejects(()=>qa.preflight({...env(),GITHUB_ACTIONS:'false'}));
+ const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
+ const early=workflow.indexOf('node scripts/installer-qa.mjs preflight');assert.ok(early>0);assert.ok(early<workflow.indexOf('Prepare pinned cached NSIS tools'));
+});
 test('shared drive fixture applies permissions only to its exact new app leaf; identity ABI is read-only',{skip:process.platform!=='win32'},async()=>{
  const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
  const code=source.match(/function Get-DirectoryIdentity[\s\S]*?Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
