@@ -5,9 +5,11 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 public static class NearlyQaStandardUser {
-  const uint TOKEN_QUERY=8, TokenElevation=20, TokenIntegrityLevel=25;
+  const uint TOKEN_QUERY=8, TokenElevation=20, TokenIntegrityLevel=25,TokenDefaultDacl=6;
   const uint SE_GROUP_ENABLED=4, SE_GROUP_USE_FOR_DENY_ONLY=16;
   const uint CREATE_SUSPENDED=4, CREATE_UNICODE_ENVIRONMENT=0x400, EXTENDED_STARTUPINFO_PRESENT=0x80000, CREATE_NO_WINDOW=0x08000000;
   static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST=new IntPtr(0x20002);
@@ -41,6 +43,7 @@ public static class NearlyQaStandardUser {
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetSecurityDescriptorGroup(IntPtr descriptor,IntPtr group,bool defaulted);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetSecurityDescriptorDacl(IntPtr descriptor,bool present,IntPtr dacl,bool defaulted);
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor,out bool present,out IntPtr sacl,out bool defaulted);
+  [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr OpenWindowStationW(string name,bool inherit,uint access);
   [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr OpenDesktopW(string name,uint flags,bool inherit,uint access);
   [DllImport("user32.dll",SetLastError=true)] static extern bool GetUserObjectSecurity(IntPtr handle,ref uint info,IntPtr descriptor,uint bytes,out uint needed);
@@ -74,8 +77,19 @@ public static class NearlyQaStandardUser {
   static bool VerifyStandard(IntPtr token,IntPtr parent,IntPtr admin){bool enabled,deny;AdminState(token,admin,out enabled,out deny);RequireStandard(Scalar(token,TokenElevation)!=0,Integrity(token),enabled,SameUser(token,parent),Scalar(token,12)==Scalar(parent,12));if(Scalar(token,12)==0)throw new Exception("Interactive user session required");return deny;}
   static AccessProof DescriptorAccess(IntPtr descriptor,IntPtr impersonation,int kind){
     GenericMapping mapping=DiagnosticMapping(kind);uint desired=0x02000000,minimum=DiagnosticMinimum(kind);
+    NormalizeSnapshotDacl(descriptor,mapping);
     uint bytes=4096,granted;bool allowed;IntPtr privileges=Marshal.AllocHGlobal((int)bytes);
     try{bool success=AccessCheck(descriptor,impersonation,desired,ref mapping,privileges,ref bytes,out granted,out allowed);return new AccessProof{Allowed=success&&allowed&&(granted&mapping.All)==mapping.All,MinimumAllowed=success&&allowed&&(granted&minimum)==minimum,GrantedMask=success?granted:0,DesiredMask=mapping.All,MinimumMask=minimum,Error=success?0:unchecked((uint)Marshal.GetLastWin32Error())};}finally{Marshal.FreeHGlobal(privileges);}
+  }
+  static uint MapSnapshotMask(uint mask,GenericMapping mapping){uint result=mask&0x0fffffff;if((mask&0x80000000)!=0)result|=mapping.Read;if((mask&0x40000000)!=0)result|=mapping.Write;if((mask&0x20000000)!=0)result|=mapping.Execute;if((mask&0x10000000)!=0)result|=mapping.All;return result;}
+  // All descriptors passed here are private in-memory snapshots returned by
+  // GetSecurityInfo/GetUserObjectSecurity or built from a copied token query.
+  // AccessCheck requires generic ACE rights mapped to this object's type.
+  // This only changes these snapshots; no object security setter is called.
+  static void NormalizeSnapshotDacl(IntPtr descriptor,GenericMapping mapping){
+    bool present,defaulted;IntPtr acl;Check(GetSecurityDescriptorDacl(descriptor,out present,out acl,out defaulted),"Read private descriptor DACL");if(!present||acl==IntPtr.Zero)return;
+    int bytes=unchecked((ushort)Marshal.ReadInt16(acl,2)),count=unchecked((ushort)Marshal.ReadInt16(acl,4)),offset=8;if(bytes<8)throw new Exception("Invalid private ACL snapshot");
+    for(int i=0;i<count;i++){if(offset>bytes-4)throw new Exception("Truncated private ACL snapshot");IntPtr ace=IntPtr.Add(acl,offset);int size=unchecked((ushort)Marshal.ReadInt16(ace,2));if(size<8||size>bytes-offset)throw new Exception("Invalid private ACE snapshot");byte type=Marshal.ReadByte(ace);if(type==0||type==1||type==5||type==6||type==9||type==10||type==11||type==12)Marshal.WriteInt32(ace,4,unchecked((int)MapSnapshotMask(unchecked((uint)Marshal.ReadInt32(ace,4)),mapping)));offset+=size;}
   }
   // User object mappings are published in Microsoft's window-station/desktop
   // security-and-access-rights documentation. Kernel maps are type-specific:
@@ -137,6 +151,7 @@ public static class NearlyQaStandardUser {
       AccessProof defaultProof=DefaultDaclAccess(filtered,impersonation),processProof=KernelObjectAccess(process,impersonation,2),threadProof=KernelObjectAccess(thread,impersonation,3);
       Console.WriteLine("{\"schemaVersion\":1,\"kind\":\"installerQaStartupAccess\",\"windowStation\":"+stationProof.Json()+",\"desktopAccess\":"+desktopProof.Json()+",\"tokenDefaultDacl\":"+defaultProof.Json()+",\"childProcess\":"+processProof.Json()+",\"childThread\":"+threadProof.Json()+"}");
       Console.WriteLine("{\"schemaVersion\":1,\"kind\":\"installerQaStartupLabels\",\"windowStation\":"+LabelAccess(station,true).Json()+",\"desktopAccess\":"+LabelAccess(desktop,true).Json()+",\"childProcess\":"+LabelAccess(process,false).Json()+",\"childThread\":"+LabelAccess(thread,false).Json()+"}");
+      RequireChildObjectAccess(processProof,threadProof);
     }finally{if(desktop!=IntPtr.Zero)CloseDesktop(desktop);if(station!=IntPtr.Zero)CloseWindowStation(station);if(impersonation!=IntPtr.Zero)CloseHandle(impersonation);}
   }
   static void SetOwnerAndMedium(IntPtr token,IntPtr parent){IntPtr user=Info(parent,1),owner=Marshal.AllocHGlobal(IntPtr.Size),medium=IntPtr.Zero,label=IntPtr.Zero;try{Marshal.WriteIntPtr(owner,Marshal.ReadIntPtr(user));Check(SetTokenInformation(token,4,owner,(uint)IntPtr.Size),"Set filtered token owner");Check(ConvertStringSidToSidW("S-1-16-8192",out medium),"Medium integrity SID");uint sidSize=GetLengthSid(medium);int header=Marshal.SizeOf(typeof(SidAttributes));label=Marshal.AllocHGlobal(header+(int)sidSize);IntPtr sid=IntPtr.Add(label,header);Check(CopySid(sidSize,sid,medium),"Copy medium integrity SID");Marshal.StructureToPtr(new SidAttributes{Sid=sid,Attributes=0x20},label,false);Check(SetTokenInformation(token,TokenIntegrityLevel,label,(uint)header+sidSize),"Set medium integrity");}finally{Marshal.FreeHGlobal(user);Marshal.FreeHGlobal(owner);if(label!=IntPtr.Zero)Marshal.FreeHGlobal(label);if(medium!=IntPtr.Zero)LocalFree(medium);}}
@@ -148,7 +163,7 @@ public static class NearlyQaStandardUser {
       Check(OpenProcessToken(GetCurrentProcess(),0x8B,out current),"Open own token");Check(ConvertStringSidToSidW("S-1-5-32-544",out admin),"Administrators SID");
       // DISABLE_MAX_PRIVILEGE | LUA_TOKEN. The administrative group is explicitly
       // deny-only; LUA filtering must also clear TokenElevation, or fail closed.
-      Check(CreateRestrictedToken(current,1|4,1,new[]{new SidAttributes{Sid=admin}},0,IntPtr.Zero,0,IntPtr.Zero,out filtered),"Create LUA restricted own token");SetOwnerAndMedium(filtered,current);VerifyStandard(filtered,current,admin);
+      Check(CreateRestrictedToken(current,1|4,1,new[]{new SidAttributes{Sid=admin}},0,IntPtr.Zero,0,IntPtr.Zero,out filtered),"Create LUA restricted own token");SetOwnerAndMedium(filtered,current);SetFilteredDefaultDacl(filtered,current);VerifyStandard(filtered,current,admin);
       SecurityAttributes security=new SecurityAttributes{Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)),Inherit=true};
       output=CreateFileW(log,0x40000000,3,ref security,1,0x80,IntPtr.Zero);Check(output!=new IntPtr(-1),"Create exclusive guest log");
       input=CreateFileW("NUL",0x80000000,3,ref security,3,0x80,IntPtr.Zero);Check(input!=new IntPtr(-1),"Open guest stdin");
@@ -169,10 +184,39 @@ public static class NearlyQaStandardUser {
     }
   }
   public static void PureSelfTest(){
+    string testUser="S-1-5-21-11-22-33-1001";
+    RawSecurityDescriptor privateDescriptor=new RawSecurityDescriptor(BuildDefaultDaclSddl(testUser));
+    if(privateDescriptor.DiscretionaryAcl==null||privateDescriptor.DiscretionaryAcl.Count!=3||(privateDescriptor.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0)throw new Exception("Expected private three-principal default DACL");
+    string[] expectedSids={testUser,"S-1-5-18","S-1-5-32-544"};
+    for(int i=0;i<3;i++){CommonAce ace=privateDescriptor.DiscretionaryAcl[i] as CommonAce;if(ace==null||ace.AceQualifier!=AceQualifier.AccessAllowed||ace.AceFlags!=AceFlags.None||unchecked((uint)ace.AccessMask)!=0x10000000||ace.SecurityIdentifier.Value!=expectedSids[i])throw new Exception("Unsafe default DACL template");}
+    byte[] templateBytes=new byte[privateDescriptor.BinaryLength];privateDescriptor.GetBinaryForm(templateBytes,0);IntPtr template=Marshal.AllocHGlobal(templateBytes.Length);
+    try{Marshal.Copy(templateBytes,0,template,templateBytes.Length);NormalizeSnapshotDacl(template,DiagnosticMapping(2));Marshal.Copy(template,templateBytes,0,templateBytes.Length);RawSecurityDescriptor mapped=new RawSecurityDescriptor(templateBytes,0);for(int i=0;i<3;i++)if(unchecked((uint)((CommonAce)mapped.DiscretionaryAcl[i]).AccessMask)!=DiagnosticMapping(2).All)throw new Exception("Generic all was not mapped in private snapshot");}finally{Marshal.FreeHGlobal(template);}
+    if(MapSnapshotMask(0xa0000000,DiagnosticMapping(2))!=0x120410||MapSnapshotMask(0x80000000,DiagnosticMapping(1))!=0x20041||MapSnapshotMask(0x120410,DiagnosticMapping(2))!=0x120410)throw new Exception("Generic read/execute snapshot mapping regressed");
+    foreach(string invalid in new[]{"",testUser+")(A;;GA;;;WD)","WD","S-1-5-32-544"}){bool rejected=false;try{BuildDefaultDaclSddl(invalid);}catch{rejected=true;}if(!rejected)throw new Exception("Unsafe current user SID accepted");}
+    RequireChildObjectAccess(new AccessProof{Allowed=true},new AccessProof{Allowed=true});
+    foreach(int denied in new[]{0,1}){bool rejected=false;try{RequireChildObjectAccess(new AccessProof{Allowed=denied!=0},new AccessProof{Allowed=denied!=1});}catch{rejected=true;}if(!rejected)throw new Exception("Insufficient suspended-object access accepted");}
+    bool errored=false;try{RequireChildObjectAccess(new AccessProof{Allowed=true,Error=5},new AccessProof{Allowed=true});}catch{errored=true;}if(!errored)throw new Exception("Object access query error accepted");
     for(int kind=0;kind<4;kind++){GenericMapping mapping=DiagnosticMapping(kind);if(mapping.Read==mapping.All||mapping.Write==mapping.All||mapping.Execute==mapping.All||(DiagnosticMinimum(kind)&mapping.All)!=DiagnosticMinimum(kind))throw new Exception("Invalid object-specific generic mapping");}
     if(DiagnosticMapping(0).Read!=0x20303||DiagnosticMapping(0).Write!=0x2001c||DiagnosticMapping(0).Execute!=0x20060||DiagnosticMapping(1).Read!=0x20041||DiagnosticMapping(1).Write!=0x200be||DiagnosticMapping(1).Execute!=0x20100||DiagnosticMinimum(0)!=0x22||DiagnosticMinimum(1)!=0xc3||DiagnosticMapping(2).Read==DiagnosticMapping(3).Read)throw new Exception("Object-specific diagnostic masks regressed");
     if(Quote("")!="\"\""||Quote("a b")!="\"a b\""||Quote("a\"b")!="\"a\\\"b\""||Quote("C:\\end\\")!="\"C:\\end\\\\\"")throw new Exception("CRT quoting failed");
     if(Command("C:\\pwsh.exe","C:\\日本語 space\\guest.ps1",new[]{"-Action","ui"}).IndexOf("日本語 space",StringComparison.Ordinal)<0)throw new Exception("Unicode argument lost");
     RequireStandard(false,8192,false,true,true);foreach(int invalid in new[]{0,1,2,3,4}){bool rejected=false;try{RequireStandard(invalid==0,invalid==1?12288u:8192u,invalid==2,invalid!=3,invalid!=4);}catch{rejected=true;}if(!rejected)throw new Exception("Unsafe token proof accepted");}
   }
+  static string BuildDefaultDaclSddl(string user){
+    // Account SID only, obtained from our actual TokenUser in production.
+    SecurityIdentifier sid=new SecurityIdentifier(user);if(sid.Value!=user||!sid.IsAccountSid()||!user.StartsWith("S-1-5-21-",StringComparison.Ordinal))throw new ArgumentException("Expected exact current-user account SID");
+    return "D:P(A;;GA;;;"+sid.Value+")(A;;GA;;;SY)(A;;GA;;;BA)";
+  }
+  static void SetFilteredDefaultDacl(IntPtr filtered,IntPtr parent){
+    IntPtr user=Info(parent,1),descriptor=IntPtr.Zero,tokenDacl=IntPtr.Zero;
+    try{
+      string sid=new SecurityIdentifier(Marshal.ReadIntPtr(user)).Value;RawSecurityDescriptor sd=new RawSecurityDescriptor(BuildDefaultDaclSddl(sid));byte[] bytes=new byte[sd.BinaryLength];sd.GetBinaryForm(bytes,0);descriptor=Marshal.AllocHGlobal(bytes.Length);Marshal.Copy(bytes,0,descriptor,bytes.Length);
+      bool present,defaulted;IntPtr acl;Check(GetSecurityDescriptorDacl(descriptor,out present,out acl,out defaulted),"Read private default DACL template");if(!present||acl==IntPtr.Zero)throw new Exception("Private default DACL required");
+      tokenDacl=Marshal.AllocHGlobal(IntPtr.Size);Marshal.WriteIntPtr(tokenDacl,acl);
+      // Only this newly created, launcher-owned filtered token is adjusted.
+      // Existing desktop/window-station/process/file ACLs remain untouched.
+      Check(SetTokenInformation(filtered,TokenDefaultDacl,tokenDacl,(uint)IntPtr.Size),"Set own filtered token default DACL");
+    }finally{if(tokenDacl!=IntPtr.Zero)Marshal.FreeHGlobal(tokenDacl);if(descriptor!=IntPtr.Zero)Marshal.FreeHGlobal(descriptor);Marshal.FreeHGlobal(user);}
+  }
+  static void RequireChildObjectAccess(AccessProof process,AccessProof thread){if(!process.Allowed||!thread.Allowed||process.Error!=0||thread.Error!=0)throw new Exception("Filtered user must have full access to own suspended process and thread");}
 }

@@ -24,6 +24,14 @@ test('pre-resume startup diagnostics evaluate real descriptors without changing 
   assert.ok(source.indexOf('EmitStartupAccessDiagnostics(filtered,current,child.hProcess,child.hThread)')<source.indexOf('ResumeThread(child.hThread)'));
   assert.doesNotMatch(source,/SetUserObjectSecurity|SetNamedSecurityInfo|SetSecurityInfo|SetFileSecurity/);
 });
+
+test('filtered token gets a private default DACL and actual suspended objects must grant full access',async()=>{
+  const source=await fs.readFile(helper,'utf8');
+  for(const marker of ['SetFilteredDefaultDacl','BuildDefaultDaclSddl','NormalizeSnapshotDacl','RequireChildObjectAccess','TokenDefaultDacl=6'])assert.ok(source.includes(marker),marker);
+  assert.ok(source.indexOf('SetFilteredDefaultDacl(filtered,current)')<source.indexOf('CreateProcessAsUserW(filtered'));
+  assert.ok(source.indexOf('RequireChildObjectAccess(processProof,threadProof)')<source.indexOf('ResumeThread(child.hThread)'));
+  assert.doesNotMatch(source,/SetUserObjectSecurity|SetNamedSecurityInfo|SetSecurityInfo|SetFileSecurity/);
+});
 test('native launcher compiles and pure argument/token models run without invoking Windows launcher',{skip:process.platform!=='win32'},async()=>{
   const source=await fs.readFile(helper,'utf8').catch(()=>null);assert.ok(source,'Native standard-user launcher is missing');
   const command=`$ErrorActionPreference='Stop'\nAdd-Type -Path ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fileURLToPath(helper)).toString('base64')}')))\n[NearlyQaStandardUser]::PureSelfTest()\n'Pure standard-user launcher models passed'`;
