@@ -11,14 +11,52 @@ on:
         description: Type installer-qa followed by a space and the exact controller SHA
         type: string
         required: true
+      diagnosis_only:
+        description: Read only existing hosted fixed drive root metadata without installer preparation
+        type: boolean
+        default: false
 permissions: {}
 concurrency:
   group: nearly-manual-installer-qa
   cancel-in-progress: false
 jobs:
+  root-diagnosis:
+    name: Read-only hosted drive root diagnosis
+    if: inputs.diagnosis_only && github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory')
+    runs-on: windows-2025
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      QA_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      QA_CONFIRMATION: ${{ inputs.confirmation }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require exact manual confirmation before root metadata reads
+        run: |
+          node --input-type=module -e "import {validateContext} from './scripts/installer-qa.mjs'; validateContext(process.env);"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Read only bounded existing fixed drive roots
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-StrictMode -Version Latest
+          . ./scripts/installer-qa-root-inventory.ps1
+          $inventory=Get-NearlyHostedRootInventory
+          Write-Host (ConvertTo-Json -InputObject $inventory -Depth 8 -Compress)
+          if (!$inventory.complete) { throw 'Root inventory incomplete; no admission or qualification result' }
   guest:
     name: Fresh guest / ${{ matrix.phase || 'candidate' }} / ${{ matrix.scenario }} / ${{ matrix.destination }}
-    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory')
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory') && !inputs.diagnosis_only
     runs-on: windows-2025
     timeout-minutes: 180
     strategy:
