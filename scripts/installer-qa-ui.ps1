@@ -296,7 +296,9 @@ function Dismiss-Rejection([IntPtr]$Window) {
   }
 }
 function Get-ProtectionDialog([IntPtr]$Window) {
-  if ([NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770' -or [NearlyOwnedUi]::Text($Window,$ownedProcess.Id) -cne [NearlyOwnedUi]::Text($main,$ownedProcess.Id)) { return }
+  # Pinned MUI2 Directory.nsh uses Caption " ": Ui.c appends that single
+  # ASCII space to the main title; MessageBox uses the base g_caption alone.
+  if ([NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770' -or ([NearlyOwnedUi]::Text($Window,$ownedProcess.Id)+' ') -cne [NearlyOwnedUi]::Text($main,$ownedProcess.Id)) { return }
   $children=@(Controls $Window)
   $specs=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Static' } | ForEach-Object { Get-ProtectionSpec ([NearlyOwnedUi]::Text($_,$ownedProcess.Id)) $InstallRoot $Language })
   if ($specs.Count -ne 1) { return }

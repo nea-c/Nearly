@@ -434,13 +434,15 @@ $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 class NearlyOwnedUi {
  static [string]$Mode='ok'
  static [string]$Message=''
+ static [string]$ModalCaption='Nearly Setup'
+ static [string]$MainCaption='Nearly Setup '
  static [int]$Inputs=0
  static [int]$LastChoice=0
  static [bool]$Gone=$false
  static [void] Command([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){if($parent -ne 1 -or $button -ne $id -or $pidValue -ne 7 -or $id -notin @(6,7)){throw 'Unexpected consent input'};[NearlyOwnedUi]::Inputs++;[NearlyOwnedUi]::LastChoice=$id;[NearlyOwnedUi]::Gone=$true}
  static [void] ClickConsent([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){[NearlyOwnedUi]::Command($parent,$button,$pidValue,$id)}
  static [string] Class([IntPtr]$h,[int]$pidValue){if($pidValue -ne 7){throw 'Foreign PID'};if($h -eq 1 -or $h -eq 10){return '#32770'};if($h -eq 2){return 'Static'};return 'Button'}
- static [string] Text([IntPtr]$h,[int]$pidValue){if($h -eq 2){if([NearlyOwnedUi]::Mode -eq 'message'){return 'arbitrary sensitive text'};return [NearlyOwnedUi]::Message};if($h -eq 1 -or $h -eq 10){if($h -eq 1 -and [NearlyOwnedUi]::Mode -eq 'caption'){return 'Foreign'};return 'Nearly Setup'};if([NearlyOwnedUi]::Mode -eq 'button'){return 'Delete'};if($h -eq 6){return '&Yes'};return '&No'}
+ static [string] Text([IntPtr]$h,[int]$pidValue){if($h -eq 2){if([NearlyOwnedUi]::Mode -eq 'message'){return 'arbitrary sensitive text'};return [NearlyOwnedUi]::Message};if($h -eq 10){return [NearlyOwnedUi]::MainCaption};if($h -eq 1){if([NearlyOwnedUi]::Mode -eq 'caption'){return 'Foreign'};return [NearlyOwnedUi]::ModalCaption};if([NearlyOwnedUi]::Mode -eq 'button'){return 'Delete'};if($h -eq 6){return '&Yes'};return '&No'}
  static [int] GetDlgCtrlID([IntPtr]$h){return [int]$h}
  static [IntPtr] Parent([IntPtr]$h,[int]$pidValue){if([NearlyOwnedUi]::Mode -eq 'parent'){return [IntPtr]9};return [IntPtr]1}
  static [bool] IsWindowVisible([IntPtr]$h){return [NearlyOwnedUi]::Mode -ne 'hidden'}
@@ -456,6 +458,24 @@ function Controls([IntPtr]$Parent) {if($Parent -eq [IntPtr]::Zero){if(![NearlyOw
 $ownedProcess=[pscustomobject]@{Id=7};$main=[IntPtr]10;$InstallRoot='D:\Nearly QA generated';$Language='en'
 $c=Get-UiCaptions 'en';[NearlyOwnedUi]::Message=$c.ProtectNew.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$InstallRoot)
 if((Get-ProtectionDialog ([IntPtr]1)).kind -cne 'New'){throw 'Known protection dialog not recognized'}
+foreach($lang in @('en','ja')){
+ $Language=$lang;$labels=Get-UiCaptions $lang
+ foreach($kind in @('New','Existing')){
+  [NearlyOwnedUi]::Message=$labels.('Protect'+$kind).Replace('$\r$\n',(([char]13).ToString()+[char]10)).Replace('$INSTDIR',$InstallRoot).Replace('$NearlyPreservedRoot',('D:\.Nearly-preserved-'+('a'*32)))
+  if((Get-ProtectionDialog ([IntPtr]1)).kind -cne $kind){throw 'Actual directory-caption consent not recognized'}
+  foreach($bad in @('Foreign','Nearly Setup!','Nearly Setup ',('Nearly Setup'+[char]10),'Nearly Setup  ')){
+   [NearlyOwnedUi]::ModalCaption=$bad
+   if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw 'Near or foreign modal caption accepted'}
+  }
+  [NearlyOwnedUi]::ModalCaption='Nearly Setup'
+ }
+}
+$Language='en';[NearlyOwnedUi]::Message=$c.ProtectNew.Replace('$\r$\n',(([char]13).ToString()+[char]10)).Replace('$INSTDIR',$InstallRoot)
+foreach($bad in @('Nearly Setup','Nearly Setup  ',('Nearly Setup '+[char]10),'Foreign ')){
+ [NearlyOwnedUi]::MainCaption=$bad
+ if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw 'Unexpected main caption accepted'}
+}
+[NearlyOwnedUi]::MainCaption='Nearly Setup '
 foreach($mode in @('message','caption','button','parent','hidden','disabled','duplicate')){[NearlyOwnedUi]::Mode=$mode;if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw ('Unsafe consent accepted: '+$mode)}}
 [NearlyOwnedUi]::Mode='default';$rejected=$false;try{Get-ProtectionDialog ([IntPtr]1)}catch{$rejected=$true};if(!$rejected){throw 'Default Yes accepted'}
 Assert-ConsentTransition 'Existing' 'Existing' 'No' $false
