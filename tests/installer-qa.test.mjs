@@ -397,3 +397,16 @@ test('workflow remains manual, read-only and uploads only validated public evide
   assert.match(text,/destination: \[default, custom, drive\]/);
   assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
 });
+
+test('unavailable historical source remains a failed qualification while independent candidate checks can continue',async()=>{
+  assert.equal(typeof qa.historicalQualification,'function');
+  assert.equal(await qa.historicalQualification(async()=>{}),null);
+  const unavailable=Object.assign(new Error('Pinned source unavailable'),{code:'PINNED_SOURCE_UNAVAILABLE'});
+  assert.equal(await qa.historicalQualification(async()=>{throw unavailable}),unavailable);
+  for(const failure of [new Error('Bad signature'),Object.assign(new Error('API denied'),{code:'ACCESS_DENIED'})]){
+    await assert.rejects(()=>qa.historicalQualification(async()=>{throw failure}),error=>error===failure);
+  }
+  const source=await fs.readFile(new URL('../scripts/installer-qa.mjs',import.meta.url),'utf8');
+  assert.ok(source.indexOf('if(historicalFailure)throw historicalFailure')>source.indexOf("await ps('uninstall',[],env)"));
+  assert.ok(source.indexOf('if(historicalFailure)throw historicalFailure')<source.indexOf('destination,source:SOURCE,passed:true'));
+});

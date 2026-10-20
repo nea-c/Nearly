@@ -255,7 +255,10 @@ async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,c
 }
 const sourceRequest={repository:'nea-c/Nearly',commit:SOURCE.sourceCommit,tag:'r2.0',version:'2.0.0',workflowCommit:SOURCE.sourceCommit,runId:SOURCE.sourceRunId,runAttempt:SOURCE.sourceRunAttempt,mode:'verify-signature'};
 export function validatePinnedArtifact(artifact,repositoryId){return validateArtifact(artifact,sourceRequest,{id:SOURCE.artifactId,role:'signed',digest:SOURCE.zipSha256,repositoryId});}
-async function api(suffix,token){const response=await fetch(`https://api.github.com/repos/nea-c/Nearly${suffix}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(30000),redirect:'error'});if(!response.ok)fail('Pinned GitHub source unavailable (expired/deleted artifacts have no fallback)');return response.json();}
+async function api(suffix,token){const response=await fetch(`https://api.github.com/repos/nea-c/Nearly${suffix}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(30000),redirect:'error'});if(!response.ok){const error=Error(`Pinned GitHub source unavailable (HTTP ${response.status}; no fallback)`);if([404,410].includes(response.status))error.code='PINNED_SOURCE_UNAVAILABLE';throw error;}return response.json();}
+export async function historicalQualification(qualify){
+  try{await qualify();return null;}catch(error){if(error.code==='PINNED_SOURCE_UNAVAILABLE')return error;throw error;}
+}
 async function downloadSigned(p,token){
   if(!token)fail('Read-only GitHub artifact access required');
   const [repo,artifact,run]=await Promise.all([api('',token),api(`/actions/artifacts/${SOURCE.artifactId}`,token),api(`/actions/runs/${SOURCE.sourceRunId}/attempts/${SOURCE.sourceRunAttempt}`,token)]);
@@ -329,14 +332,17 @@ export async function run(e=process.env){
   try{
     if(await execute('git',['rev-parse','HEAD'],{capture:true,env:baseEnv})!==c.controllerSha)fail('Checkout differs from reviewed controller');
     await loadTrustedPublicKey(root);await requireCachedTools(e.LOCALAPPDATA);
+    await fs.mkdir(path.join(p.runRoot,'settings'));
+    for(const [name,bytes]of Object.entries(settingsFixture()))await fs.writeFile(path.join(p.runRoot,'settings',name),bytes,{flag:'wx'});
+    const historicalFailure=await historicalQualification(async()=>{
     await downloadSigned(p,e.GH_TOKEN);await ps('extract');
     const signed=path.join(p.runRoot,'signed'),manifest=JSON.parse(await regular(path.join(signed,'signed-manifest.json'),131072));
     const checked=await verifySignedBundle(signed,sourceRequest,{manifestHash:SOURCE.manifestHash,unsignedArtifactId:manifest.unsignedArtifactId,unsignedManifestHash:manifest.unsignedManifestHash,toolArtifactId:manifest.toolArtifactId,toolManifestHash:manifest.toolManifestHash});
     if(checked.assets[0].sha256!==SOURCE.installerSha256)fail('Pinned production installer mismatch');
-    await fs.mkdir(path.join(p.runRoot,'settings'));
-    for(const [name,bytes]of Object.entries(settingsFixture()))await fs.writeFile(path.join(p.runRoot,'settings',name),bytes,{flag:'wx'});
     await ps('production',['-Setup',path.join(signed,'Nearly_r2.0_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);results.push({case:'signed-production-setup-uninstall',passed:true});
     console.log('Signed production setup/reinstall/uninstall: all four shortcut choices and generated settings preservation passed.');
+    });
+    if(historicalFailure){results.push({case:'signed-production-setup-uninstall',passed:false});console.log('Pinned historical source unavailable. Independent candidate QA continues; overall qualification will remain failed.');}
     const signer=createFixtureSigner(),token=randomBytes(32).toString('hex');
     const source=await buildFixture(p,p.sourceVersion,signer,token,baseEnv),target=await buildFixture(p,p.targetVersion,signer,token,baseEnv);
     const targetBytes=await regular(target.setup),signature=signer.sign(targetBytes,target.payloadSha256);
@@ -366,6 +372,7 @@ export async function run(e=process.env){
       console.log('QA causal proof: '+JSON.stringify(proof));
       await ps('uninstall',[],env);results.push({case:scenario,passed:true,outcome});
     }
+    if(historicalFailure)throw historicalFailure;
     await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destination,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
     if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario,destination));
     await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:true,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
