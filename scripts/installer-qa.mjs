@@ -292,7 +292,10 @@ export function instrumentCandidatePolicyDiagnostics(template){
     if(result.split(marker).length!==2)fail('Candidate diagnostic boundary missing or ambiguous');
     // Failure-only observation in disposable QA fixtures. No admission, write,
     // signature or exit semantics change; production sources are untouched.
-    result=result.replace(marker,`${marker}\n  MessageBox MB_ICONSTOP|MB_OK "${message}"`);
+    // LeafKind=36 is the expected nonempty-folder refusal. Let its ordinary
+    // rejection dialog run unchanged so QA can verify refusal and preservation.
+    const expectedRefusal=label==='nearly_plan_bad'?'\n  StrCmpS $0 36 +2':'';
+    result=result.replace(marker,`${marker}${expectedRefusal}\n  MessageBox MB_ICONSTOP|MB_OK "${message}"`);
   }
   return result;
 }

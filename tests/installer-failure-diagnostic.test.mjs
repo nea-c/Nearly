@@ -8,8 +8,29 @@ import {instrumentCandidatePolicyDiagnostics} from '../scripts/installer-qa.mjs'
 test('disposable candidate diagnostics change only the two exact failure boundaries',async()=>{
  const original=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
  const observed=instrumentCandidatePolicyDiagnostics(original);
- assert.equal(observed.replace('\n  MessageBox MB_ICONSTOP|MB_OK "NEARLY_QA_POLICY_HELPER"','').replace('\n  MessageBox MB_ICONSTOP|MB_OK "NEARLY_QA_POLICY_EXIT=$0"',''),original);
+ assert.equal(observed.replace('\n  MessageBox MB_ICONSTOP|MB_OK "NEARLY_QA_POLICY_HELPER"','').replace('\n  StrCmpS $0 36 +2\n  MessageBox MB_ICONSTOP|MB_OK "NEARLY_QA_POLICY_EXIT=$0"',''),original);
  for(const bad of [observed,original.replace('  nearly_plan_bad:','  missing:'),original+'\n  nearly_policy_bad:',null])assert.throws(()=>instrumentCandidatePolicyDiagnostics(bad));
+});
+
+test('expected leaf-kind refusal still cleans up and rejects without a diagnostic modal',async()=>{
+ const original=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
+ const native=await fs.readFile(new URL('../src-tauri/src/install_prepare.rs',import.meta.url),'utf8');
+ assert.match(native,/LeafKind=36,/,'The exact QA-only native refusal code must remain bound');
+ const body=instrumentCandidatePolicyDiagnostics(original).match(/  nearly_plan_bad:\r?\n([\s\S]*?)FunctionEnd/)[1];
+ const lines=body.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+ assert.deepEqual(lines,['StrCmpS $0 36 +2','MessageBox MB_ICONSTOP|MB_OK "NEARLY_QA_POLICY_EXIT=$0"','Call NearlyCleanupPolicyHelper','Call NearlyRejectRoot']);
+ for(const code of ['36','036','5','0','10','21','46','49','error','timeout']){
+  const events=[];let pc=0;
+  while(pc<lines.length){
+   const line=lines[pc];
+   if(line==='StrCmpS $0 36 +2'){pc+=code==='36'?2:1;continue;}
+   if(line.startsWith('MessageBox '))events.push('diagnostic');
+   else if(line.startsWith('Call '))events.push(line.slice(5));
+   else assert.fail('Unexpected QA refusal instruction');
+   pc++;
+  }
+  assert.deepEqual(events,[...(code==='36'?[]:['diagnostic']),'NearlyCleanupPolicyHelper','NearlyRejectRoot'],code);
+ }
 });
 
 test('candidate UI diagnostic classifier emits only anchored fixed stage or bounded exit code',{skip:process.platform!=='win32'},()=>{
