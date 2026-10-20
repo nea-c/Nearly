@@ -485,9 +485,9 @@ try {
   Click-Id $main 1
   $transition=Wait-DirectoryTransition
   if ($transition.kind -eq 'Reject') {
+    Screenshot 'destination-rejected' $transition.window
     if ($Mode -ne 'Reject') { throw 'Destination unexpectedly rejected' }
     $stage='destination-rejection'
-    Screenshot 'destination-rejected' $transition.window
     Dismiss-Rejection $transition.window
     Assert-NoInstallMutation
     Write-UiObservation 'before-reject-cancel'

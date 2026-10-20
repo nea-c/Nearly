@@ -15,7 +15,7 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const hash=b=>createHash('sha256').update(b).digest('hex');
 const exact=(r,v)=>typeof v==='string'&&r.exec(v)?.[0]===v;
 const fail=m=>{throw Error(m);};
-export const SOURCE=Object.freeze({sourceCommit:'b56f01ddff9698ef316dfa775c1e8a441965674f',artifactId:'12158897824',sourceRunId:'39185149137',sourceRunAttempt:'1',zipSha256:'e8baf6d70cdfe9278e8ad162d75c989a434226cec9da04b62b9a691895ec9526',installerSha256:'71d2163d75489a1845d46291b3b046d381e619e0748d75216c83accc92e9fcc5',manifestHash:'9c6d56d8ae841dec48a56cbb07b3585fc0326173ddd60ef32b8d6890a80d2866'});
+export const SOURCE=Object.freeze({sourceCommit:'0dd697f2d832ec9fd07e9278559e18819b65bd3a',artifactId:'12230567816',sourceRunId:'39288652319',sourceRunAttempt:'1',zipSha256:'5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480',installerSha256:'fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc',manifestHash:'75796ed00c47a2d1b93d734a471cf81b0a52d30c87940381ca7b2b35dd713bcc'});
 function canonicalWindows(value){
   if(typeof value!=='string'||!exact(/[A-Za-z]:\\[^\x00-\x1f<>"|?*]+/,value)||value.slice(2).includes(':')||value.includes('/')||value.split('\\').some(x=>x==='.'||x==='..'||/[. ]$/.test(x))||path.win32.normalize(value)!==value)fail('Canonical local Windows path required');
   return value;
@@ -253,7 +253,7 @@ async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,c
     child.once('error',finish);child.once('exit',(code,signal)=>finish(code===0?null:Error(`QA child failed (${signal??code})`)));
   });
 }
-const sourceRequest={repository:'nea-c/Nearly',commit:SOURCE.sourceCommit,tag:'r2.0',version:'2.0.0',workflowCommit:SOURCE.sourceCommit,runId:SOURCE.sourceRunId,runAttempt:SOURCE.sourceRunAttempt,mode:'verify-signature'};
+const sourceRequest={repository:'nea-c/Nearly',commit:SOURCE.sourceCommit,tag:'r3.1',version:'3.1.0',workflowCommit:SOURCE.sourceCommit,runId:SOURCE.sourceRunId,runAttempt:SOURCE.sourceRunAttempt,mode:'release'};
 export function validatePinnedArtifact(artifact,repositoryId){return validateArtifact(artifact,sourceRequest,{id:SOURCE.artifactId,role:'signed',digest:SOURCE.zipSha256,repositoryId});}
 async function api(suffix,token){const response=await fetch(`https://api.github.com/repos/nea-c/Nearly${suffix}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(30000),redirect:'error'});if(!response.ok){const error=Error(`Pinned GitHub source unavailable (HTTP ${response.status}; no fallback)`);if([404,410].includes(response.status))error.code='PINNED_SOURCE_UNAVAILABLE';throw error;}return response.json();}
 export async function historicalQualification(qualify){
@@ -323,6 +323,11 @@ export async function preflight(e=process.env){
   const c=validateContext(e),destination=validateDestination(e.QA_DESTINATION);validateScenario(e.QA_SCENARIO);
   return guestRunner(createPlan(c,destination),cleanChildEnv(e))('preflight');
 }
+export async function guardProbe(e=process.env){
+  const c=validateContext(e),destination=validateDestination(e.QA_DESTINATION);validateScenario(e.QA_SCENARIO);
+  const nsis=await requireCachedTools(e.LOCALAPPDATA);
+  return guestRunner(createPlan(c,destination),{...cleanChildEnv(e),NEARLY_NSIS_READONLY_QA:'1',NEARLY_NSIS_REQUIRE_PRIVATE_TEMP:'1',NEARLY_NSIS_ROOT:nsis})('guard-probe');
+}
 export async function run(e=process.env){
   const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION),p=createPlan(c,destination);validatePlan(p,c,destination);
   const baseEnv=cleanChildEnv(e),ps=guestRunner(p,baseEnv);
@@ -339,7 +344,7 @@ export async function run(e=process.env){
     const signed=path.join(p.runRoot,'signed'),manifest=JSON.parse(await regular(path.join(signed,'signed-manifest.json'),131072));
     const checked=await verifySignedBundle(signed,sourceRequest,{manifestHash:SOURCE.manifestHash,unsignedArtifactId:manifest.unsignedArtifactId,unsignedManifestHash:manifest.unsignedManifestHash,toolArtifactId:manifest.toolArtifactId,toolManifestHash:manifest.toolManifestHash});
     if(checked.assets[0].sha256!==SOURCE.installerSha256)fail('Pinned production installer mismatch');
-    await ps('production',['-Setup',path.join(signed,'Nearly_r2.0_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);results.push({case:'signed-production-setup-uninstall',passed:true});
+    await ps('production',['-Setup',path.join(signed,'Nearly_r3.1_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);results.push({case:'signed-production-setup-uninstall',passed:true});
     console.log('Signed production setup/reinstall/uninstall: all four shortcut choices and generated settings preservation passed.');
     });
     if(historicalFailure){results.push({case:'signed-production-setup-uninstall',passed:false});console.log('Pinned historical source unavailable. Independent candidate QA continues; overall qualification will remain failed.');}
@@ -383,6 +388,6 @@ export async function run(e=process.env){
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  if(process.argv.length!==3||!['run','preflight'].includes(process.argv[2])){console.error('Only manually authorized hosted guest commands are supported');process.exitCode=1;}
-  else (process.argv[2]==='preflight'?preflight():run()).catch(error=>{console.error(error.message);process.exitCode=1;});
+  if(process.argv.length!==3||!['run','preflight','guard-probe'].includes(process.argv[2])){console.error('Only manually authorized hosted guest commands are supported');process.exitCode=1;}
+  else (process.argv[2]==='preflight'?preflight():process.argv[2]==='guard-probe'?guardProbe():run()).catch(error=>{console.error(error.message);process.exitCode=1;});
 }

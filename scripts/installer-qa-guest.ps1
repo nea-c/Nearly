@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('preflight','extract','production','ui','drive','source','launch','verify','uninstall')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('preflight','guard-probe','extract','production','ui','drive','source','launch','verify','uninstall')][string]$Action,
   [Parameter(Mandatory)][string]$RunRoot,
   [string]$Setup,
   [string]$ExpectedPayload,
@@ -192,6 +192,14 @@ if ($Action -eq 'preflight') {
   if (!$available) { throw 'WebView2 unavailable; no runtime download and no skipped pass' }
   return
 }
+if ($Action -eq 'guard-probe') {
+  Assert-NoApp
+  if (Test-Path -LiteralPath $RunRoot) { throw 'Guard probe must precede run-root creation' }
+  if ($env:NEARLY_NSIS_READONLY_QA -cne '1' -or $env:NEARLY_NSIS_REQUIRE_PRIVATE_TEMP -cne '1' -or $env:NEARLY_NSIS_ROOT -cne (Join-Path $env:LOCALAPPDATA 'tauri\NSIS')) { throw 'Exact read-only guard probe context required' }
+  & node --test '--test-name-pattern=temporary plugin ancestry' (Join-Path $PSScriptRoot '..\src-tauri\windows\readonly-root.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
+  return
+}
 $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.destinationKind -cne $env:QA_DESTINATION -or $plan.installRoot -cne $destinations[$env:QA_DESTINATION] -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
@@ -273,10 +281,10 @@ public static class NearlyQaDirectoryIdentity {
 switch ($Action) {
   'extract' {
     $zipPath=Join-Path $RunRoot 'signed.zip'; Assert-UnderRun $zipPath
-    if ((Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'e8baf6d70cdfe9278e8ad162d75c989a434226cec9da04b62b9a691895ec9526') { throw 'Pinned ZIP mismatch' }
+    if ((Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne '5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480') { throw 'Pinned ZIP mismatch' }
     $zip=[IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
-      $expected=@('Nearly_r2.0_x64-setup.exe','Nearly_r2.0_x64-setup.exe.sha256','Nearly_r2.0_x64-setup.exe.sig','signed-manifest.json')
+      $expected=@('Nearly_r3.1_x64-setup.exe','Nearly_r3.1_x64-setup.exe.sha256','Nearly_r3.1_x64-setup.exe.sig','signed-manifest.json')
       if ($zip.Entries.Count -ne 4) { throw 'Unexpected signed ZIP entries' }
       $seen=@{}
       foreach ($entry in $zip.Entries) { if ($entry.FullName -cnotin $expected -or $seen.ContainsKey($entry.FullName) -or $entry.Length -le 0 -or $entry.Length -gt 67108864 -or (($entry.ExternalAttributes -shr 16) -band 0xf000) -eq 0xa000) { throw 'Unsafe ZIP member' }; $seen[$entry.FullName]=$true }
@@ -289,9 +297,9 @@ switch ($Action) {
     Assert-UnderRun $Setup; Assert-NoApp
     foreach ($choice in @(@(0,0),@(0,1),@(1,0),@(1,1))) {
       Seed-Settings; Set-Choices $choice[0] $choice[1]
-      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '2.0.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
       # Reinstall is a real ordinary NSIS upgrade of an owned installed payload.
-      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '2.0.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
       Uninstall-Owned $true
     }
     Remove-GeneratedSettings

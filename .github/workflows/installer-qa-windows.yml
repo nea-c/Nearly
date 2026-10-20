@@ -58,6 +58,8 @@ jobs:
         run: node scripts/installer-qa.mjs preflight
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
+      - name: Prove actual temporary plugin namespace admission before building
+        run: node scripts/installer-qa.mjs guard-probe
       - name: Prepare locked build dependencies in this fresh guest
         run: |
           npm ci

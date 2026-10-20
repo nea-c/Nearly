@@ -15,8 +15,10 @@ test('dedicated private-directory branch runs only exact manually confirmed host
 });
 test('standard-user preflight fails closed before dependencies or guest mutations',async()=>{
  assert.equal(typeof qa.preflight,'function');await assert.rejects(()=>qa.preflight({...env(),GITHUB_ACTIONS:'false'}));
+  assert.equal(typeof qa.guardProbe,'function');await assert.rejects(()=>qa.guardProbe({...env(),GITHUB_ACTIONS:'false'}));
  const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
  const early=workflow.indexOf('node scripts/installer-qa.mjs preflight');assert.ok(early>0);assert.ok(early<workflow.indexOf('Prepare pinned cached NSIS tools'));
+  const probe=workflow.indexOf('node scripts/installer-qa.mjs guard-probe');assert.ok(probe>workflow.indexOf('Prepare pinned cached NSIS tools'));assert.ok(probe<workflow.indexOf('Prepare locked build dependencies'));
 });
 test('shared drive fixture applies permissions only to its exact new app leaf; identity ABI is read-only',{skip:process.platform!=='win32'},async()=>{
  const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
@@ -245,9 +247,9 @@ test('sequential fixture builds reuse dependencies and retain distinct setup sna
 });
 test('historical artifact checks reject expiration and mismatched run/digest without network',()=>{
   assert.equal(typeof qa.validatePinnedArtifact,'function');
-  const artifact={id:12158897824,name:'nearly-signed-39185149137-1',expired:false,size_in_bytes:100,digest:'sha256:e8baf6d70cdfe9278e8ad162d75c989a434226cec9da04b62b9a691895ec9526',workflow_run:{id:39185149137,repository_id:123,head_repository_id:123,head_branch:'main',head_sha:'b56f01ddff9698ef316dfa775c1e8a441965674f'}};
+  const artifact={id:12230567816,name:'nearly-signed-39288652319-1',expired:false,size_in_bytes:100,digest:'sha256:5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480',workflow_run:{id:39288652319,repository_id:123,head_repository_id:123,head_branch:'main',head_sha:'0dd697f2d832ec9fd07e9278559e18819b65bd3a'}};
   assert.equal(qa.validatePinnedArtifact(artifact,123),true);
-  for(const change of [{expired:true},{digest:'sha256:'+'0'.repeat(64)},{id:12158897825},{workflow_run:{...artifact.workflow_run,head_sha:'0'.repeat(40)}}])assert.throws(()=>qa.validatePinnedArtifact({...artifact,...change},123));
+  for(const change of [{expired:true},{digest:'sha256:'+'0'.repeat(64)},{id:12158897824},{workflow_run:{...artifact.workflow_run,head_sha:'0'.repeat(40)}}])assert.throws(()=>qa.validatePinnedArtifact({...artifact,...change},123));
 });
 test('fixture key stays in memory and generated minisign proof verifies exact bytes',()=>{
   assert.equal(typeof qa.createFixtureSigner,'function');

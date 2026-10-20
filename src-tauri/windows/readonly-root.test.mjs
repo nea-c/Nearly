@@ -142,3 +142,50 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
   assert.equal(run.status,expected,`${name}: ${run.error??run.stderr} ${run.stdout}`);
  }
 });
+
+test('temporary plugin ancestry reports a bounded compiled read-only diagnosis', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
+ const output=path.join(root,'test-results','nsis-readonly-plugin');fs.mkdirSync(output,{recursive:true});
+ const nsis=process.env.NEARLY_NSIS_ROOT;assert.ok(nsis,'Use existing pinned NSIS tools');
+ const declarations=source.match(/^Var .+$/gm).join('\n');
+ let functions=source.match(/!macro NearlyRootFunctions prefix\r?\n([\s\S]*?)!macroend/)[1];
+ functions=functions.replace(/Function \$\{prefix\}NearlyRejectRoot\r?\n[\s\S]*?FunctionEnd/,'Function ${prefix}NearlyRejectRoot\n  IntOp $0 $R9 << 16\n  IntOp $0 $0 | $NearlyIndex\n  SetErrorLevel $0\n  Quit\nFunctionEnd');
+ for(const [label,code]of [['acl',11],['sids',12],['path',13],['pin',14],['root',15],['payload',16]])functions=functions.replace(`nearly_${label}_bad:`,`nearly_${label}_bad:\n  StrCpy $R9 ${code}`);
+ const exe=path.join(output,'TEMP-PLUGIN-READONLY-GUARD.exe');
+ const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!define MAINBINARYNAME "Nearly"\n${declarations}\n!macro Harness prefix\n${functions}\n!macroend\n!insertmacro Harness ""\nSection\n  StrCpy $NearlyUserSid 0\n  StrCpy $NearlyGuardHead 0\n  StrCpy $NearlyLeafNode 0\n  StrCpy $NearlyHandle 0\n  StrCpy $NearlyPendingBuffer 0\n  StrCpy $NearlyEnum 0\n  StrCpy $NearlyFindData 0\n  StrCpy $NearlyIndex 0\n  StrCpy $R9 17\n  InitPluginsDir\n  System::Call 'kernel32::GetLongPathNameW(w "$PLUGINSDIR", w .r0, i 1024) i.r1'\n  StrCmp $1 0 0 +3\n    SetErrorLevel 1179648\n    Quit\n  StrCpy $INSTDIR $0\n  StrCpy $NearlyPolicyChecking 1\n  Call NearlyPinRoot\n  Call NearlyReleaseGuards\n  SetErrorLevel 0\nSectionEnd\n`;
+ assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im);
+ assert.doesNotMatch(script,/::(?:CreateDirectory|DeleteFile|SetSecurity|SetNamedSecurity|MoveFile|ReplaceFile|CreateProcess|ShellExecute)/i);
+ const nsi=path.join(output,'temporary-plugin-readonly.nsi');fs.writeFileSync(nsi,script);
+ const compile=spawnSync(path.join(nsis,'Bin','makensis.exe'),['/V2','/INPUTCHARSET','UTF8',nsi],{encoding:'utf8',windowsHide:true,env:{...process.env,NSISDIR:nsis},timeout:30000});
+ fs.writeFileSync(path.join(output,'compile.log'),`${compile.stdout}\n${compile.stderr}`);assert.equal(compile.status,0,compile.stderr||compile.stdout);
+ const run=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:15000});
+ const result={status:run.status,stage:run.status===null?null:run.status>>>16,pathIndex:run.status===null?null:run.status&65535,error:run.error?.message};
+ fs.writeFileSync(path.join(output,'result.json'),JSON.stringify(result,null,2));
+ console.log('Read-only NSIS temporary guard: '+JSON.stringify(result));
+ if(run.status!==0){
+  const query=String.raw`$ErrorActionPreference='Stop'
+try {
+ $me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ function Kind($sid) {
+  if($sid.Value -eq $me){return 'currentUser'}
+  switch($sid.Value){'S-1-5-18'{return 'system'} 'S-1-5-32-544'{return 'administrators'} 'S-1-3-0'{return 'creatorOwner'} 'S-1-3-4'{return 'ownerRights'} 'S-1-1-0'{return 'everyone'} 'S-1-5-11'{return 'authenticatedUsers'}}
+  if($sid.IsAccountSid()){return 'otherAccount'}
+  if($sid.Value.StartsWith('S-1-15-')){return 'appContainer'}
+  return 'other'
+ }
+ $records=@();$path=[IO.Path]::GetFullPath($env:TEMP)
+ for($depth=0;$depth -lt 16 -and $path;$depth++){
+  $acl=Get-Acl -LiteralPath $path
+  $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|Select-Object -First 64|ForEach-Object{
+   [ordered]@{principal=(Kind $_.IdentityReference);mask=[int]$_.FileSystemRights;type=[string]$_.AccessControlType;inherit=[int]$_.InheritanceFlags;propagate=[int]$_.PropagationFlags}
+  })
+  $records+=@([ordered]@{depth=$depth;pathLength=$path.Length;owner=(Kind ($acl.GetOwner([Security.Principal.SecurityIdentifier])));rules=$rules})
+  $parent=Split-Path -Parent $path;if($parent -eq $path){break};$path=$parent
+ }
+ ConvertTo-Json -InputObject $records -Depth 6 -Compress
+}catch{ '[]' }`;
+  const diagnostic=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(query,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000,maxBuffer:32768});
+  if(diagnostic.status===0)try{const records=JSON.parse(diagnostic.stdout);console.log('Read-only temporary ACL classes: '+JSON.stringify(records));}catch{}
+ }
+ assert.ok(run.status===0||result.stage>=11&&result.stage<=18&&result.pathIndex<=176,'Unexpected diagnostic result: '+JSON.stringify(result));
+ if(process.env.NEARLY_NSIS_REQUIRE_PRIVATE_TEMP==='1')assert.equal(run.status,0,'Actual temporary plugin ancestry rejected: '+JSON.stringify(result));
+});
