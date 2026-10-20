@@ -347,6 +347,7 @@ function Must-Reject([scriptblock]$Action,[string]$Label='selection') { $rejecte
 $sha='a'*40
 $context=@{GITHUB_ACTIONS='true';RUNNER_OS='Windows';RUNNER_ENVIRONMENT='github-hosted';GITHUB_REPOSITORY='nea-c/Nearly';GITHUB_EVENT_NAME='workflow_dispatch';GITHUB_REF='refs/heads/main';GITHUB_SHA=$sha;GITHUB_WORKFLOW_SHA=$sha;QA_CONTROLLER_SHA=$sha;QA_CONFIRMATION="installer-qa $sha";GITHUB_RUN_ID='123';GITHUB_RUN_ATTEMPT='1';RUNNER_TEMP='C:\qa-temp';LOCALAPPDATA='C:\qa-user\AppData\Local'}
 $root=Assert-UiContext $context
+$branch=$context.Clone();$branch.GITHUB_REF='refs/heads/codex/private-install-directory';if((Assert-UiContext $branch) -cne $root){throw 'Reviewed QA branch rejected'}
 if($root -cne 'C:\qa-temp\nearly-installer-qa-123-1') { throw 'Incorrect owned root' }
 foreach($key in @($context.Keys)) { $copy=$context.Clone(); $copy.Remove($key); Must-Reject { Assert-UiContext $copy } $key }
 foreach($pair in @(@('RUNNER_ENVIRONMENT','self-hosted'),@('GITHUB_EVENT_NAME','push'),@('GITHUB_REF','refs/heads/other'),@('QA_CONFIRMATION',("installer-qa $sha"+[char]10)),@('GITHUB_WORKFLOW_SHA',('b'*40)),@('GITHUB_RUN_ID','01'),@('RUNNER_TEMP','C:\qa-temp\..\other'),@('SYNCFILES_CONFIG_DIR',''))) { $copy=$context.Clone();$copy[$pair[0]]=$pair[1];Must-Reject {Assert-UiContext $copy} $pair[0] }
@@ -395,9 +396,87 @@ Invoke-Expression $fn[0].Extent.Text
   assert.equal(r.status,0,r.stderr||r.error?.message);
   const actual=JSON.parse(r.stdout);
   const template=fs.readFileSync(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
-  for(const [lang,nsis]of [['en','ENGLISH'],['ja','JAPANESE']])for(const [key,id]of [['Start','NearlyStartMenuText'],['Desktop','NearlyDesktopText'],['Reject','NearlyCannotWrite']]){
+  for(const [lang,nsis]of [['en','ENGLISH'],['ja','JAPANESE']])for(const [key,id]of [['Start','NearlyStartMenuText'],['Desktop','NearlyDesktopText'],['Reject','NearlyCannotWrite'],['ProtectNew','NearlyProtectNew'],['ProtectExisting','NearlyProtectExisting']]){
     const expected=template.split('\n').find(line=>line.startsWith(`LangString ${id} \${LANG_${nsis}} `))?.match(/"(.*)"/)?.[1];
     assert.ok(expected,`${lang} ${id} caption missing`);
     assert.equal(actual[lang][key],expected,`${lang} ${id} selector differs`);
   }
+});
+
+test('protection consent matches exact localized target and sibling scope, including new-folder and empty-folder plans',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiCaptions','Get-ProtectionSpec')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+ if($fn.Count -ne 1){throw 'Protection helper missing'};Invoke-Expression $fn[0].Extent.Text
+}
+$target='D:\Nearly QA generated';$saved='D:\.Nearly-preserved-'+('a'*32)
+foreach($lang in @('en','ja')){
+ $c=Get-UiCaptions $lang
+ $new=$c.ProtectNew.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$target)
+ $empty=$c.ProtectExisting.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$target).Replace('$NearlyPreservedRoot',$saved)
+ if((Get-ProtectionSpec $new $target $lang).kind -cne 'New'){throw 'New plan not matched'}
+ if((Get-ProtectionSpec $empty $target $lang).kind -cne 'Existing'){throw 'Existing plan not matched'}
+ $badCases=@();$badCases+=$new.Replace($target,'D:\Foreign');$badCases+=($new+'!');$badCases+=$empty.Replace($saved,('C:\.Nearly-preserved-'+('a'*32)));$badCases+=$empty.Replace($saved,'D:\.Nearly-preserved-invalid')
+ foreach($bad in $badCases){if($null -ne (Get-ProtectionSpec $bad $target $lang)){throw 'Wrong target or scope accepted'}}
+}
+'Exact consent plan model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Exact consent plan model passed/);
+});
+
+test('consent selector and transition policy reject wrong ownership scope, default Yes and re-prompt',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+class NearlyOwnedUi {
+ static [string]$Mode='ok'
+ static [string]$Message=''
+ static [int]$Inputs=0
+ static [int]$LastChoice=0
+ static [bool]$Gone=$false
+ static [void] Command([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){if($parent -ne 1 -or $button -ne $id -or $pidValue -ne 7 -or $id -notin @(6,7)){throw 'Unexpected consent input'};[NearlyOwnedUi]::Inputs++;[NearlyOwnedUi]::LastChoice=$id;[NearlyOwnedUi]::Gone=$true}
+ static [void] ClickConsent([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){[NearlyOwnedUi]::Command($parent,$button,$pidValue,$id)}
+ static [string] Class([IntPtr]$h,[int]$pidValue){if($pidValue -ne 7){throw 'Foreign PID'};if($h -eq 1 -or $h -eq 10){return '#32770'};if($h -eq 2){return 'Static'};return 'Button'}
+ static [string] Text([IntPtr]$h,[int]$pidValue){if($h -eq 2){if([NearlyOwnedUi]::Mode -eq 'message'){return 'arbitrary sensitive text'};return [NearlyOwnedUi]::Message};if($h -eq 1 -or $h -eq 10){if($h -eq 1 -and [NearlyOwnedUi]::Mode -eq 'caption'){return 'Foreign'};return 'Nearly Setup'};if([NearlyOwnedUi]::Mode -eq 'button'){return 'Delete'};if($h -eq 6){return '&Yes'};return '&No'}
+ static [int] GetDlgCtrlID([IntPtr]$h){return [int]$h}
+ static [IntPtr] Parent([IntPtr]$h,[int]$pidValue){if([NearlyOwnedUi]::Mode -eq 'parent'){return [IntPtr]9};return [IntPtr]1}
+ static [bool] IsWindowVisible([IntPtr]$h){return [NearlyOwnedUi]::Mode -ne 'hidden'}
+ static [bool] IsWindowEnabled([IntPtr]$h){return [NearlyOwnedUi]::Mode -ne 'disabled'}
+ static [bool] DefaultButton([IntPtr]$h,[int]$pidValue){if([NearlyOwnedUi]::Mode -eq 'default'){return $h -eq 6};return $h -eq 7}
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiCaptions','Get-ProtectionSpec','Get-ProtectionDialog','Assert-ConsentTransition','Answer-Protection','Wait-Ui')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $fn[0].Extent.Text
+}
+function Controls([IntPtr]$Parent) {if($Parent -eq [IntPtr]::Zero){if(![NearlyOwnedUi]::Gone){return [IntPtr]1};return};if([NearlyOwnedUi]::Mode -eq 'duplicate'){return @([IntPtr]2,[IntPtr]2,[IntPtr]6,[IntPtr]7)};return @([IntPtr]2,[IntPtr]6,[IntPtr]7)}
+$ownedProcess=[pscustomobject]@{Id=7};$main=[IntPtr]10;$InstallRoot='D:\Nearly QA generated';$Language='en'
+$c=Get-UiCaptions 'en';[NearlyOwnedUi]::Message=$c.ProtectNew.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$InstallRoot)
+if((Get-ProtectionDialog ([IntPtr]1)).kind -cne 'New'){throw 'Known protection dialog not recognized'}
+foreach($mode in @('message','caption','button','parent','hidden','disabled','duplicate')){[NearlyOwnedUi]::Mode=$mode;if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw ('Unsafe consent accepted: '+$mode)}}
+[NearlyOwnedUi]::Mode='default';$rejected=$false;try{Get-ProtectionDialog ([IntPtr]1)}catch{$rejected=$true};if(!$rejected){throw 'Default Yes accepted'}
+Assert-ConsentTransition 'Existing' 'Existing' 'No' $false
+Assert-ConsentTransition 'New' 'Auto' 'Yes' $false
+Assert-ConsentTransition 'None' 'Auto' 'Yes' $true
+foreach($case in @(@('None','New','Yes',$false),@('New','None','Yes',$false),@('Existing','New','Yes',$false),@('None','Auto','No',$false),@('New','Auto','Yes',$true))){$rejected=$false;try{Assert-ConsentTransition $case[0] $case[1] $case[2] $case[3]}catch{$rejected=$true};if(!$rejected){throw 'Unexpected consent transition accepted'}}
+[NearlyOwnedUi]::Mode='ok'
+function Assert-Process {}
+function Screenshot {}
+$script:mutationChecks=0
+function Assert-NoInstallMutation {$script:mutationChecks++}
+$events=[Collections.Generic.List[object]]::new();$NavigationMode='Command'
+foreach($decision in @('No','Yes')){
+ [NearlyOwnedUi]::Gone=$false;$dialog=Get-ProtectionDialog ([IntPtr]1)
+ Answer-Protection $dialog $decision
+ if([NearlyOwnedUi]::LastChoice -ne $(if($decision -eq 'Yes'){6}else{7})){throw 'Wrong explicit consent choice'}
+ $NavigationMode='Click'
+}
+if([NearlyOwnedUi]::Inputs -ne 2 -or $mutationChecks -ne 4 -or $events.Count -ne 2){throw 'Consent decisions or pre-Install checks missing'}
+'Consent selector model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Consent selector model passed/);assert.doesNotMatch(r.stdout,/arbitrary sensitive text/);
 });

@@ -7,6 +7,32 @@ import {fileURLToPath} from 'node:url';
 const source=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8');
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 
+test('compiled NSIS consent decisions retain the worker token across the real GetParent macro', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
+ const output=path.join(root,'test-results','nsis-readonly-consent');fs.mkdirSync(output,{recursive:true});
+ const nsis=process.env.NEARLY_NSIS_ROOT;assert.ok(nsis);
+ const original=source.match(/Function NearlyCheckFreshPlan\r?\n([\s\S]*?)FunctionEnd/)[1];
+ for(const kind of ['empty','new','ready']){
+  const token=`${kind}.${'a'.repeat(32)}.${'b'.repeat(64)}`;
+  // Replace only external planner/dialog boundaries; execute the compiled
+  // production decisions and actual FileFunc GetParent implementation.
+  let body=original.replace(/nsExec::ExecToStack[^\r\n]+/,`Push "${token}"\n  Push ${kind==='ready'?0:10}`)
+   .replace('IfSilent nearly_plan_bad','; simulated interactive decision')
+   .replace(/MessageBox[^\r\n]+/g,'Goto nearly_plan_accept');
+  const exe=path.join(output,`${kind}-READONLY-CONSENT.exe`);
+  const preserved=kind==='empty'?`D:\\.Nearly-preserved-${'a'.repeat(32)}`:'';
+  const declarations=source.match(/^Var .+$/gm).join('\n');
+  const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!include "FileFunc.nsh"\n${declarations}\nFunction NearlyEnsurePolicyHelper\n Return\nFunctionEnd\nFunction NearlyCleanupPolicyHelper\n Return\nFunctionEnd\nFunction NearlyRejectRoot\n SetErrorLevel 5\n Quit\nFunctionEnd\nFunction NearlyCheckFreshPlan\n${body}\nFunctionEnd\nSection\n StrCpy $INSTDIR "D:\\Nearly"\n StrCpy $NearlyPassive 0\n Call NearlyCheckFreshPlan\n StrCmpS $NearlyConsentPath "D:\\Nearly" +3\n  SetErrorLevel 9\n  Quit\n StrCmpS $NearlyConsentToken "${token}" +3\n  SetErrorLevel 9\n  Quit\n StrCmpS $NearlyPreservedRoot "${preserved}" +3\n  SetErrorLevel 9\n  Quit\n SetErrorLevel 0\nSectionEnd\n`;
+  assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im);
+  assert.doesNotMatch(script,/nsExec|System::|--nearly-install-prepare/);
+  const nsi=path.join(output,kind+'.nsi');fs.writeFileSync(nsi,script);
+  const compile=spawnSync(path.join(nsis,'Bin','makensis.exe'),['/V2','/INPUTCHARSET','UTF8',nsi],{encoding:'utf8',windowsHide:true,env:{...process.env,NSISDIR:nsis},timeout:30000});
+  fs.writeFileSync(path.join(output,kind+'.compile.log'),`${compile.stdout}\n${compile.stderr}`);assert.equal(compile.status,0,compile.stderr||compile.stdout);
+  const run=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:15000});
+  fs.writeFileSync(path.join(output,kind+'.result.json'),JSON.stringify({status:run.status,error:run.error?.message},null,2));
+  assert.equal(run.status,0,`${kind}: ${run.error?.message||run.stderr}`);
+ }
+});
+
 test('default destination calculation accepts an absent generated leaf without creating it', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
  const output=path.join(root,'test-results','nsis-readonly-default');fs.mkdirSync(output,{recursive:true});
  const parent=path.join(output,'generated parent 日本語');fs.mkdirSync(parent,{recursive:true});
@@ -50,6 +76,14 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
   ['image-truncated','image',0,'',5],
   ['image-missing','image',0,'',5],
   ['foreign-write-root','acl','0x500D0156','O:SYD:(A;;FA;;;WD)(A;;FA;;;SY)',5],
+  ['authenticated-users-modify-parent','acl','0x500D0040','O:SYD:(A;;0x1301bf;;;AU)(A;;FA;;;SY)',5],
+  ['authenticated-users-modify-volume-root','acl','0x500C0040','O:SYD:(A;;0x1301bf;;;AU)(A;;FA;;;SY)',0],
+  ['volume-root-delete','acl','0x500C0040','O:SYD:(A;;SD;;;AU)(A;;FA;;;SY)',0],
+  ['ordinary-parent-delete','acl','0x500D0040','O:SYD:(A;;SD;;;AU)(A;;FA;;;SY)',5],
+  ['volume-root-delete-child','acl','0x500C0040','O:SYD:(A;;0x40;;;AU)(A;;FA;;;SY)',5],
+  ['volume-root-write-dacl','acl','0x500C0040','O:SYD:(A;;WD;;;AU)(A;;FA;;;SY)',5],
+  ['volume-root-write-owner','acl','0x500C0040','O:SYD:(A;;WO;;;AU)(A;;FA;;;SY)',5],
+  ['authenticated-users-inherited-modify-root','acl','0x500D0156','O:SYD:(A;ID;0x1301bf;;;AU)(A;OICIIOID;SDGXGWGR;;;AU)(A;;FA;;;SY)',5],
  ]){
   const exe=path.join(output,`${name}-READONLY-ROOT-TEST.exe`);
   let functions=macro;

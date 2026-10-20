@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 // Keep every protocol-3 path below MAX_PATH including the terminating NUL.
 const MAX_ROOT_UTF16:usize=176;
 
-fn validate_path(value: &str) -> Result<(), String> {
+pub(crate) fn validate_path(value: &str) -> Result<(), String> {
     let b = value.as_bytes();
     if b.len() < 4 || !b[0].is_ascii_alphabetic() || &b[1..3] != b":\\"
         || value.encode_utf16().count() > MAX_ROOT_UTF16 || value.len() > 512 || value.contains('/') || value.contains('\0') {
@@ -28,7 +28,7 @@ fn validate_path(value: &str) -> Result<(), String> {
 #[cfg(windows)]
 pub(crate) use native::RegisteredInstallation;
 #[cfg(windows)]
-mod native {
+pub(crate) mod native {
     use super::*;
     use crate::update_transaction::windows_impl as fs;
     use std::{ffi::c_void, fs::{File, OpenOptions}, os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle}};
@@ -40,6 +40,8 @@ mod native {
         fn OpenProcessToken(process:Handle,access:u32,token:*mut Handle)->i32;
         fn GetTokenInformation(token:Handle,class:u32,data:Handle,length:u32,needed:*mut u32)->i32;
         fn ConvertStringSidToSidW(value:*const u16,sid:*mut Handle)->i32;
+        fn ConvertSidToStringSidW(sid:Handle,value:*mut *mut u16)->i32;
+        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor:Handle,revision:u32,information:u32,text:*mut *mut u16,length:*mut u32)->i32;
         fn LookupAccountNameW(system:*const u16,name:*const u16,sid:Handle,sid_bytes:*mut u32,domain:*mut u16,domain_chars:*mut u32,kind:*mut u32)->i32;
         fn EqualSid(a:Handle,b:Handle)->i32;
         fn IsValidSid(sid:Handle)->i32;
@@ -56,6 +58,7 @@ mod native {
         fn CloseHandle(handle:Handle)->i32;
         fn LocalFree(memory:Handle)->Handle;
         fn GetDriveTypeW(root:*const u16)->u32;
+        fn GetVolumeNameForVolumeMountPointW(root:*const u16,name:*mut u16,length:u32)->i32;
         fn GetVolumeInformationW(root:*const u16,name:*mut u16,name_length:u32,serial:*mut u32,maximum_component:*mut u32,flags:*mut u32,filesystem:*mut u16,filesystem_length:u32)->i32;
         fn GetFinalPathNameByHandleW(file:Handle,path:*mut u16,length:u32,flags:u32)->u32;
         fn CompareStringOrdinal(first:*const u16,first_length:i32,second:*const u16,second_length:i32,ignore_case:i32)->i32;
@@ -77,9 +80,9 @@ mod native {
         String::from_utf16(&data[..count-1]).map(Some).map_err(|_|"Invalid installation registration".into())
     }
     fn registry(value:&str)->Result<String,String>{registry_optional(value)?.ok_or_else(||"Per-user installation registration is unavailable".into())}
-    struct Trusted {user:Vec<usize>,system:Vec<Local>,installer:Vec<usize>,creator_owner:Local}
+    pub(crate) struct Trusted {user:Vec<usize>,system:Vec<Local>,installer:Vec<usize>,creator_owner:Local}
     impl Trusted {
-        fn capture()->Result<Self,String>{
+        pub(crate) fn capture()->Result<Self,String>{
             let mut token=std::ptr::null_mut();
             if unsafe{OpenProcessToken(GetCurrentProcess(),8,&mut token)}==0{return Err("Cannot identify installation user".into());}
             let token=Token(token); let mut needed=0;
@@ -109,6 +112,44 @@ mod native {
             let user=unsafe{*(self.user.as_ptr() as *const Handle)};
             (unsafe{EqualSid(user,sid)!=0 || EqualSid(self.installer.as_ptr() as Handle,sid)!=0}) || self.system.iter().any(|s|unsafe{EqualSid(s.0,sid)!=0})
         }
+        pub(crate) fn user_sid_string(&self)->Result<String,String>{
+            let user=unsafe{*(self.user.as_ptr() as *const Handle)};
+            let mut text=std::ptr::null_mut();
+            if unsafe{ConvertSidToStringSidW(user,&mut text)}==0{return Err("Cannot identify installation owner".into());}
+            let _allocation=Local(text.cast());let mut length=0;
+            unsafe{while *text.add(length)!=0 {length+=1;if length>256{return Err("Invalid installation owner".into());}}}
+            String::from_utf16(unsafe{std::slice::from_raw_parts(text,length)}).map_err(|_|"Invalid installation owner".into())
+        }
+    }
+    pub(crate) fn require_user_token()->Result<(),String>{
+        let mut token=std::ptr::null_mut();
+        if unsafe{OpenProcessToken(GetCurrentProcess(),8,&mut token)}==0{return Err("Cannot verify non-elevated installation token".into());}
+        let token=Token(token);let(mut elevated,mut needed)=(0u32,0u32);
+        if unsafe{GetTokenInformation(token.0,20,(&mut elevated as *mut u32).cast(),4,&mut needed)}==0 || needed!=4{return Err("Cannot verify non-elevated installation token".into());}
+        if elevated!=0{return Err("Elevated installation tokens are not supported".into());}Ok(())
+    }
+    pub(crate) struct SecuritySnapshot {pub(crate) bytes:Vec<u8>,pub(crate) user_owned:bool,pub(crate) private:bool}
+    pub(crate) fn inspect_directory(file:&File,path:&Path,leaf:bool,trusted:&Trusted)->Result<SecuritySnapshot,String>{
+        let volume=path.parent().is_none();
+        if volume {verify_volume_root(path,file)?;}
+        let mut owner=std::ptr::null_mut();let mut acl=std::ptr::null_mut();let mut sd=std::ptr::null_mut();
+        if unsafe{GetSecurityInfo(file.as_raw_handle(),1,5,&mut owner,std::ptr::null_mut(),&mut acl,std::ptr::null_mut(),&mut sd)}!=0{return Err("Cannot inspect installation permissions".into());}
+        let _descriptor=Local(sd);
+        if sd.is_null()||owner.is_null()||unsafe{IsValidSid(owner)}==0||acl.is_null()||unsafe{IsValidAcl(acl)}==0{return Err("Invalid installation descriptor".into());}
+        // Canonical text contains no allocation addresses or uninitialized
+        // descriptor padding, so a second process can reproduce the binding.
+        let mut text=std::ptr::null_mut();let mut text_length=0;
+        if unsafe{ConvertSecurityDescriptorToStringSecurityDescriptorW(sd,1,5,&mut text,&mut text_length)}==0||text.is_null()||text_length==0||text_length>65536{return Err("Cannot bind installation descriptor".into());}
+        let _text=Local(text.cast());
+        let bytes=unsafe{std::slice::from_raw_parts(text,text_length as usize)}.iter().flat_map(|v|v.to_le_bytes()).collect();
+        let user=unsafe{*(trusted.user.as_ptr() as *const Handle)};
+        Ok(SecuritySnapshot{bytes,user_owned:unsafe{EqualSid(user,owner)}!=0,private:safe_acl_scope(owner,acl,leaf,volume,trusted).is_ok()})
+    }
+    pub(crate) fn require_unregistered(path:&Path)->Result<(),String>{
+        if let Some(root)=registry_optional("InstallLocation")? {
+            let same=match(dunce::canonicalize(&root),dunce::canonicalize(path)){(Ok(a),Ok(b))=>a==b,_=>false};
+            if same||root.eq_ignore_ascii_case(&path.to_string_lossy()) {return Err("Registered installations cannot be prepared implicitly".into());}
+        }Ok(())
     }
     fn safe_security(file:&File,leaf:bool,trusted:&Trusted)->Result<(),String>{
         let mut owner=std::ptr::null_mut(); let mut acl=std::ptr::null_mut(); let mut sd=std::ptr::null_mut();
@@ -117,6 +158,9 @@ mod native {
         safe_acl(owner,acl,leaf,trusted)
     }
     fn safe_acl(owner:Handle,acl:Handle,leaf:bool,trusted:&Trusted)->Result<(),String>{
+        safe_acl_scope(owner,acl,leaf,false,trusted)
+    }
+    fn safe_acl_scope(owner:Handle,acl:Handle,leaf:bool,volume:bool,trusted:&Trusted)->Result<(),String>{
         if !trusted.contains(owner) || acl.is_null() || unsafe{IsValidAcl(acl)}==0{return Err("Installation requires a privately controlled directory".into());}
         let count=unsafe{*((acl as *const u8).add(4) as *const u16)} as u32;
         for index in 0..count {
@@ -138,11 +182,11 @@ mod native {
             // Never treat an effective CREATOR_OWNER ACE as a trusted identity.
             if leaf && flags&8!=0 && flags&3!=0
                 && unsafe{EqualSid(trusted.creator_owner.0,sid)}!=0 {continue;}
-            if dangerous_rights(mask,leaf) && !trusted.contains(sid){return Err("Installation requires a private writable directory".into());}
+            if dangerous_rights_at(mask,leaf,volume) && !trusted.contains(sid){return Err("Installation requires a private writable directory".into());}
         }
         Ok(())
     }
-    fn validate_final_root_name(root:&Path,guard:&File)->Result<(),String>{
+    pub(crate) fn validate_final_root_name(root:&Path,guard:&File)->Result<(),String>{
         let mut buffer=vec![0u16;32768];
         let count=unsafe{GetFinalPathNameByHandleW(guard.as_raw_handle(),buffer.as_mut_ptr(),buffer.len() as u32,0)} as usize;
         if count==0 || count>=buffer.len(){return Err("Cannot resolve pinned installation directory".into());}
@@ -153,6 +197,17 @@ mod native {
         if unsafe{CompareStringOrdinal(expected.as_ptr(),expected.len() as i32,final_name.as_ptr(),final_name.len() as i32,1)}!=2 {
             return Err("Installation path aliases are not supported".into());
         }
+        Ok(())
+    }
+    pub(crate) fn verify_volume_root(root:&Path,guard:&File)->Result<(),String>{
+        let value=root.to_str().ok_or("Invalid volume root")?;
+        if value.len()!=3||!value.as_bytes()[0].is_ascii_alphabetic()||&value[1..]!=":\\"
+            ||unsafe{GetDriveTypeW(wide(value).as_ptr())}!=3{return Err("Installation requires a real fixed volume root".into());}
+        validate_final_root_name(root,guard)?;
+        let mut volume=[0u16;128];let mut filesystem=[0u16;32];
+        if unsafe{GetVolumeNameForVolumeMountPointW(wide(value).as_ptr(),volume.as_mut_ptr(),volume.len() as u32)}==0
+            ||unsafe{GetVolumeInformationW(wide(value).as_ptr(),std::ptr::null_mut(),0,std::ptr::null_mut(),std::ptr::null_mut(),std::ptr::null_mut(),filesystem.as_mut_ptr(),filesystem.len() as u32)}==0
+            ||String::from_utf16_lossy(&filesystem[..filesystem.iter().position(|c|*c==0).unwrap_or(filesystem.len())])!="NTFS"{return Err("Installation requires a real fixed NTFS volume root".into());}
         Ok(())
     }
     pub(crate) struct RegisteredInstallation {root:PathBuf,_guards:Vec<File>}
@@ -183,6 +238,7 @@ mod native {
             Self::capture_recovery().map(Some)
         }
         fn validate(owner:&str,value:&str,recovery:bool)->Result<Self,String>{
+            require_user_token()?;
             if owner!="local.syncfiles.native"{return Err("Unrecognized installation owner".into());}
             validate_path(value)?;
             if unsafe{GetDriveTypeW(wide(&value[..3]).as_ptr())}!=3{return Err("Installation requires a fixed local drive".into());}
@@ -195,7 +251,7 @@ mod native {
             let mut paths:Vec<_>=root.ancestors().collect(); paths.reverse(); let mut guards=Vec::new();
             for path in paths {
                 let guard=fs::directory(path,0x20081).map_err(|_|"Cannot pin installation directory")?;
-                safe_security(&guard,path==root,&trusted)?;
+                if !inspect_directory(&guard,path,path==root,&trusted)?.private{return Err("Installation requires a private writable directory".into());}
                 guards.push(guard);
             }
             validate_final_root_name(&root,guards.last().ok_or("Missing installation directory pin")?)?;
@@ -308,8 +364,11 @@ mod native {
 }
 
 fn dangerous_rights(mask:u32,leaf:bool)->bool {
+    dangerous_rights_at(mask,leaf,false)
+}
+fn dangerous_rights_at(mask:u32,leaf:bool,volume:bool)->bool {
     // DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER, generic write/all.
-    mask & (0x00010000|0x40|0x00040000|0x00080000|0x40000000|0x10000000
+    mask & (if volume&&!leaf {0}else{0x00010000}|0x40|0x00040000|0x00080000|0x40000000|0x10000000
         | if leaf {0x2|0x4|0x10|0x100} else {0}) != 0
 }
 
@@ -317,7 +376,7 @@ fn dangerous_rights(mask:u32,leaf:bool)->bool {
     use super::*;
     #[test] fn registered_paths_accept_default_and_custom_roots(){
         let default=["C:","Users","fixture","AppData","Local","Nearly"].join("\\");
-        for p in [default.as_str(),r"D:\Applications\Nearly",r"E:\私用\Nearly"] {assert!(validate_path(p).is_ok(),"{p}");}
+        for p in [default.as_str(),r"D:\Nearly",r"D:\Applications\Nearly",r"E:\私用\Nearly"] {assert!(validate_path(p).is_ok(),"{p}");}
     }
     #[test] fn registered_paths_reject_ambiguous_or_shared_namespaces(){
         for p in [r"C:\",r"C:Nearly",r"\Nearly",r"\\server\Nearly",r"\\?\C:\Nearly",r"C:\Apps\..\Nearly",r"C:\Apps\.\Nearly",r"C:\Apps\Nearly.",r"C:\Apps\Nearly ",r"C:\Apps\Nearly:stream",r"C:\Apps\CON.txt",r"C:\Apps\com1",r"C:\Apps\LPT²",r"C:/Nearly",r"C:\Apps\\Nearly",r"C:\Apps\Nearly\"] {assert!(validate_path(p).is_err(),"{p}");}
@@ -337,5 +396,11 @@ fn dangerous_rights(mask:u32,leaf:bool)->bool {
         assert!(!dangerous_rights(0x2|0x4,false));
         for mask in [0x10000,0x40,0x40000,0x80000,0x40000000,0x10000000]{assert!(dangerous_rights(mask,false));}
         assert!(!dangerous_rights(0x80000000,false));
+    }
+    #[test] fn only_verified_volume_root_may_ignore_delete_of_root_itself(){
+        assert!(!dangerous_rights_at(0x10000,false,true));
+        assert!(dangerous_rights_at(0x10000,false,false));
+        assert!(dangerous_rights_at(0x10000,true,true));
+        for mask in [0x40,0x40000,0x80000,0x40000000,0x10000000]{assert!(dangerous_rights_at(mask,false,true));}
     }
 }

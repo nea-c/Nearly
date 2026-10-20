@@ -16,12 +16,12 @@ Set-StrictMode -Version Latest
 
 # This file is never invoked by unit tests. Every entrypoint requires the same
 # explicit manual guest authorization; a path alone does not authorize mutation.
-if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_REPOSITORY -cne 'nea-c/Nearly' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/main') { throw 'Manual hosted Windows guest required' }
+if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_REPOSITORY -cne 'nea-c/Nearly' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cnotin @('refs/heads/main','refs/heads/codex/private-install-directory')) { throw 'Manual hosted Windows guest required' }
 if ($env:QA_CONTROLLER_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_SHA -cne $env:QA_CONTROLLER_SHA -or $env:GITHUB_WORKFLOW_SHA -cne $env:QA_CONTROLLER_SHA -or $env:QA_CONFIRMATION -cne "installer-qa $env:QA_CONTROLLER_SHA") { throw 'Exact SHA confirmation required' }
 if ($env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $env:GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z' -or !$env:RUNNER_TEMP -or !$env:LOCALAPPDATA -or $env:SYNCFILES_CONFIG_DIR) { throw 'Unexpected run/storage context' }
 $expectedRoot = Join-Path $env:RUNNER_TEMP "nearly-installer-qa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 if ($RunRoot -cne $expectedRoot) { throw 'Exact run root required' }
-if ($env:QA_DESTINATION -cnotin @('default','custom')) { throw 'Explicit QA destination required' }
+if ($env:QA_DESTINATION -cnotin @('default','custom','drive')) { throw 'Explicit QA destination required' }
 $destinations = [ordered]@{
   default = Join-Path $env:LOCALAPPDATA 'Nearly'
   custom = Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly"
@@ -237,10 +237,38 @@ public static class NearlyQaShortcut {
   public static bool Matches(string shortcut,string expected) {return TargetMatches(expected,ReadWide(shortcut));}
 }
 '@
-function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice) {
+function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice,[string]$ConsentKind='Auto',[string]$ConsentDecision='Yes') {
   if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
   Assert-UnderRun $Setup
-  & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode
+  & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode -ConsentKind $ConsentKind -ConsentDecision $ConsentDecision
+}
+function New-SharedEmptyDriveFixture {
+  if ($Action -cne 'drive' -or $install -cne $destinations.drive -or (Test-Path -LiteralPath $install)) { throw 'Exact absent owned drive fixture required' }
+  # Only this app-specific leaf is created/protected. Parent/drive ACLs are read-only.
+  New-Item -ItemType Directory -Path $install | Out-Null
+  $acl=[Security.AccessControl.DirectorySecurity]::new()
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl.SetOwner($sid)
+  $acl.SetSecurityDescriptorSddlForm("O:$sid"+'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)')
+  Set-Acl -LiteralPath $install -AclObject $acl
+}
+function Get-DirectoryIdentity([string]$Path) {
+  Assert-LocalPath $Path
+  if (!(Test-Path -LiteralPath $Path -PathType Container)) { throw 'Directory identity requires existing directory' }
+  if (!('NearlyQaDirectoryIdentity' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NearlyQaDirectoryIdentity {
+ [StructLayout(LayoutKind.Sequential,Pack=4)] struct Info {public uint Attr;public long Created;public long Accessed;public long Written;public uint Volume,HighSize,LowSize,Links,HighIndex,LowIndex;}
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string name,uint access,uint share,IntPtr security,uint mode,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
+ public static string Read(string name){using(var h=CreateFileW(name,0x80,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)){Info i;if(h.IsInvalid||!GetFileInformationByHandle(h,out i)||(i.Attr&0x410)!=0x10)throw new Exception("Directory identity failed");return i.Volume.ToString("x8")+":"+i.HighIndex.ToString("x8")+i.LowIndex.ToString("x8");}}
+}
+'@
+  }
+  return [NearlyQaDirectoryIdentity]::Read($Path)
 }
 switch ($Action) {
   'extract' {
@@ -293,6 +321,12 @@ switch ($Action) {
       Invoke-Bounded $Setup @('/S')
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       Uninstall-Owned $true
+      if ($env:QA_DESTINATION -ceq 'default') {
+        # Actual unregistered reinstall with only known retained data.
+        Invoke-Bounded $Setup @('/S')
+        Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
+        Uninstall-Owned $true
+      }
       Remove-GeneratedSettings
     }
   }
@@ -300,19 +334,32 @@ switch ($Action) {
     Assert-NoApp
     foreach ($target in @($install,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Drive boundary is not fresh' } }
     if (Test-Path -LiteralPath $preferences) { Remove-Item -LiteralPath $preferences -Recurse }
-    Invoke-Ui 'Drive' 'drive-boundary' 'en' 1 0
-    if (Test-Path -LiteralPath $exe) {
-      Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
-      Seed-Settings; Uninstall-Owned $true
-      Remove-GeneratedSettings
-    } else {
-      foreach ($target in @($uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Rejected drive boundary changed installed state' } }
-      if (Test-Path -LiteralPath $install) {
-        Assert-LocalPath $install
-        if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Rejected drive boundary left unexpected files' }
-        [IO.Directory]::Delete($install,$false)
-      }
-    }
+    $parent=Split-Path -Parent $install
+    $parentAcl=(Get-Acl -LiteralPath $parent).Sddl
+    $prior=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | ForEach-Object Name)
+    New-SharedEmptyDriveFixture
+    $originalId=Get-DirectoryIdentity $install; $originalAcl=(Get-Acl -LiteralPath $install).Sddl
+    Invoke-Ui 'Install' 'drive-consent-no' 'en' 1 0 'Existing' 'No'
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Declined consent changed original folder' }
+    Invoke-Ui 'Cancel' 'drive-consent-yes-cancel' 'ja' 1 0 'Existing' 'Yes'
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Cancel before Install changed original folder' }
+    foreach ($target in @($exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled consent changed installed state' } }
+    $marker=Join-Path $install 'owned-nonempty-fixture.txt'; $markerBytes=[Text.Encoding]::UTF8.GetBytes('generated unrelated content must survive')
+    [IO.File]::WriteAllBytes($marker,$markerBytes)
+    Invoke-Ui 'Reject' 'drive-nonempty-rejected' 'en' 1 0 'None' 'No'
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($marker)) -cne [Convert]::ToBase64String($markerBytes)) { throw 'Nonempty refusal damaged existing contents' }
+    if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 1) { throw 'Nonempty refusal changed directory entries' }
+    Remove-Item -LiteralPath $marker
+    Invoke-Ui 'Drive' 'drive-consent-install' 'en' 1 0 'Existing' 'Yes'
+    Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
+    if ((Get-DirectoryIdentity $install) -ceq $originalId) { throw 'Shared original was not replaced with a fresh private object' }
+    $preserved=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | Where-Object Name -CNotIn $prior)
+    if ($preserved.Count -ne 1 -or $preserved[0].Name -cnotmatch '\A\.Nearly-preserved-[a-f0-9]{32}\z') { throw 'Exact preserved original missing or ambiguous' }
+    $preservedPath=$preserved[0].FullName
+    if ((Get-DirectoryIdentity $preservedPath) -cne $originalId -or (Get-Acl -LiteralPath $preservedPath).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $preservedPath -Force).Count -ne 0) { throw 'Preserved original identity/permissions/content changed' }
+    Seed-Settings; Uninstall-Owned $true; Remove-GeneratedSettings
+    if ((Get-DirectoryIdentity $preservedPath) -cne $originalId -or (Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'Uninstall removed original or changed parent permissions' }
+    Write-Output 'Drive consent No/Yes+Cancel/nonempty refusal/Yes+Install, original identity+ACL retention and unchanged parent ACL verified.'
   }
   'launch' {
     Assert-NoApp; Assert-Regular $exe

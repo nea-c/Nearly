@@ -93,6 +93,8 @@ Thumbs.db
 !/docs/startup-updates.md
 !/docs/actions-signing.md
 /scripts/*
+!/scripts/installer-qa-standard-user.ps1
+!/scripts/installer-qa-standard-user.cs
 !/scripts/build-windows.mjs
 !/scripts/sftp-fixture.mjs
 !/scripts/native-drag-launch-test.mjs

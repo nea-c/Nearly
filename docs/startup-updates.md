@@ -44,4 +44,14 @@ The isolated hosted QA-feature success/restart and health-failure rollback resul
 
 Tests use ephemeral in-memory fixture keys, an upstream minisign vector, loopback HTTP servers and harmless owned test-runner processes. NSIS is compiled without executing setup. See [the design](update-installer-design.md) and [native handoff](../src-tauri/windows/UPDATE-HANDOFF.md).
 
+## Fresh custom-directory preparation (local changes)
+
+The installer can plan a fresh destination such as `D:\Nearly`, with the application at `D:\Nearly\Nearly.exe`. A verified fixed NTFS volume root's own DELETE permission is distinguished from permission to delete its children. Foreign child deletion, security takeover, unsafe ordinary ancestors, reparse points and ambiguous paths remain rejected. The drive permissions are never changed.
+
+If protection is needed, the interactive installer shows the exact destination and scope before Install. Missing leaves are created with a protected current-user/SYSTEM/Administrators DACL from birth. An existing shared leaf is eligible only when empty and owned by the current user: its exact pinned object is renamed without overwrite to the disclosed `.Nearly-preserved-<nonce>` sibling, then a new private leaf is created. The original is always retained, including on failure; no recursive cleanup or migration is performed. A race or uncertain result stops the operation and retains evidence. Silent/passive fresh installs requiring preparation are refused.
+
+Read-only planning and preparation use the same bundled application before Tauri initialization. Consent binds the selected path, ancestor and leaf identities/security, operation and nonce; preparation rechecks that snapshot. Existing private roots use the existing content checks, including the default destination's narrow preserved-settings whitelist after uninstall. Custom nonempty folders cannot be adopted. Registered updates keep their registered destination and never perform this preparation. Installer, uninstaller and native installation admission reject elevated tokens so that shared writable paths cannot become an elevated execution boundary.
+
+This change has mock state-machine tests, in-memory descriptor tests, read-only Windows ABI checks and compile coverage. Actual directory preparation, ACL-changing installation, update/recovery and uninstall at a newly prepared drive-root destination require separately authorized disposable Windows QA. The tests do not establish that those operations have succeeded on this PC.
+
 Primary sources: [Tauri updater](https://v2.tauri.app/plugin/updater/), [official signed-comment format](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.3/crates/tauri-cli/src/helpers/updater_signature.rs), [minisign verifier](https://github.com/jedisct1/rust-minisign-verify), [ring Ed25519](https://docs.rs/ring/0.17.14/ring/signature/index.html).

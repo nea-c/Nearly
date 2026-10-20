@@ -18,14 +18,14 @@ concurrency:
 jobs:
   guest:
     name: Fresh guest / ${{ matrix.scenario }} / ${{ matrix.destination }}
-    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory')
     runs-on: windows-2025
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         scenario: [success, health-failure]
-        destination: [default, custom]
+        destination: [default, custom, drive]
     permissions:
       contents: read
       actions: read
@@ -53,7 +53,7 @@ jobs:
           node --input-type=module -e "import {validateContext,validateScenario} from './scripts/installer-qa.mjs'; validateContext(process.env); validateScenario(process.env.QA_SCENARIO);"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Safe orchestration, UI policy and evidence unit tests
-        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs
+        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
       - name: Prepare locked build dependencies in this fresh guest

@@ -7,6 +7,41 @@ import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:['C:','Users','runneradmin','AppData','Local'].join(String.fromCharCode(92)),QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('dedicated private-directory branch runs only exact manually confirmed hosted guest',()=>{
+ const e={...env(),GITHUB_REF:'refs/heads/codex/private-install-directory'};
+ assert.equal(qa.validateContext(e,'win32').controllerSha,sha);
+ for(const ref of ['refs/heads/codex/other','refs/pull/1/merge','refs/heads/codex/private-install-directory-extra'])assert.throws(()=>qa.validateContext({...e,GITHUB_REF:ref},'win32'));
+ const p=qa.createPlan(qa.validateContext(e,'win32'),'drive');assert.equal(p.installRoot,p.destinations.drive);assert.equal(qa.validatePlan(p,qa.validateContext(e,'win32'),'drive'),true);
+});
+test('shared drive fixture applies permissions only to its exact new app leaf; identity ABI is read-only',{skip:process.platform!=='win32'},async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const code=source.match(/function Get-DirectoryIdentity[\s\S]*?Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+ assert.match(code,/Pack=4/);assert.doesNotMatch(code,/SetSecurity|SetFile|Delete|MoveFile|CreateDirectory/);
+ const parseScript=`$ErrorActionPreference='Stop'\n$source=[IO.File]::ReadAllText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))).toString('base64')}')))\n`+String.raw`
+$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+$fn=$ast.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-SharedEmptyDriveFixture'},$true)
+if(!$fn){throw 'Fixture function missing'}
+. ([scriptblock]::Create($fn.Extent.Text))
+$script:created=@();$script:protected=@();$script:exists=$false
+function Test-Path {param([string]$LiteralPath) return $script:exists}
+function New-Item {param($ItemType,$Path) $script:created+=@($Path)}
+function Set-Acl {param($LiteralPath,$AclObject) $script:protected+=@($LiteralPath);if($AclObject.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Wrong fixture owner'}}
+$Action='drive';$destinations=@{drive='D:Nearly QA generated'};$install=$destinations.drive
+New-SharedEmptyDriveFixture
+if($script:created.Count -ne 1 -or $script:protected.Count -ne 1 -or $script:protected[0] -cne $install -or $script:created[0] -cne $install){throw 'Permission scope escaped app leaf'}
+foreach($invalid in @('action','target','exists')){
+ $Action='drive';$install=$destinations.drive;$script:exists=$false
+ switch($invalid){'action'{$Action='production'}'target'{$install='D:'}'exists'{$script:exists=$true}}
+ $rejected=$false;try{New-SharedEmptyDriveFixture}catch{$rejected=$true};if(!$rejected){throw 'Unsafe fixture target accepted'}
+}
+if($script:created.Count -ne 1 -or $script:protected.Count -ne 1){throw 'Rejected scope mutated fixture'}
+`+`\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(code).toString('base64')}')))\n`+String.raw`
+$type=[NearlyQaDirectoryIdentity].GetNestedType('Info',[Reflection.BindingFlags]::NonPublic)
+if([Runtime.InteropServices.Marshal]::SizeOf([Activator]::CreateInstance($type)) -ne 52){throw 'BY_HANDLE_FILE_INFORMATION ABI mismatch'}
+'Exact leaf ACL mock and read-only directory identity ABI passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(parseScript,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});assert.equal(r.status,0,r.stderr||r.error?.message);
+});
 test('qualification wide shortcut reader preserves Unicode and ordinal case policy without accepting other paths',{skip:process.platform!=='win32'},async()=>{
   const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
   let csharp=source.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp,'Wide reader missing');
@@ -164,17 +199,17 @@ test('plan fixes source provenance and refuses path overrides',()=>{
 
 test('destination selection derives exact guest-owned Unicode paths and rejects overrides',()=>{
   const c=qa.validateContext(env(),'win32');
-  for(const kind of ['default','custom']){
+  for(const kind of ['default','custom','drive']){
     const p=qa.createPlan(c,kind);
     assert.equal(p.schemaVersion,2);assert.equal(p.destinationKind,kind);
     assert.equal(p.installRoot,p.destinations[kind]);
     assert.equal(qa.validatePlan(p,c,kind),true);
     assert.throws(()=>qa.validatePlan({...p,destinations:{...p.destinations,custom:'D:\\foreign'}},c,kind));
-    assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations.drive},c,kind));
+    assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations[kind==='drive'?'default':'drive']},c,kind));
   }
   const p=qa.createPlan(c,'custom');
   assert.match(p.installRoot,/日本語 space/);assert.match(p.destinations.drive,/^D:\\/);
-  for(const kind of [undefined,'','drive','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
+  for(const kind of [undefined,'','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
 });
 
 test('UI qualification covers every independent checkbox pair in both actual languages',()=>{
@@ -354,6 +389,6 @@ test('workflow remains manual, read-only and uploads only validated public evide
   assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs run/);
   assert.match(text,/fail-fast: false/);assert.match(text,/scenario: \[success, health-failure\]/);
   assert.match(text,/QA_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
-  assert.match(text,/destination: \[default, custom\]/);
+  assert.match(text,/destination: \[default, custom, drive\]/);
   assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
 });

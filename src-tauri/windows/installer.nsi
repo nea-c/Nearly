@@ -107,7 +107,6 @@ Var NearlyPayload
 Var NearlyRootMissing
 Var NearlyEnum
 Var NearlyEntry
-Var NearlyPinAccess
 Var NearlyFindData
 Var NearlyImageHandle
 Var NearlyRegisteredImageHandle
@@ -118,12 +117,24 @@ Var NearlyImageSize
 Var NearlyImageChunk
 Var NearlyCreatorSid
 Var NearlyPendingBuffer
+Var NearlyPolicyPath
+Var NearlyPolicyImage
+Var NearlyPolicyGuardHead
+Var NearlyConsentPath
+Var NearlyConsentToken
+Var NearlyPreservedRoot
+Var NearlyPolicyChecking
+Var NearlyPolicySavedRoot
 
 ; Shared guard implementation. The NSIS/System ABI is 32-bit even for x64 payloads.
 ; Every existing ancestor is opened without FILE_SHARE_DELETE until all mutations
 ; finish. ACLs are queried from those exact handles; security is never rewritten.
 !macro NearlyRootFunctions prefix
 Function ${prefix}NearlyRejectRoot
+  StrCmp $NearlyPolicyChecking 1 0 nearly_reject_context_done
+  StrCpy $INSTDIR $NearlyPolicySavedRoot
+  StrCpy $NearlyPolicyChecking 0
+  nearly_reject_context_done:
   StrCmp $NearlyHandle 0 nearly_reject_buffer
   StrCmp $NearlyHandle -1 nearly_reject_buffer
   System::Call 'kernel32::CloseHandle(p $NearlyHandle)'
@@ -192,7 +203,7 @@ Function ${prefix}NearlyCheckAcl
   IntOp $6 $3 & 8
   ; Root descendants must also stay private: inherit-only writable ACEs can
   ; grant foreign access to newly extracted payload/state children.
-  StrCmp $NearlyMask 0x500D0040 0 nearly_acl_effective
+  StrCmp $NearlyMask 0x500D0156 nearly_acl_effective
   StrCmp $6 8 nearly_acl_next
   nearly_acl_effective:
   IntOp $5 $5 & $NearlyMask
@@ -388,8 +399,13 @@ Function ${prefix}NearlyPinRoot
   StrCpy $NearlyRootMissing 0
   StrCpy $NearlyLeafNode 0
   StrCpy $NearlyWalk $INSTDIR 3
-  StrCpy $NearlyMask 0x500D0040 ; parent: delete/child-delete/security takeover
+  ; A verified volume root cannot itself be renamed/deleted as an ordinary
+  ; directory. Keep child-delete and security-takeover checks fully enabled.
+  System::Call 'kernel32::GetVolumeNameForVolumeMountPointW(w "$NearlyWalk", w .r0, i ${NSIS_MAX_STRLEN}) i.r1'
+  StrCmp $1 1 0 nearly_root_bad
+  StrCpy $NearlyMask 0x500C0040 ; volume: child-delete/security takeover
   Call ${prefix}NearlyPinDirectory
+  StrCpy $NearlyMask 0x500D0040 ; ordinary parent: also reject DELETE
   StrCpy $NearlyIndex 3
   nearly_root_character:
   StrCpy $0 $INSTDIR 1 $NearlyIndex
@@ -483,6 +499,149 @@ FunctionEnd
 !macroend
 !insertmacro NearlyRootFunctions ""
 !insertmacro NearlyRootFunctions "un."
+
+!macro NearlyUserFunctions prefix
+Function ${prefix}NearlyRequireStandardUser
+  System::Call 'kernel32::GetCurrentProcess() p.r0'
+  System::Call 'advapi32::OpenProcessToken(p r0, i 8, *p .r1) i.r0'
+  StrCmp $0 1 0 nearly_user_bad
+  System::Call 'advapi32::GetTokenInformation(p r1, i 20, *i .r2, i 4, *i .r3) i.r0'
+  System::Call 'kernel32::CloseHandle(p r1)'
+  StrCmp $0 1 0 nearly_user_bad
+  StrCmp $2 0 nearly_user_done
+  nearly_user_bad:
+  SetErrorLevel 8
+  IfSilent +2
+    MessageBox MB_ICONSTOP|MB_OK "$(NearlyNoElevation)"
+  Abort "$(NearlyNoElevation)"
+  nearly_user_done:
+FunctionEnd
+!macroend
+!insertmacro NearlyUserFunctions ""
+!insertmacro NearlyUserFunctions "un."
+
+Function NearlyCleanupPolicyHelper
+  Push $0
+  Push $1
+  StrCmp $NearlyPolicyImage 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyPolicyImage)'
+  StrCpy $NearlyPolicyImage 0
+  nearly_policy_release_loop:
+  StrCmp $NearlyPolicyGuardHead 0 nearly_policy_release_done
+  System::Call '*$NearlyPolicyGuardHead(p .r0, p .r1)'
+  System::Call 'kernel32::CloseHandle(p r1)'
+  System::Free $NearlyPolicyGuardHead
+  StrCpy $NearlyPolicyGuardHead $0
+  Goto nearly_policy_release_loop
+  nearly_policy_release_done:
+  StrCpy $NearlyPolicyPath ""
+  Pop $1
+  Pop $0
+FunctionEnd
+
+Function NearlyEnsurePolicyHelper
+  StrCmp $NearlyPolicyPath "" 0 nearly_policy_done
+  ; Callers release target guards first. Keep a separate namespace chain
+  ; for the helper through every pathname-based process launch.
+  StrCmp $NearlyGuardHead 0 0 nearly_policy_bad
+  InitPluginsDir
+  ; Canonicalize this internally-created temporary directory's 8.3 spelling.
+  ; User-selected installation paths still reject aliases and redirects.
+  System::Call 'kernel32::GetLongPathNameW(w "$PLUGINSDIR", w .r0, i ${NSIS_MAX_STRLEN}) i.r1'
+  StrCmp $1 0 nearly_policy_bad
+  IntCmp $1 ${NSIS_MAX_STRLEN} nearly_policy_bad nearly_policy_path_good nearly_policy_bad
+  nearly_policy_path_good:
+  StrCpy $NearlyPolicySavedRoot $INSTDIR
+  StrCpy $NearlyPolicyChecking 1
+  StrCpy $INSTDIR $0
+  Call NearlyPinRoot
+  ClearErrors
+  File /oname=$PLUGINSDIR\Nearly-install-policy.exe "${MAINBINARYSRCPATH}"
+  IfErrors nearly_policy_restore_bad
+  StrCpy $NearlyPayload "$INSTDIR\Nearly-install-policy.exe"
+  Call NearlyValidatePayload
+  System::Call 'kernel32::CreateFileW(w "$NearlyPayload", i 0x80000080, i 1, p 0, i 3, i 0x00200000, p 0) p.r0'
+  StrCmp $0 -1 nearly_policy_restore_bad
+  StrCpy $NearlyPolicyImage $0
+  StrCpy $NearlyPolicyPath $NearlyPayload
+  StrCpy $NearlyPolicyGuardHead $NearlyGuardHead
+  StrCpy $NearlyGuardHead 0
+  StrCpy $NearlyLeafNode 0
+  StrCpy $INSTDIR $NearlyPolicySavedRoot
+  StrCpy $NearlyPolicyChecking 0
+  nearly_policy_done:
+  Return
+  nearly_policy_restore_bad:
+  StrCpy $INSTDIR $NearlyPolicySavedRoot
+  StrCpy $NearlyPolicyChecking 0
+  nearly_policy_bad:
+  Call NearlyCleanupPolicyHelper
+  Call NearlyRejectRoot
+FunctionEnd
+
+Function NearlyCheckFreshPlan
+  StrCmpS $NearlyConsentPath $INSTDIR 0 nearly_plan_check
+  StrCmp $NearlyConsentToken "" 0 nearly_plan_done
+  nearly_plan_check:
+  StrCpy $NearlyConsentPath ""
+  StrCpy $NearlyConsentToken ""
+  StrCpy $NearlyPreservedRoot ""
+  Call NearlyEnsurePolicyHelper
+  nsExec::ExecToStack '"$NearlyPolicyPath" --nearly-install-check "$INSTDIR"'
+  Pop $0
+  Pop $1
+  StrCmp $0 0 nearly_plan_ready
+  StrCmp $0 10 0 nearly_plan_bad
+  IfSilent nearly_plan_bad
+  StrCmp $NearlyPassive 1 nearly_plan_bad
+  StrCpy $2 $1 4
+  StrCmp $2 "new." nearly_plan_new
+  StrCpy $2 $1 6
+  StrCmp $2 "empty." 0 nearly_plan_bad
+  StrCpy $2 $1 32 6
+  ${GetParent} "$INSTDIR" $NearlyPreservedRoot
+  StrCpy $NearlyPreservedRoot "$NearlyPreservedRoot\.Nearly-preserved-$2"
+  MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON2 "$(NearlyProtectExisting)" IDYES nearly_plan_accept
+  Abort
+  nearly_plan_new:
+  MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON2 "$(NearlyProtectNew)" IDYES nearly_plan_accept
+  Abort
+  nearly_plan_ready:
+  StrCpy $2 $1 6
+  StrCmp $2 "ready." 0 nearly_plan_bad
+  nearly_plan_accept:
+  StrCpy $NearlyConsentPath $INSTDIR
+  StrCpy $NearlyConsentToken $1
+  nearly_plan_done:
+  Return
+  nearly_plan_bad:
+  Call NearlyCleanupPolicyHelper
+  Call NearlyRejectRoot
+FunctionEnd
+
+Function NearlyPrepareFreshRoot
+  StrCmpS $NearlyConsentPath $INSTDIR 0 nearly_prepare_bad
+  StrCmp $NearlyConsentToken "" nearly_prepare_bad
+  ; A private root needs no directory mutation. Keep the default-only
+  ; preserved-settings whitelist for reinstalls after uninstall.
+  StrCpy $0 $NearlyConsentToken 6
+  StrCmp $0 "ready." nearly_prepare_admit
+  Call NearlyEnsurePolicyHelper
+  nsExec::ExecToStack '"$NearlyPolicyPath" --nearly-install-prepare "$INSTDIR" "$NearlyConsentToken"'
+  Pop $0
+  Pop $1
+  StrCmp $0 0 0 nearly_prepare_bad
+  StrCmp $1 "" 0 nearly_prepare_bad
+  nearly_prepare_admit:
+  StrCpy $NearlyConsentToken ""
+  Call NearlyPinRoot
+  StrCmp $NearlyRootMissing 0 0 nearly_prepare_bad
+  Call NearlyRequireFreshContents
+  Return
+  nearly_prepare_bad:
+  Call NearlyCleanupPolicyHelper
+  Call NearlyRejectRoot
+FunctionEnd
 
 ; NSIS GetFullPathName requires the final filesystem entry to exist. The
 ; default may be absent when an owned installation uses a custom directory.
@@ -604,21 +763,9 @@ FunctionEnd
 Function NearlyDirectoryLeave
   Call NearlyReleaseGuards
   StrCpy $NearlyRequestedRoot $INSTDIR
-  Call NearlyPinRoot
-  Call NearlyCheckInstallOwnership
-  Call NearlyRequireFreshContents
-  StrCpy $NearlyPinAccess 6
-  StrCmp $NearlyRootMissing 0 nearly_page_access
-  StrCpy $NearlyPinAccess 4
-  ${GetParent} "$INSTDIR" $NearlyWalk
-  nearly_page_access:
-  System::Call 'kernel32::CreateFileW(w "$NearlyWalk", i $NearlyPinAccess, i 3, p 0, i 3, i 0x02200000, p 0) p.r0'
-  StrCmp $0 -1 0 +2
-    Call NearlyRejectRoot
-  System::Call 'kernel32::CloseHandle(p r0)'
-  ; Verify writeability without writing files during page navigation. The actual
-  ; leaf inherits ACLs, is checked and write-probed immediately before payload.
-  Call NearlyReleaseGuards
+  Call NearlyValidatePath
+  ; This planner performs no directory creation, permission or payload writes.
+  Call NearlyCheckFreshPlan
 FunctionEnd
 
 ; Validate canonical unsigned decimal before System converts PID/FILETIME input.
@@ -858,6 +1005,12 @@ LangString NearlyCannotCheck ${LANG_JAPANESE} "Nearly が終了しているこ�
 LangString NearlyWebViewMissing ${LANG_ENGLISH} "Microsoft Edge WebView2 Runtime is required. Install the runtime separately from Microsoft's official website, then run Nearly Setup again. Nearly and its settings have not been changed."
 LangString NearlyWebViewMissing ${LANG_JAPANESE} "Microsoft Edge WebView2 Runtime が必要です。Microsoft の公式サイトから別途インストールし、このセットアップを再実行してください。Nearly と設定は変更していません。"
 LangString NearlyCannotWrite ${LANG_ENGLISH} "Choose a dedicated private writable folder on a local fixed drive, with an existing parent (path up to 176 characters). Shared, redirected, ambiguous or unrelated nonempty folders cannot be used."
+LangString NearlyNoElevation ${LANG_ENGLISH} "Run Nearly Setup normally, without Run as administrator. Installation and updates use your current user account."
+LangString NearlyNoElevation ${LANG_JAPANESE} "このセットアップは管理者として実行せず、通常の方法で起動してください。導入と更新は現在のユーザー権限で行います。"
+LangString NearlyProtectNew ${LANG_ENGLISH} "Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nAfter you click Install, create this folder so only your account, Administrators and SYSTEM can change it. Other users will not have access. The drive and other folders are not changed. Continue?"
+LangString NearlyProtectNew ${LANG_JAPANESE} "Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\n［インストール］を押した後、このフォルダーを現在のユーザー・管理者・SYSTEMだけが変更できる専用フォルダーとして作成します。他のユーザーはアクセスできません。ドライブ全体や他のフォルダーは変更しません。続けますか？"
+LangString NearlyProtectExisting ${LANG_ENGLISH} "Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nThis folder is empty but other users can change it. After you click Install, preserve the empty original at:$\r$\n$NearlyPreservedRoot$\r$\nThen create a dedicated replacement for your account, Administrators and SYSTEM. Other users will not have access. No existing files or drive permissions are changed. The preserved empty folder is kept for you to review. Continue?"
+LangString NearlyProtectExisting ${LANG_JAPANESE} "Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\nこの空フォルダーは他のユーザーも変更できます。［インストール］を押した後、元の空フォルダーを次の場所へ退避します:$\r$\n$NearlyPreservedRoot$\r$\nその後、現在のユーザー・管理者・SYSTEMだけの専用フォルダーを作り直します。他のユーザーはアクセスできません。既存ファイルやドライブ全体の権限は変更しません。退避した空フォルダーは確認用に残します。続けますか？"
 LangString NearlyCannotWrite ${LANG_JAPANESE} "ローカル固定ドライブ上の、このユーザー専用の書き込み可能なフォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。共有・転送先・不明なファイルがあるフォルダーは使用できません。"
 LangString NearlyPayloadError ${LANG_ENGLISH} "Setup could not replace Nearly.exe. Close Nearly and try again. Your settings have not been removed."
 LangString NearlyPayloadError ${LANG_JAPANESE} "Nearly.exe を更新できませんでした。Nearly を閉じて再実行してください。設定は削除していません。"
@@ -1150,6 +1303,13 @@ nearly_version_done:
 FunctionEnd
 
 Function .onInit
+  StrCpy $NearlyPolicyPath ""
+  StrCpy $NearlyPolicyImage 0
+  StrCpy $NearlyPolicyGuardHead 0
+  StrCpy $NearlyPolicyChecking 0
+  StrCpy $NearlyConsentPath ""
+  StrCpy $NearlyConsentToken ""
+  StrCpy $NearlyPreservedRoot ""
   StrCpy $NearlyUserSid 0
   StrCpy $NearlyGuardHead 0
   StrCpy $NearlyLeafNode 0
@@ -1157,6 +1317,7 @@ Function .onInit
   StrCpy $NearlyPendingBuffer 0
   StrCpy $NearlyEnum 0
   StrCpy $NearlyFindData 0
+  Call NearlyRequireStandardUser
   !insertmacro NearlyContext
   StrCpy $NearlyRequestedRoot $INSTDIR
   Call NearlySetDefaultRoot
@@ -1225,12 +1386,14 @@ Function NearlyRun
 FunctionEnd
 
 Function .onInstSuccess
+  Call NearlyCleanupPolicyHelper
   ${If} $NearlyUpdateMode = 3
     Return
   ${EndIf}
 FunctionEnd
 
 Function .onGUIEnd
+  Call NearlyCleanupPolicyHelper
   Call NearlyReleaseGuards
   StrCmp $NearlyParentHandle 0 +2
     System::Call 'kernel32::CloseHandle(p $NearlyParentHandle)'
@@ -1240,6 +1403,9 @@ Function .onGUIEnd
     System::Call 'kernel32::CloseHandle(p $NearlyReadyHandle)'
   StrCmp $NearlyMutationHandle 0 +2
     System::Call 'kernel32::CloseHandle(p $NearlyMutationHandle)'
+FunctionEnd
+Function .onInstFailed
+  Call NearlyCleanupPolicyHelper
 FunctionEnd
 !macro NearlyApplyShortcut path enabled
   ${If} ${FileExists} "${path}"
@@ -1265,22 +1431,20 @@ Section Install
   ; Registration and filesystem are checked again immediately before mutation.
   Call NearlyReleaseGuards
   Call NearlyResolveRegistration
-  StrCmp $NearlyRegisteredRoot "" 0 +2
-    Call NearlyPinRoot
+  !insertmacro NearlyRequireClosed
+  StrCmp $NearlyRegisteredRoot "" 0 nearly_install_registered
+  ; Silent/passive fresh installs may proceed only when no preparation is needed.
+  StrCmpS $NearlyConsentPath $INSTDIR nearly_install_prepare
+  Call NearlyCheckFreshPlan
+  nearly_install_prepare:
+  Call NearlyPrepareFreshRoot
+  nearly_install_registered:
   Call NearlyCheckInstallOwnership
   Call NearlyRequireFreshContents
   !insertmacro NearlyRequireClosed
-  ${If} $NearlyRootMissing = 1
-    ; CreateDirectoryW creates only the leaf. Ancestor guards stay held.
-    System::Call 'kernel32::CreateDirectoryW(w "$INSTDIR", p 0) i.r0'
-    StrCmp $0 0 0 +3
-      SetErrorLevel 5
-      Abort "$(NearlyCannotWrite)"
-    StrCpy $NearlyWalk $INSTDIR
-    StrCpy $NearlyMask 0x500D0156
-    Call NearlyPinDirectory
-    StrCpy $NearlyLeafNode $NearlyGuardHead
-  ${EndIf}
+  ; Preparation has already created and verified the exact private leaf.
+  StrCmp $NearlyRootMissing 0 +2
+    Call NearlyRejectRoot
   Call NearlyValidatePayloads
   System::Call 'kernel32::GetCurrentProcessId() i.r8'
   System::Call 'kernel32::CreateFileW(w "$INSTDIR\.nearly-installer-probe-$8.tmp", i 0x40010000, i 0, p 0, i 1, i 0x04000100, p 0) p.r9'
@@ -1445,6 +1609,7 @@ FunctionEnd
 
 
 Function un.onInit
+  StrCpy $NearlyPolicyChecking 0
   StrCpy $NearlyUserSid 0
   StrCpy $NearlyGuardHead 0
   StrCpy $NearlyLeafNode 0
@@ -1456,6 +1621,7 @@ Function un.onInit
   StrCpy $NearlyRegisteredImageHandle 0
   StrCpy $NearlyImageBuffer 0
   StrCpy $NearlyOtherBuffer 0
+  Call un.NearlyRequireStandardUser
   Call un.NearlyAcquireMutation
   !insertmacro NearlyContext
   ; NSIS self-copies to Temp; $INSTDIR retains the original image directory.

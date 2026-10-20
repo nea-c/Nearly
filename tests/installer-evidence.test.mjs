@@ -6,7 +6,8 @@ const summary=()=>({schemaVersion:2,controllerSha:'a'.repeat(40),scenario:'succe
 test('public summary permits only bounded typed results and never raw errors or authorization',()=>{
  assert.equal(typeof evidence.validatePublicSummary,'function');
  assert.deepEqual(evidence.validatePublicSummary(summary()),summary());
- for(const patch of [{token:'secret'},{error:'private path'},{destinationKind:'drive'},{controllerSha:'wrong'},{cases:[{case:'valid',passed:true,path:'private'}]},{cases:[{case:'../secret',passed:true}]}])assert.throws(()=>evidence.validatePublicSummary({...summary(),...patch}));
+ assert.equal(evidence.validatePublicSummary({...summary(),destinationKind:'drive'}).destinationKind,'drive');
+ for(const patch of [{token:'secret'},{error:'private path'},{destinationKind:'foreign'},{controllerSha:'wrong'},{cases:[{case:'valid',passed:true,path:'private'}]},{cases:[{case:'../secret',passed:true}]}])assert.throws(()=>evidence.validatePublicSummary({...summary(),...patch}));
 });
 
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return(c^0xffffffff)>>>0;}

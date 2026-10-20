@@ -21,14 +21,15 @@ function canonicalWindows(value){
   return value;
 }
 export function validateContext(e,platform=process.platform){
-  const fixed={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted'};
+  const fixed={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted'};
   if(platform!=='win32'||Object.hasOwn(e,'SYNCFILES_CONFIG_DIR')||Object.entries(fixed).some(([k,v])=>e[k]!==v))fail('Manual fresh GitHub-hosted Windows guest required');
+  if(!['refs/heads/main','refs/heads/codex/private-install-directory'].includes(e.GITHUB_REF))fail('Reviewed QA branch required');
   const sha=e.QA_CONTROLLER_SHA;
   if(!exact(/[a-f0-9]{40}/,sha)||e.GITHUB_SHA!==sha||e.GITHUB_WORKFLOW_SHA!==sha||e.QA_CONFIRMATION!==`installer-qa ${sha}`)fail('Exact controller SHA and installer-qa confirmation required');
   for(const k of ['GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'])if(!exact(/[1-9][0-9]*/,e[k])||!Number.isSafeInteger(Number(e[k])))fail('Canonical run identity required');
   return Object.freeze({controllerSha:sha,runId:e.GITHUB_RUN_ID,runAttempt:e.GITHUB_RUN_ATTEMPT,runnerTemp:canonicalWindows(e.RUNNER_TEMP),localAppData:canonicalWindows(e.LOCALAPPDATA)});
 }
-export function validateDestination(value){if(!['default','custom'].includes(value))fail('Select exactly one QA_DESTINATION for this fresh guest');return value;}
+export function validateDestination(value){if(!['default','custom','drive'].includes(value))fail('Select exactly one QA_DESTINATION for this fresh guest');return value;}
 export function createPlan(c,destinationKind='default'){
   validateDestination(destinationKind);
   const leaf=`Nearly Installer QA ${c.runId}-${c.runAttempt}`,destinations={default:path.win32.join(c.localAppData,'Nearly'),custom:path.win32.join(c.localAppData,leaf,'日本語 space','Nearly'),drive:path.win32.join('D:\\',`Nearly QA 日本語 ${c.runId}-${c.runAttempt}`)};
@@ -313,7 +314,8 @@ export function settingsFixture(){
 export async function run(e=process.env){
   const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION),p=createPlan(c,destination);validatePlan(p,c,destination);
   const guest=path.join(root,'scripts/installer-qa-guest.ps1'),baseEnv=cleanChildEnv(e);
-  const ps=async(action,args=[],env=baseEnv)=>execute('pwsh',['-NoProfile','-NonInteractive','-File',guest,'-Action',action,'-RunRoot',p.runRoot,...args],{env,timeoutMs:300000});
+  const launcher=path.join(root,'scripts/installer-qa-standard-user.ps1');
+  const ps=async(action,args=[],env=baseEnv)=>execute('pwsh',['-NoProfile','-NonInteractive','-File',launcher,'-GuestScript',guest,'-GuestArgumentsBase64',Buffer.from(JSON.stringify(['-Action',action,'-RunRoot',p.runRoot,...args])).toString('base64'),'-TimeoutSeconds','300'],{env,timeoutMs:320000});
   // Preflight checks canonical/reparse-free ancestry and absence before any run-root write.
   await ps('preflight');await fs.mkdir(p.runRoot);await fs.writeFile(path.join(p.runRoot,'plan.json'),canonical(p),{flag:'wx'});
   const results=[];
@@ -334,15 +336,18 @@ export async function run(e=process.env){
     await fs.writeFile(path.join(p.runRoot,'Nearly_r2.0_x64-setup.exe'),targetBytes,{flag:'wx'});
     await fs.writeFile(path.join(p.runRoot,'Nearly_r2.0_x64-setup.exe.sig'),signature,{flag:'wx'});
     await fs.writeFile(path.join(p.runRoot,'authorization.json'),canonical({schemaVersion:2,destinationKind:destination,runId:c.runId,runAttempt:c.runAttempt,controllerSha:c.controllerSha,token,sourceVersion:'1.9.0',targetVersion:'2.0.0',targetFile:'Nearly_r2.0_x64-setup.exe',targetSha256:hash(targetBytes),targetBytes:targetBytes.length,payloadSha256:target.payloadSha256,signatureFile:'Nearly_r2.0_x64-setup.exe.sig'}),{flag:'wx'});
+    const fixtureEnv={...baseEnv,NEARLY_QA_TOKEN:token,NEARLY_QA_RUN_ROOT:p.runRoot,NEARLY_QA_SCENARIO:scenario};
     for(const choice of uiCases()){
-      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',choice.language,'-Start',String(choice.start),'-Desktop',String(choice.desktop),'-CaseName',choice.name]);
+      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',choice.language,'-Start',String(choice.start),'-Desktop',String(choice.desktop),'-CaseName',choice.name],fixtureEnv);
       results.push({case:`candidate-ui-${choice.name}`,passed:true});
     }
     for(const language of ['en','ja']){
-      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',language,'-CaseName',`${language}-cancel`,'-UiMode','Cancel']);
+      await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',language,'-CaseName',`${language}-cancel`,'-UiMode','Cancel'],fixtureEnv);
       results.push({case:`candidate-ui-${language}-cancel`,passed:true});
     }
-    await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256]);results.push({case:'drive-destination-boundary',passed:true});
+    if(destination==='drive'){
+      await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);results.push({case:'drive-consent-preservation-and-content-refusal',passed:true});
+    }
     {
       const env={...baseEnv,NEARLY_QA_TOKEN:token,NEARLY_QA_RUN_ROOT:p.runRoot,NEARLY_QA_SCENARIO:scenario};
       await ps('source',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],env);

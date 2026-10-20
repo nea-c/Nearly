@@ -7,6 +7,8 @@ param(
   [Parameter(Mandatory)][ValidateSet(0,1)][int]$Desktop,
   [Parameter(Mandatory)][ValidatePattern('\A[a-z0-9][a-z0-9-]{0,63}\z')][string]$CaseName,
   [ValidateSet('Install','Cancel','Reject','Drive')][string]$Mode='Install',
+  [ValidateSet('Auto','None','New','Existing')][string]$ConsentKind='Auto',
+  [ValidateSet('Yes','No')][string]$ConsentDecision='Yes',
   [ValidateSet('Click','Command')][string]$NavigationMode='Command'
 )
 $ErrorActionPreference='Stop'
@@ -15,9 +17,10 @@ Set-StrictMode -Version Latest
 # These pure policy functions are AST-extracted by tests; tests never execute
 # this entrypoint, load user32, start setup, or interact with a local desktop.
 function Assert-UiContext([hashtable]$Context) {
-  foreach ($pair in @(@('GITHUB_ACTIONS','true'),@('RUNNER_OS','Windows'),@('RUNNER_ENVIRONMENT','github-hosted'),@('GITHUB_REPOSITORY','nea-c/Nearly'),@('GITHUB_EVENT_NAME','workflow_dispatch'),@('GITHUB_REF','refs/heads/main'))) {
+  foreach ($pair in @(@('GITHUB_ACTIONS','true'),@('RUNNER_OS','Windows'),@('RUNNER_ENVIRONMENT','github-hosted'),@('GITHUB_REPOSITORY','nea-c/Nearly'),@('GITHUB_EVENT_NAME','workflow_dispatch'))) {
     if ($Context[$pair[0]] -cne $pair[1]) { throw 'Manual hosted Windows guest required' }
   }
+  if ($Context['GITHUB_REF'] -cnotin @('refs/heads/main','refs/heads/codex/private-install-directory')) { throw 'Reviewed QA branch required' }
   $sha=$Context['QA_CONTROLLER_SHA']
   if ($sha -cnotmatch '\A[a-f0-9]{40}\z' -or $Context['GITHUB_SHA'] -cne $sha -or $Context['GITHUB_WORKFLOW_SHA'] -cne $sha -or $Context['QA_CONFIRMATION'] -cne "installer-qa $sha") { throw 'Exact SHA confirmation required' }
   if ($Context['GITHUB_RUN_ID'] -cnotmatch '\A[1-9][0-9]*\z' -or $Context['GITHUB_RUN_ATTEMPT'] -cnotmatch '\A[1-9][0-9]*\z' -or $Context.ContainsKey('SYNCFILES_CONFIG_DIR')) { throw 'Unexpected run/storage context' }
@@ -29,11 +32,28 @@ function Assert-UiContext([hashtable]$Context) {
 }
 function Get-UiCaptions([string]$Name) {
   switch -CaseSensitive ($Name) {
-    'en' { return @{Start='Create a Start menu shortcut';Desktop='Create a desktop shortcut';Lang='English';Reject='Choose a dedicated private writable folder on a local fixed drive, with an existing parent (path up to 176 characters). Shared, redirected, ambiguous or unrelated nonempty folders cannot be used.'} }
-    'ja' { return @{Start='スタートメニューに登録する';Desktop='デスクトップショートカットを作成する';Lang='日本語';Reject='ローカル固定ドライブ上の、このユーザー専用の書き込み可能なフォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。共有・転送先・不明なファイルがあるフォルダーは使用できません。'} }
+    'en' { return @{Start='Create a Start menu shortcut';Desktop='Create a desktop shortcut';Lang='English';Reject='Choose a dedicated private writable folder on a local fixed drive, with an existing parent (path up to 176 characters). Shared, redirected, ambiguous or unrelated nonempty folders cannot be used.';ProtectNew='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nAfter you click Install, create this folder so only your account, Administrators and SYSTEM can change it. Other users will not have access. The drive and other folders are not changed. Continue?';ProtectExisting='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nThis folder is empty but other users can change it. After you click Install, preserve the empty original at:$\r$\n$NearlyPreservedRoot$\r$\nThen create a dedicated replacement for your account, Administrators and SYSTEM. Other users will not have access. No existing files or drive permissions are changed. The preserved empty folder is kept for you to review. Continue?'} }
+    'ja' { return @{Start='スタートメニューに登録する';Desktop='デスクトップショートカットを作成する';Lang='日本語';Reject='ローカル固定ドライブ上の、このユーザー専用の書き込み可能なフォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。共有・転送先・不明なファイルがあるフォルダーは使用できません。';ProtectNew='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\n［インストール］を押した後、このフォルダーを現在のユーザー・管理者・SYSTEMだけが変更できる専用フォルダーとして作成します。他のユーザーはアクセスできません。ドライブ全体や他のフォルダーは変更しません。続けますか？';ProtectExisting='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\nこの空フォルダーは他のユーザーも変更できます。［インストール］を押した後、元の空フォルダーを次の場所へ退避します:$\r$\n$NearlyPreservedRoot$\r$\nその後、現在のユーザー・管理者・SYSTEMだけの専用フォルダーを作り直します。他のユーザーはアクセスできません。既存ファイルやドライブ全体の権限は変更しません。退避した空フォルダーは確認用に残します。続けますか？'} }
     default { throw 'Unsupported UI language' }
   }
 }
+function Get-ProtectionSpec([string]$Text,[string]$Target,[string]$Name) {
+  $labels=Get-UiCaptions $Name
+  $new=$labels.ProtectNew.Replace('$\r$\n',"`r`n").Replace('$INSTDIR',$Target)
+  if ($Text -ceq $new) { return @{kind='New';targetChecked=$true;scopeChecked=$true} }
+  $empty=$labels.ProtectExisting.Replace('$\r$\n',"`r`n").Replace('$INSTDIR',$Target)
+  $parent=Split-Path -Parent $Target
+  $sibling=[regex]::Escape((Join-Path $parent '.Nearly-preserved-'))+'[a-f0-9]{32}'
+  $pattern='\A'+[regex]::Escape($empty).Replace([regex]::Escape('$NearlyPreservedRoot'),$sibling)+'\z'
+  if ([regex]::IsMatch($Text,$pattern,[Text.RegularExpressions.RegexOptions]::CultureInvariant)) { return @{kind='Existing';targetChecked=$true;scopeChecked=$true} }
+}
+function Assert-ConsentTransition([string]$Actual,[string]$Expected,[string]$Decision,[bool]$Returning) {
+  if ($Actual -notin @('None','New','Existing') -or $Expected -notin @('Auto','None','New','Existing') -or $Decision -notin @('Yes','No')) { throw 'Unsupported consent transition' }
+  if ($Returning -and $Actual -ne 'None') { throw 'Back navigation asked for consent again' }
+  if (!$Returning -and $Expected -ne 'Auto' -and $Actual -cne $Expected) { throw 'Actual protection plan differs from requested case' }
+  if (!$Returning -and $Decision -eq 'No' -and $Actual -eq 'None') { throw 'Consent refusal requires an observed protection dialog' }
+}
+
 function Assert-UiSelection([int[]]$Actual,[int[]]$Expected) {
   if ($Actual.Count -ne 2 -or $Expected.Count -ne 2) { throw 'Two independent shortcut choices required' }
   for ($i=0;$i -lt 2;$i++) {
@@ -66,7 +86,7 @@ Assert-UiPath $RunRoot
 $planPath=Join-Path $RunRoot 'plan.json'
 Assert-UiInput $planPath
 $plan=Get-Content -LiteralPath $planPath -Raw -Encoding utf8 | ConvertFrom-Json
-if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or $plan.destinationKind -cnotin @('default','custom')) { throw 'Owned plan marker mismatch' }
+if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or $plan.destinationKind -cnotin @('default','custom','drive')) { throw 'Owned plan marker mismatch' }
 $destinations=@{
   default=(Join-Path $env:LOCALAPPDATA 'Nearly')
   custom=(Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly")
@@ -78,11 +98,13 @@ Assert-UiInput $Setup
 if ([IO.Path]::GetExtension($Setup) -cne '.exe') { throw 'Owned setup EXE required' }
 Assert-UiPath $InstallRoot
 foreach ($leaf in @('Nearly.exe','uninstall.exe')) { if (Test-Path -LiteralPath (Join-Path $InstallRoot $leaf)) { throw 'UI case requires fresh destination' } }
-if ($InstallRoot -ceq $destinations.drive -and (Test-Path -LiteralPath $InstallRoot)) { throw 'Drive case requires absent generated destination' }
+
 if (Test-Path -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native') { throw 'UI case requires absent installation registration' }
 if (Test-Path -LiteralPath 'HKCU:\Software\local.syncfiles.native\Installer') { throw 'UI default case requires absent shortcut preferences' }
 if (Get-Process -Name Nearly -ErrorAction SilentlyContinue) { throw 'Nearly already running' }
 if (![Environment]::UserInteractive -or (Get-Process -Id $PID).SessionId -eq 0) { throw 'Interactive hosted desktop unavailable; qualification cannot skip' }
+$initialRootPresent=Test-Path -LiteralPath $InstallRoot
+$initialPreservedSiblings=@(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallRoot) -Force | Where-Object { $_.Name -cmatch '\A\.Nearly-preserved-[a-f0-9]{32}\z' } | Select-Object -ExpandProperty Name | Sort-Object)
 $evidenceRoot=Join-Path $RunRoot 'ui-evidence'
 $artifactDir=Join-Path $evidenceRoot $CaseName
 Assert-UiPath $artifactDir
@@ -155,7 +177,7 @@ public static class NearlyOwnedUi {
   }
   public static void Command(IntPtr parent,IntPtr button,int pid,int id) {
     AssertOwner(parent,pid);AssertOwner(button,pid);
-    if((id!=1&&id!=2&&id!=3&&id!=6)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||
+    if((id!=1&&id!=2&&id!=3&&id!=6&&id!=7)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||
        !IsWindowVisible(parent)||!IsWindowEnabled(parent)||!IsWindowVisible(button)||!IsWindowEnabled(button))
       throw new Exception("Owned direct dialog button required");
     // Send an ordinary BN_CLICKED notification through the exact parent only.
@@ -167,6 +189,12 @@ public static class NearlyOwnedUi {
     if((id!=1&&id!=2)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||Class(button,pid)!="Button"||
        !IsWindowVisible(parent)||!IsWindowEnabled(parent)||!IsWindowVisible(button)||!IsWindowEnabled(button))
       throw new Exception("Owned direct rejection button required");
+    Click(button,pid);
+  }
+  public static bool DefaultButton(IntPtr h,int pid) {AssertOwner(h,pid);return Class(h,pid)=="Button"&&(GetWindowLong(h,-16)&15)==1;}
+  public static void ClickConsent(IntPtr parent,IntPtr button,int pid,int id) {
+    AssertOwner(parent,pid);AssertOwner(button,pid);
+    if((id!=6&&id!=7)||GetParent(button)!=parent||GetDlgCtrlID(button)!=id||Class(button,pid)!="Button"||!IsWindowEnabled(parent))throw new Exception("Owned direct consent button required");
     Click(button,pid);
   }
   public static bool[] Activation(IntPtr h,int pid) {
@@ -267,6 +295,51 @@ function Dismiss-Rejection([IntPtr]$Window) {
     throw "Known rejection dialog dismissal failed; caller=$caller, inputLine=$inputLine"
   }
 }
+function Get-ProtectionDialog([IntPtr]$Window) {
+  if ([NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770' -or [NearlyOwnedUi]::Text($Window,$ownedProcess.Id) -cne [NearlyOwnedUi]::Text($main,$ownedProcess.Id)) { return }
+  $children=@(Controls $Window)
+  $specs=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Static' } | ForEach-Object { Get-ProtectionSpec ([NearlyOwnedUi]::Text($_,$ownedProcess.Id)) $InstallRoot $Language })
+  if ($specs.Count -ne 1) { return }
+  $buttons=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' })
+  if ($buttons.Count -ne 2) { return }
+  $yes=@($buttons | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 6 -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -cin @('Yes','&Yes','はい','はい(&Y)') })
+  $no=@($buttons | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 7 -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -cin @('No','&No','いいえ','いいえ(&N)') })
+  if ($yes.Count -ne 1 -or $no.Count -ne 1) { return }
+  foreach ($button in @($yes[0],$no[0])) { if ([NearlyOwnedUi]::Parent($button,$ownedProcess.Id) -ne $Window -or ![NearlyOwnedUi]::IsWindowVisible($button) -or ![NearlyOwnedUi]::IsWindowEnabled($button)) { return } }
+  if (![NearlyOwnedUi]::DefaultButton($no[0],$ownedProcess.Id) -or [NearlyOwnedUi]::DefaultButton($yes[0],$ownedProcess.Id)) { throw 'Protection must default to No' }
+  return @{kind=$specs[0].kind;window=$Window;yes=$yes[0];no=$no[0];defaultNo=$true}
+}
+function Wait-DirectoryTransition {
+  return Wait-Ui {
+    foreach ($window in @(Controls ([IntPtr]::Zero) | Where-Object { $_ -ne $main })) {
+      $protection=Get-ProtectionDialog $window
+      if ($null -ne $protection) { return $protection }
+      if ($null -ne (Get-RejectionButton $window)) { return @{kind='Reject';window=$window} }
+    }
+    if (@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Start }).Count -eq 1) { return @{kind='None'} }
+  }
+}
+function Answer-Protection([hashtable]$Dialog,[ValidateSet('Yes','No')][string]$Decision) {
+  # Re-query immediately before input, and never log the helper's nonce/path.
+  $current=Get-ProtectionDialog $Dialog.window
+  if ($null -eq $current -or $current.kind -cne $Dialog.kind) { throw 'Protection dialog changed before explicit choice' }
+  Assert-NoInstallMutation
+  Screenshot ('protection-'+$current.kind.ToLowerInvariant()+'-'+$Decision.ToLowerInvariant()) $current.window
+  $events.Add(@{stage='protection-consent';kind=$current.kind;decision=$Decision;defaultNo=$current.defaultNo;targetChecked=$true;scopeChecked=$true;beforeInstall=$true})
+  $id=if ($Decision -eq 'Yes') {6}else{7}
+  $button=if ($Decision -eq 'Yes') {$current.yes}else{$current.no}
+  if ($NavigationMode -ceq 'Command') { [NearlyOwnedUi]::Command($current.window,$button,$ownedProcess.Id,$id) }
+  else { [NearlyOwnedUi]::ClickConsent($current.window,$button,$ownedProcess.Id,$id) }
+  Wait-Ui { return @(Controls ([IntPtr]::Zero) | Where-Object {$_ -eq $current.window}).Count -eq 0 -and [NearlyOwnedUi]::IsWindowEnabled($main) } | Out-Null
+  Assert-NoInstallMutation
+}
+function Assert-NoInstallMutation {
+  foreach ($target in @((Join-Path $InstallRoot 'Nearly.exe'),(Join-Path $InstallRoot 'uninstall.exe'),'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native','HKCU:\Software\local.syncfiles.native\Installer')) { if (Test-Path -LiteralPath $target) { throw 'Directory navigation or consent mutated installed state' } }
+  if ((Test-Path -LiteralPath $InstallRoot) -ne $initialRootPresent) { throw 'Consent changed destination presence before Install' }
+  $siblings=@(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallRoot) -Force | Where-Object { $_.Name -cmatch '\A\.Nearly-preserved-[a-f0-9]{32}\z' } | Select-Object -ExpandProperty Name | Sort-Object)
+  if (($initialPreservedSiblings -join [char]0) -cne ($siblings -join [char]0)) { throw 'Consent preserved a folder before Install' }
+}
+
 function Write-UiObservation([string]$Point) {
   try {
     $active=[NearlyOwnedUi]::Activation($main,$ownedProcess.Id)
@@ -410,27 +483,28 @@ try {
   if ([NearlyOwnedUi]::Text($edit,$ownedProcess.Id) -cne $InstallRoot) { throw 'Actual destination edit did not retain generated destination' }
   Screenshot 'directory'
   Click-Id $main 1
-  $modal=[IntPtr]::Zero
-  if ($Mode -in @('Reject','Drive')) {
-    $transition=Wait-Ui {
-      foreach ($w in @(Controls ([IntPtr]::Zero) | Where-Object { $_ -ne $main })) {
-        if (@(Controls $w | Where-Object { [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Reject }).Count -eq 1) { return @{kind='rejected';window=$w} }
-      }
-      if (@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Start }).Count -eq 1) {return @{kind='accepted'}}
-    }
-    if ($transition.kind -eq 'rejected') { $modal=$transition.window }
-    elseif ($Mode -eq 'Reject') { throw 'Unsafe drive unexpectedly accepted' }
-  }
-  if ($modal -ne [IntPtr]::Zero) {
+  $transition=Wait-DirectoryTransition
+  if ($transition.kind -eq 'Reject') {
+    if ($Mode -ne 'Reject') { throw 'Destination unexpectedly rejected' }
     $stage='destination-rejection'
-    Screenshot 'destination-rejected' $modal
-    Dismiss-Rejection $modal
-    # A confirmed admission rejection retains the installer's error level 5.
-    # Ordinary cancellation elsewhere still requires the distinct code 1.
+    Screenshot 'destination-rejected' $transition.window
+    Dismiss-Rejection $transition.window
+    Assert-NoInstallMutation
     Write-UiObservation 'before-reject-cancel'
     Cancel-Setup -ExpectedExitCode 5
     $result='rejected'
   } else {
+    if ($Mode -eq 'Reject') { throw 'Nonempty destination unexpectedly accepted or offered protection' }
+    Assert-ConsentTransition $transition.kind $ConsentKind $ConsentDecision $false
+    if ($transition.kind -in @('New','Existing')) { Answer-Protection $transition $ConsentDecision }
+    if ($ConsentDecision -eq 'No') {
+      $stage='protection-refused'
+      $edit=Wait-Ui { $v=@(ById $main 1019 | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Edit' });if($v.Count -eq 1){return $v[0]} }
+      if ([NearlyOwnedUi]::Text($edit,$ownedProcess.Id) -cne $InstallRoot) { throw 'Consent refusal lost destination' }
+      Assert-NoInstallMutation
+      Cancel-Setup
+      $result='cancelled'
+    } else {
     $stage='shortcuts'
     Wait-Shortcuts
     $defaults=@(Shortcut-States)
@@ -464,6 +538,10 @@ try {
     if ([NearlyOwnedUi]::Text($edit,$ownedProcess.Id) -cne $InstallRoot) { throw 'Back lost selected destination' }
     Screenshot 'directory-back'
     Click-Id $main 1
+    $returnTransition=Wait-DirectoryTransition
+    Assert-ConsentTransition $returnTransition.kind 'Auto' 'Yes' $true
+    Assert-NoInstallMutation
+    $events.Add(@{stage='protection-back-retained';noReprompt=$true;beforeInstall=$true})
     Wait-Shortcuts
     Assert-UiSelection (Shortcut-States) $requested
     Screenshot 'shortcuts-back-return'
@@ -498,6 +576,7 @@ try {
       Click-Id $main 1
       if (!$ownedProcess.WaitForExit(30000) -or $ownedProcess.ExitCode -ne 0) { throw 'Installer did not complete successfully' }
       $result='installed'
+    }
     }
   }
 } catch {
