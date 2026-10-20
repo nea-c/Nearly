@@ -123,6 +123,14 @@ public static class NearlyOwnedUi {
   public sealed class WindowChangedException : Exception {
     public WindowChangedException(int expected,uint actual):base("Owned window changed; expected PID="+expected+", observed PID="+actual){}
   }
+  public class ControlMessageFailureException : Exception {
+    public readonly int NativeError;
+    public ControlMessageFailureException(int error):base("Owned control message failed; error="+error){NativeError=error;}
+  }
+  public sealed class ReadUnavailableException : Exception {
+    public readonly int NativeError;
+    public ReadUnavailableException(int error):base("Owned control read unavailable; error="+error){NativeError=error;}
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc fn, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc fn, IntPtr p);
@@ -136,6 +144,7 @@ public static class NearlyOwnedUi {
   [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GuiThreadInfo info);
   [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int index);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+  [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
   [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
@@ -159,14 +168,24 @@ public static class NearlyOwnedUi {
   public static IntPtr Parent(IntPtr h,int pid) {AssertOwner(h,pid);return GetParent(h);}
   public static IntPtr Send(IntPtr h,int pid,uint msg,IntPtr w,IntPtr l) {
     AssertOwner(h,pid);IntPtr result;
-    if(SendMessageTimeout(h,msg,w,l,2,2000,out result)==IntPtr.Zero)throw new Exception("Owned control message timed out");
+    // SendMessageTimeout can fail without setting last error. Zero is a
+    // generic failure, not proof of timeout; retain the exact numeric code.
+    SetLastError(0);
+    if(SendMessageTimeout(h,msg,w,l,2,2000,out result)==IntPtr.Zero)throw new ControlMessageFailureException(Marshal.GetLastWin32Error());
     return result;
   }
   public static string Text(IntPtr h,int pid) {
-    int size=Send(h,pid,14,IntPtr.Zero,IntPtr.Zero).ToInt32();
-    if(size<0 || size>4096)throw new Exception("Unexpected control text size");
-    IntPtr buffer=Marshal.AllocHGlobal((size+1)*2);
-    try {Send(h,pid,13,(IntPtr)(size+1),buffer);return Marshal.PtrToStringUni(buffer)??"";}finally{Marshal.FreeHGlobal(buffer);}
+    try {
+      int size=Send(h,pid,14,IntPtr.Zero,IntPtr.Zero).ToInt32();
+      if(size<0 || size>4096)throw new Exception("Unexpected control text size");
+      IntPtr buffer=Marshal.AllocHGlobal((size+1)*2);
+      try {Send(h,pid,13,(IntPtr)(size+1),buffer);return Marshal.PtrToStringUni(buffer)??"";}finally{Marshal.FreeHGlobal(buffer);}
+    } catch(ControlMessageFailureException failure) {
+      // Only read-only WM_GETTEXTLENGTH/WM_GETTEXT may be re-enumerated.
+      // Input failures and all other native errors propagate immediately.
+      if(failure.NativeError==0||failure.NativeError==1460)throw new ReadUnavailableException(failure.NativeError);
+      throw;
+    }
   }
   public static void SetText(IntPtr h,int pid,string value) {
     IntPtr b=Marshal.StringToHGlobalUni(value);try{Send(h,pid,12,IntPtr.Zero,b);}finally{Marshal.FreeHGlobal(b);}
@@ -232,12 +251,13 @@ function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
   $deadline=[DateTime]::UtcNow.AddSeconds($Seconds)
   while ([DateTime]::UtcNow -lt $deadline) {
     Assert-Process
-    # Conditions only inspect controls. A page transition can destroy a child
-    # between enumeration and metadata access. Re-enumerate on that typed race;
-    # input methods still require ownership and propagate failures normally.
+    # Conditions only inspect controls. Re-enumerate a destroyed child or a
+    # temporarily unavailable text read within this same deadline. Input
+    # failures and nontransient native errors still propagate immediately.
     try { $value=& $Condition }
     catch {
-      if ($_.Exception.GetBaseException() -isnot [NearlyOwnedUi+WindowChangedException]) { throw }
+      $failure=$_.Exception.GetBaseException()
+      if ($failure -isnot [NearlyOwnedUi+WindowChangedException] -and $failure -isnot [NearlyOwnedUi+ReadUnavailableException]) { throw }
       $value=$null
     }
     # PowerShell converts boxed IntPtr.Zero to true when comparing a Boolean.

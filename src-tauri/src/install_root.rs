@@ -128,7 +128,21 @@ pub(crate) mod native {
         if unsafe{GetTokenInformation(token.0,20,(&mut elevated as *mut u32).cast(),4,&mut needed)}==0 || needed!=4{return Err("Cannot verify non-elevated installation token".into());}
         if elevated!=0{return Err("Elevated installation tokens are not supported".into());}Ok(())
     }
-    pub(crate) struct SecuritySnapshot {pub(crate) bytes:Vec<u8>,pub(crate) user_owned:bool,pub(crate) private:bool}
+    #[cfg(feature="installer-qa")]
+    #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+    pub(crate) enum QaSecurityRejection {OwnerUnsupported,InvalidDescriptor,UnsupportedAce,ForeignDangerousRights,Other}
+    #[cfg(feature="installer-qa")]
+    fn qa_security_rejection(error:&str)->QaSecurityRejection {match error {
+        // inspect_directory already validated owner SID and ACL. The same
+        // combined safe_acl_scope error therefore identifies an untrusted owner.
+        "Installation requires a privately controlled directory"=>QaSecurityRejection::OwnerUnsupported,
+        "Invalid installation access principal"=>QaSecurityRejection::InvalidDescriptor,
+        "Unsupported installation access entry"=>QaSecurityRejection::UnsupportedAce,
+        "Installation requires a private writable directory"=>QaSecurityRejection::ForeignDangerousRights,
+        _=>QaSecurityRejection::Other,
+    }}
+    pub(crate) struct SecuritySnapshot {pub(crate) bytes:Vec<u8>,pub(crate) user_owned:bool,pub(crate) private:bool,
+        #[cfg(feature="installer-qa")] pub(crate) qa_rejection:Option<QaSecurityRejection>}
     pub(crate) fn inspect_directory(file:&File,path:&Path,leaf:bool,trusted:&Trusted)->Result<SecuritySnapshot,String>{
         let volume=path.parent().is_none();
         if volume {verify_volume_root(path,file)?;}
@@ -143,7 +157,10 @@ pub(crate) mod native {
         let _text=Local(text.cast());
         let bytes=unsafe{std::slice::from_raw_parts(text,text_length as usize)}.iter().flat_map(|v|v.to_le_bytes()).collect();
         let user=unsafe{*(trusted.user.as_ptr() as *const Handle)};
-        Ok(SecuritySnapshot{bytes,user_owned:unsafe{EqualSid(user,owner)}!=0,private:safe_acl_scope(owner,acl,leaf,volume,trusted).is_ok()})
+        let user_owned=unsafe{EqualSid(user,owner)}!=0;
+        let admission=safe_acl_scope(owner,acl,leaf,volume,trusted);
+        Ok(SecuritySnapshot{bytes,user_owned,private:admission.is_ok(),
+            #[cfg(feature="installer-qa")] qa_rejection:admission.as_ref().err().map(|error|qa_security_rejection(error))})
     }
     pub(crate) fn require_unregistered(path:&Path)->Result<(),String>{
         if let Some(root)=registry_optional("InstallLocation")? {
@@ -279,6 +296,10 @@ pub(crate) mod native {
     }
     #[cfg(test)] mod tests {
         use super::*;
+        #[cfg(feature="installer-qa")]
+        #[test]fn qa_security_rejection_is_finite_and_never_returns_source_text(){
+            for (error,expected) in [("Installation requires a privately controlled directory",QaSecurityRejection::OwnerUnsupported),("Unsupported installation access entry",QaSecurityRejection::UnsupportedAce),("Installation requires a private writable directory",QaSecurityRejection::ForeignDangerousRights),("Invalid installation access principal",QaSecurityRejection::InvalidDescriptor),("PRIVATE S-1-5-21-123 path",QaSecurityRejection::Other)] {assert_eq!(qa_security_rejection(error),expected);}
+        }
         #[test] fn synthetic_acl_permissions_fail_closed_without_changing_any_acl(){
             let trusted=Trusted::capture().unwrap();
             for (sddl,leaf,expected) in [

@@ -8,6 +8,69 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('read-only text failures re-enumerate only generic failure or timeout within the existing wait deadline',{skip:process.platform!=='win32'},()=>{
+ let csharp=fs.readFileSync(script,'utf8').match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+ assert.ok(csharp,'owned interop source missing');
+ csharp=csharp.replace('public delegate bool EnumProc',`public static int ModelError=0, ModelLastError=999, ModelFailures=0, ModelReads=0, ModelInputs=0; public static uint ModelFailMessage=14;
+  public delegate bool EnumProc`);
+ csharp=csharp.replace(/\[DllImport\("user32\.dll"[^\]]*\)\]\s*static extern uint GetWindowThreadProcessId\([^;]*\);/,'static uint GetWindowThreadProcessId(IntPtr h,out uint pid){pid=h==(IntPtr)1?7u:9u;return 1;}');
+ csharp=csharp.replace(/\[DllImport\("kernel32\.dll"[^\]]*\)\]\s*static extern void SetLastError\([^;]*\);/,'static void SetLastError(uint error){ModelLastError=(int)error;}');
+ csharp=csharp.replace(/\[DllImport\("user32\.dll"[^\]]*\)\]\s*static extern IntPtr SendMessageTimeout\([^;]*\);/,`static IntPtr SendMessageTimeout(IntPtr h,uint msg,IntPtr w,IntPtr l,uint flags,uint timeout,out IntPtr result){
+    if(h!=(IntPtr)1||flags!=2||timeout!=2000)throw new Exception("Unexpected message contract");
+    if(msg==13||msg==14)ModelReads++;else ModelInputs++;
+    result=IntPtr.Zero;
+    if(msg==ModelFailMessage&&ModelFailures-->0){if(ModelError!=0)ModelLastError=ModelError;return IntPtr.Zero;}
+    if(msg==14)result=(IntPtr)3;
+    if(msg==13){Marshal.Copy(new char[]{'Y','e','s','\\0'},0,l,4);result=(IntPtr)3;}
+    return (IntPtr)1;
+  }`);
+ csharp=csharp.replaceAll('Marshal.GetLastWin32Error()','ModelLastError');
+ csharp=csharp.replace(/\[DllImport\([^\]]+\)\]\s*((?:public )?static) extern ([^\n;]+);/g,'$1 $2 {throw new Exception("Unmodeled native call");}');
+ assert.doesNotMatch(csharp,/DllImport|\bextern\b/,'every native API must be replaced before model execution');
+ const source=`$ErrorActionPreference='Stop'\nSet-StrictMode -Version Latest\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Wait-Ui'},$true)
+Invoke-Expression $fn[0].Extent.Text
+$script:identityChecks=0;$script:enumerations=0
+function Assert-Process {$script:identityChecks++}
+function Controls {$script:enumerations++;return [IntPtr]1}
+foreach($message in @(14,13)){
+ foreach($errorCode in @(0,1460)){
+  [NearlyOwnedUi]::ModelFailMessage=$message;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=1;[NearlyOwnedUi]::ModelInputs=0
+  $script:identityChecks=0;$script:enumerations=0
+  $result=Wait-Ui {foreach($control in @(Controls)){if([NearlyOwnedUi]::Text($control,7) -ceq 'Yes'){return $true}}} 2
+  if(!$result -or $script:enumerations -ne 2 -or $script:identityChecks -ne 2 -or [NearlyOwnedUi]::ModelInputs -ne 0){throw 'Read failure was not re-enumerated without input'}
+ }
+}
+foreach($errorCode in @(5,87,1234)){
+ [NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=50;$script:enumerations=0
+ $failure=$null;try{Wait-Ui {foreach($control in @(Controls)){[NearlyOwnedUi]::Text($control,7)}} 2}catch{$failure=$_.Exception.GetBaseException()}
+ if($null -eq $failure -or $failure.GetType().Name -cne 'ControlMessageFailureException' -or $failure.NativeError -ne $errorCode -or $script:enumerations -ne 1){throw 'Nontransient read failure was retried or lost its code'}
+}
+foreach($errorCode in @(0,1460,5)){
+ [NearlyOwnedUi]::ModelFailMessage=12;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=50;[NearlyOwnedUi]::ModelInputs=0
+ $failure=$null;try{Wait-Ui {[NearlyOwnedUi]::SetText([IntPtr]1,7,'target');return $true} 2}catch{$failure=$_.Exception.GetBaseException()}
+ if($null -eq $failure -or $failure.GetType().Name -cne 'ControlMessageFailureException' -or $failure.NativeError -ne $errorCode -or [NearlyOwnedUi]::ModelInputs -ne 1){throw 'Input failure was wrapped or retried'}
+}
+foreach($errorCode in @(0,1460)){
+ [NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=100000;$script:enumerations=0
+ $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null
+ try{Wait-Ui {foreach($control in @(Controls)){[NearlyOwnedUi]::Text($control,7)}} 1}catch{$failure=$_.Exception}
+ if($null -eq $failure -or $failure.Message -cne 'Bounded owned installer UI wait timed out' -or $clock.ElapsedMilliseconds -gt 2500 -or $script:enumerations -lt 2 -or $script:enumerations -gt 8){throw 'Persistent transient read escaped the original deadline'}
+}
+# With no native error set, reset must prevent stale error999 being reported.
+[NearlyOwnedUi]::ModelLastError=999;[NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=0;[NearlyOwnedUi]::ModelFailures=1
+$failure=$null;try{[NearlyOwnedUi]::Text([IntPtr]1,7)}catch{$failure=$_.Exception.GetBaseException()}
+if($failure.GetType().Name -cne 'ReadUnavailableException' -or $failure.NativeError -ne 0){throw 'Generic failure misclassified as timeout or stale error'}
+$before=[NearlyOwnedUi]::ModelReads;$failure=$null
+try{[NearlyOwnedUi]::Text([IntPtr]2,7)}catch{$failure=$_.Exception.GetBaseException()}
+if($failure.GetType().Name -cne 'WindowChangedException' -or [NearlyOwnedUi]::ModelReads -ne $before){throw 'Foreign control reached native read'}
+'Read-only transient message policy passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Read-only transient message policy passed/);
+});
 test('directory selection skips an exact existing target and verifies every requested edit',{skip:process.platform!=='win32'},()=>{
  assert.match(fs.readFileSync(script,'utf8'),/Set-VerifiedDirectorySelection \$edit\r?\n  Screenshot 'directory'/);
  const source=String.raw`
@@ -52,6 +115,7 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
  public static string Mode="ok";public static int Id=2,Inputs=0,Queries=0;public static bool Gone=false;
  public static string Class(IntPtr h,int pid){if(pid!=7)throw new Exception("Foreign PID");if(Gone&&h==(IntPtr)1)throw new Exception("Destroyed modal queried");if(Mode=="race"&&Queries++==0)throw new WindowChangedException();return h==(IntPtr)10?"#32770":h==(IntPtr)1?(Mode=="dialog"?"Edit":"#32770"):h==(IntPtr)2?"Static":"Button";}
  public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
@@ -209,7 +273,7 @@ $rejected=$false;try{[NearlyOwnedUi]::Command([IntPtr]1,[IntPtr]2,7,1)}catch{$re
 if(!$rejected){throw 'Queue failure ignored'}
 'Owned navigation command model passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Owned navigation command model passed/);
 });
 test('failure inventory emits only bounded IDs and known control kinds, never window text',{skip:process.platform!=='win32'},()=>{
@@ -220,6 +284,7 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
  public static string Class(IntPtr h,int pid){if(h==(IntPtr)3)throw new WindowChangedException();return h==(IntPtr)2?"Button":"sensitive arbitrary class";}
  public static int GetDlgCtrlID(IntPtr h){return h==(IntPtr)2?1001:int.MaxValue;}
  public static bool IsWindowEnabled(IntPtr h){return true;}
@@ -276,6 +341,7 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
  public static int Queries=0;
  public static string Class(IntPtr h,int pid){Queries++;if(Queries==1)throw new WindowChangedException();return "Button";}
 }
@@ -330,7 +396,7 @@ try{[NearlyOwnedUi]::Show([IntPtr]1,7)}catch{$rejected=$true}
 if(!$rejected){throw 'Native visibility failure was ignored'}
 'Owned visibility API contract passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Owned visibility API contract passed/);
 });

@@ -3,7 +3,13 @@
 use std::ffi::OsString;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-enum Refusal { Rejected, Elevated }
+enum Refusal { Rejected, Elevated, #[cfg(feature="installer-qa")] Stage(Stage) }
+#[cfg(feature="installer-qa")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+#[repr(i32)]
+enum Stage {Token=21,Path=22,Registration=23,Trust=24,ParentPath=25,ParentOpen=26,ParentFinal=27,ParentInspect=28,ParentPrivate=29,ParentIdentity=30,LeafOpen=31,LeafAttributes=32,LeafFinal=33,LeafInspect=34,LeafEnumeration=35,LeafKind=36,LeafIdentity=37,Nonce=38,Stdout=39,VolumeFixed=40,VolumeFinal=41,VolumeFilesystem=42,SecurityQuery=43,Descriptor=44,SecurityBinding=45,OwnerUnsupported=46,InvalidDescriptor=47,UnsupportedAce=48,ForeignDangerousRights=49,OtherSecurity=50}
+macro_rules! refusal_stage {($stage:ident)=>{{#[cfg(feature="installer-qa")] {Refusal::Stage(Stage::$stage)} #[cfg(not(feature="installer-qa"))] {Refusal::Rejected}}};}
+fn refusal_exit(error:Refusal)->i32 {match error {Refusal::Rejected=>5,Refusal::Elevated=>8,#[cfg(feature="installer-qa")] Refusal::Stage(stage)=>stage as i32}}
 type Result<T> = std::result::Result<T,Refusal>;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Kind { Ready, New, Empty }
@@ -64,7 +70,7 @@ pub(crate) fn dispatch(args:impl IntoIterator<Item=OsString>)->Option<i32> {
             if preparing {
                 prepare(&mut storage,args[2].to_str().ok_or(Refusal::Rejected)?)?;Ok((0,None))
             } else {
-                let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|_|Refusal::Rejected)?;
+                let mut nonce=[0u8;16];getrandom::fill(&mut nonce).map_err(|_|refusal_stage!(Nonce))?;
                 let nonce=nonce.iter().map(|b|format!("{b:02x}")).collect::<String>();
                 let (code,token)=check(&mut storage,&nonce)?;Ok((code,Some(token)))
             }
@@ -75,16 +81,34 @@ pub(crate) fn dispatch(args:impl IntoIterator<Item=OsString>)->Option<i32> {
         Ok((code,token))=>{
             if let Some(token)=token {
                 use std::io::Write;
-                if std::io::stdout().write_all(token.as_bytes()).is_err(){return Some(5);}
+                if std::io::stdout().write_all(token.as_bytes()).is_err(){return Some(refusal_exit(refusal_stage!(Stdout)));}
             }code
-        },Err(Refusal::Elevated)=>8,Err(Refusal::Rejected)=>5,
+        },Err(error)=>refusal_exit(error),
     })
 }
 
 #[cfg(windows)]
 mod native {
     use super::*;
+    pub(super) fn inspect_refusal(error:String,leaf:bool)->Refusal {
+        #[cfg(feature="installer-qa")] {return match error.as_str(){
+            "Invalid volume root"|"Installation requires a real fixed volume root"=>refusal_stage!(VolumeFixed),
+            "Cannot resolve pinned installation directory"|"Invalid pinned installation path"|"Installation path aliases are not supported"=>refusal_stage!(VolumeFinal),
+            "Installation requires a real fixed NTFS volume root"=>refusal_stage!(VolumeFilesystem),
+            "Cannot inspect installation permissions"=>refusal_stage!(SecurityQuery),
+            "Invalid installation descriptor"=>refusal_stage!(Descriptor),
+            "Cannot bind installation descriptor"=>refusal_stage!(SecurityBinding),
+            _=>if leaf{refusal_stage!(LeafInspect)}else{refusal_stage!(ParentInspect)},
+        };}
+        #[cfg(not(feature="installer-qa"))] {let _=(error,leaf);Refusal::Rejected}
+    }
     use crate::{install_root::native as policy,update_transaction::windows_impl as fs};
+    fn private_refusal(snapshot:&policy::SecuritySnapshot)->Refusal {
+        #[cfg(feature="installer-qa")] {use policy::QaSecurityRejection::*;return match snapshot.qa_rejection {
+            Some(OwnerUnsupported)=>refusal_stage!(OwnerUnsupported),Some(InvalidDescriptor)=>refusal_stage!(InvalidDescriptor),Some(UnsupportedAce)=>refusal_stage!(UnsupportedAce),Some(ForeignDangerousRights)=>refusal_stage!(ForeignDangerousRights),Some(Other)=>refusal_stage!(OtherSecurity),None=>refusal_stage!(ParentPrivate),
+        };}
+        #[cfg(not(feature="installer-qa"))] {let _=snapshot;Refusal::Rejected}
+    }
     use std::{ffi::c_void,fs::{File,OpenOptions},os::windows::{ffi::OsStrExt,fs::OpenOptionsExt,io::{AsRawHandle,FromRawHandle}},path::{Path,PathBuf}};
     use windows::{Win32::{Foundation::{HANDLE,UNICODE_STRING,OBJECT_ATTRIBUTE_FLAGS},System::IO::IO_STATUS_BLOCK,Storage::FileSystem::{FILE_ACCESS_RIGHTS,FILE_FLAGS_AND_ATTRIBUTES,FILE_SHARE_MODE}},Wdk::{Foundation::OBJECT_ATTRIBUTES,Storage::FileSystem::{NtCreateFile,NTCREATEFILE_CREATE_DISPOSITION,NTCREATEFILE_CREATE_OPTIONS}}};
     type Handle=*mut c_void;
@@ -145,10 +169,10 @@ mod native {
     }
     impl NativeStorage {
         pub(super) fn new(path:&str,preparing:bool)->Result<Self>{
-            policy::require_user_token().map_err(|error|if error.starts_with("Elevated "){Refusal::Elevated}else{Refusal::Rejected})?;
-            crate::install_root::validate_path(path).map_err(rejected)?;
-            policy::require_unregistered(Path::new(path)).map_err(rejected)?;
-            Ok(Self{path:PathBuf::from(path),preparing,trusted:policy::Trusted::capture().map_err(rejected)?,parents:vec![],leaf:None,preserved:None,original_security:None})
+            policy::require_user_token().map_err(|error|if error.starts_with("Elevated "){Refusal::Elevated}else{refusal_stage!(Token)})?;
+            crate::install_root::validate_path(path).map_err(|_|refusal_stage!(Path))?;
+            policy::require_unregistered(Path::new(path)).map_err(|_|refusal_stage!(Registration))?;
+            Ok(Self{path:PathBuf::from(path),preparing,trusted:policy::Trusted::capture().map_err(|_|refusal_stage!(Trust))?,parents:vec![],leaf:None,preserved:None,original_security:None})
         }
         fn parent(&self)->Result<&File>{self.parents.last().ok_or(Refusal::Rejected)}
         fn verify_leaf(&self)->Result<()> {
@@ -171,26 +195,26 @@ mod native {
     }
     impl Storage for NativeStorage {
         fn snapshot(&mut self)->Result<Snapshot>{
-            let mut binding=Vec::new();append(&mut binding,self.path.to_str().ok_or(Refusal::Rejected)?.as_bytes());
-            let parent=self.path.parent().ok_or(Refusal::Rejected)?;
+            let mut binding=Vec::new();append(&mut binding,self.path.to_str().ok_or(refusal_stage!(Path))?.as_bytes());
+            let parent=self.path.parent().ok_or(refusal_stage!(ParentPath))?;
             let mut paths:Vec<_>=parent.ancestors().collect();paths.reverse();
             for path in paths {
-                let guard=fs::directory(path,0x20081|if self.preparing&&path==parent{4}else{0}).map_err(rejected)?;
-                policy::validate_final_root_name(path,&guard).map_err(rejected)?;
-                let security=policy::inspect_directory(&guard,path,false,&self.trusted).map_err(rejected)?;
-                if !security.private{return Err(Refusal::Rejected);}
-                identity(&mut binding,&guard)?;append(&mut binding,&security.bytes);self.parents.push(guard);
+                let guard=fs::directory(path,0x20081|if self.preparing&&path==parent{4}else{0}).map_err(|_|refusal_stage!(ParentOpen))?;
+                policy::validate_final_root_name(path,&guard).map_err(|_|refusal_stage!(ParentFinal))?;
+                let security=policy::inspect_directory(&guard,path,false,&self.trusted).map_err(|error|inspect_refusal(error,false))?;
+                if !security.private{return Err(private_refusal(&security));}
+                identity(&mut binding,&guard).map_err(|_|refusal_stage!(ParentIdentity))?;append(&mut binding,&security.bytes);self.parents.push(guard);
             }
             let opened=OpenOptions::new().access_mode(0x20081|if self.preparing{0x10000}else{0}).share_mode(if self.preparing{1}else{3}).custom_flags(0x02200000).open(&self.path);
             let kind=match opened {
                 Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{append(&mut binding,b"absent");Kind::New},
-                Err(_)=>return Err(Refusal::Rejected),
+                Err(_)=>return Err(refusal_stage!(LeafOpen)),
                 Ok(file)=>{
-                    if !plain_directory(fs::info(&file).map_err(rejected)?.dwFileAttributes){return Err(Refusal::Rejected);}
-                    policy::validate_final_root_name(&self.path,&file).map_err(rejected)?;
-                    let security=policy::inspect_directory(&file,&self.path,true,&self.trusted).map_err(rejected)?;
-                    let kind=classify_leaf(empty(&file)?,security.user_owned,security.private)?;
-                    identity(&mut binding,&file)?;append(&mut binding,&security.bytes);self.original_security=Some(security.bytes);self.leaf=Some(file);
+                    if !plain_directory(fs::info(&file).map_err(|_|refusal_stage!(LeafAttributes))?.dwFileAttributes){return Err(refusal_stage!(LeafAttributes));}
+                    policy::validate_final_root_name(&self.path,&file).map_err(|_|refusal_stage!(LeafFinal))?;
+                    let security=policy::inspect_directory(&file,&self.path,true,&self.trusted).map_err(|error|inspect_refusal(error,true))?;
+                    let kind=classify_leaf(empty(&file).map_err(|_|refusal_stage!(LeafEnumeration))?,security.user_owned,security.private).map_err(|_|refusal_stage!(LeafKind))?;
+                    identity(&mut binding,&file).map_err(|_|refusal_stage!(LeafIdentity))?;append(&mut binding,&security.bytes);self.original_security=Some(security.bytes);self.leaf=Some(file);
                     kind
                 }
             };
@@ -235,6 +259,14 @@ mod native {
     }
     #[cfg(test)] mod tests {
         use super::*;
+        #[cfg(feature="installer-qa")]
+        #[test]fn qa_private_refusal_uses_only_the_existing_admission_category(){
+            use policy::QaSecurityRejection::*;
+            for (category,code) in [(None,29),(Some(OwnerUnsupported),46),(Some(InvalidDescriptor),47),(Some(UnsupportedAce),48),(Some(ForeignDangerousRights),49),(Some(Other),50)] {
+                let snapshot=policy::SecuritySnapshot{bytes:vec![],user_owned:false,private:false,qa_rejection:category};
+                assert_eq!(refusal_exit(private_refusal(&snapshot)),code);
+            }
+        }
         #[test]fn private_descriptor_is_constructed_only_in_memory(){
             let trusted=policy::Trusted::capture().unwrap();let descriptor=descriptor(&trusted.user_sid_string().unwrap()).unwrap();assert!(!descriptor.0.is_null());
             let(mut control,mut revision)=(0u16,0u32);
@@ -249,6 +281,13 @@ mod native {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]fn refusal_codes_preserve_production_and_elevated_contract(){assert_eq!(refusal_exit(Refusal::Rejected),5);assert_eq!(refusal_exit(Refusal::Elevated),8);#[cfg(not(feature="installer-qa"))]assert_eq!(refusal_exit(refusal_stage!(ParentOpen)),5);}
+    #[cfg(all(feature="installer-qa",windows))]
+    #[test]fn qa_refusal_codes_are_bounded_and_classified(){
+        assert_eq!(refusal_exit(refusal_stage!(ParentOpen)),26);assert_eq!(refusal_exit(refusal_stage!(Stdout)),39);
+        for (offset,stage) in [Stage::Token,Stage::Path,Stage::Registration,Stage::Trust,Stage::ParentPath,Stage::ParentOpen,Stage::ParentFinal,Stage::ParentInspect,Stage::ParentPrivate,Stage::ParentIdentity,Stage::LeafOpen,Stage::LeafAttributes,Stage::LeafFinal,Stage::LeafInspect,Stage::LeafEnumeration,Stage::LeafKind,Stage::LeafIdentity,Stage::Nonce,Stage::Stdout,Stage::VolumeFixed,Stage::VolumeFinal,Stage::VolumeFilesystem,Stage::SecurityQuery,Stage::Descriptor,Stage::SecurityBinding,Stage::OwnerUnsupported,Stage::InvalidDescriptor,Stage::UnsupportedAce,Stage::ForeignDangerousRights,Stage::OtherSecurity].into_iter().enumerate(){assert_eq!(refusal_exit(Refusal::Stage(stage)),21+offset as i32);}
+        for (message,code) in [("Installation requires a real fixed volume root",40),("Installation path aliases are not supported",41),("Cannot inspect installation permissions",43),("Invalid installation descriptor",44),("Cannot bind installation descriptor",45),("unknown PRIVATE S-1-5-21 secret path",28)] {assert_eq!(refusal_exit(native::inspect_refusal(message.to_owned(),false)),code);}
+    }
     const NONCE:&str="0123456789abcdef0123456789abcdef";
     struct Mock {snapshot:Snapshot,events:Vec<&'static str>,fail:Option<&'static str>}
     impl Mock {fn new(kind:Kind)->Self {Self {snapshot:Snapshot{kind,fingerprint:"a".repeat(64),elevated:false},events:vec![],fail:None}}}
