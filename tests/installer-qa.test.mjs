@@ -47,7 +47,8 @@ $type=[NearlyQaDirectoryIdentity].GetNestedType('Info',[Reflection.BindingFlags]
 if([Runtime.InteropServices.Marshal]::SizeOf([Activator]::CreateInstance($type)) -ne 52){throw 'BY_HANDLE_FILE_INFORMATION ABI mismatch'}
 'Exact leaf ACL mock and read-only directory identity ABI passed'
 `;
- const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(parseScript,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});assert.equal(r.status,0,r.stderr||r.error?.message);
+ // This D-leaf mock has its own explicit context, independent of the outer CI destination.
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(parseScript,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000,env:{...process.env,QA_DESTINATION:'drive'}});assert.equal(r.status,0,r.stderr||r.error?.message);
 });
 test('qualification wide shortcut reader preserves Unicode and ordinal case policy without accepting other paths',{skip:process.platform!=='win32'},async()=>{
   const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');

@@ -156,7 +156,20 @@ fn evaluate(body:&[u8],current:&str)->Report{
     }
     #[test]fn only_latest_stable_newer_metadata_is_candidate(){for tag in ["r0.3","r0.10","r1.0"]{let r=evaluate(&release(tag,false,false),"0.2.0");assert_eq!(r.state,"signingNotConfigured");assert!(!r.can_install)}for tag in ["r0.2","r0.1"]{assert_eq!(evaluate(&release(tag,false,false),"0.2.0").state,"current")}for(tag,draft,pre)in[("r0.3",true,false),("r0.3",false,true)]{assert_eq!(evaluate(&release(tag,draft,pre),"0.2.0").state,"noStableRelease")}}
     #[test]fn foreign_malformed_and_oversized_are_rejected(){for body in [vec![0;update_package::MAX_METADATA+1],b"{}".to_vec(),br#"{"tag_name":"v1.0.0","draft":false,"prerelease":false,"html_url":"https://evil.invalid"}"#.to_vec()]{assert_eq!(evaluate(&body,"0.2.0").state,"invalidMetadata")}}
-    #[test]fn process_election_dismissal_and_empty_execution_fail_closed(){let s=StartupUpdate::default();assert!(s.begin_check("main"));assert!(!s.begin_check("other"));assert_eq!(s.status("other").state,"notOwner");assert!(matches!(s.begin_prepare("main"),Err("noCompatibleAsset")));assert!(matches!(s.begin_settle("main",vec!["main".into()]),Err("updateNotReady")));assert!(matches!(s.take_verified("main"),Err("noCompatibleAsset")));s.cancel("main",true);assert_eq!(s.status("main").state,"notOwner");assert!(!s.begin_check("main"));assert!(matches!(s.begin_prepare("main"),Err("notOwner")))}
+    #[test]fn process_election_dismissal_and_empty_execution_fail_closed(){
+        let s=StartupUpdate::default();assert!(s.begin_check("main"));assert!(!s.begin_check("other"));assert_eq!(s.status("other").state,"notOwner");
+        let signing_configured=update_package::runtime_key().is_some();
+        if signing_configured {
+            assert!(matches!(s.begin_prepare("main"),Err("noCompatibleAsset")));
+        }else{
+            let disabled=Report{state:"signingNotConfigured",latest_version:None,can_install:false,error_code:None};
+            assert_eq!(s.begin_prepare("main"),Ok(disabled.clone()));assert_eq!(s.status("main"),disabled);
+            let inner=s.inner.lock().unwrap();assert!(!inner.busy);assert!(inner.candidate.is_none()&&inner.staged.is_none()&&inner.barrier.is_none());
+        }
+        assert_eq!(s.begin_settle("main",vec!["main".into()]),Err(if signing_configured{"updateNotReady"}else{"signingNotConfigured"}));
+        assert_eq!(s.take_verified("main").err(),Some(if signing_configured{"noCompatibleAsset"}else{"signingNotConfigured"}));
+        s.cancel("main",true);assert_eq!(s.status("main").state,"notOwner");assert!(!s.begin_check("main"));assert!(matches!(s.begin_prepare("main"),Err("notOwner")));
+    }
     #[tokio::test]async fn settings_barrier_rejects_wrong_owner_token_negative_ack_and_timeout(){let s=StartupUpdate::default();{let mut i=s.inner.lock().unwrap();i.barrier=Some(Barrier{token:"generated".into(),pending:["main".into(),"other".into()].into(),failed:false,deadline:Instant::now()+Duration::from_secs(1)});}assert!(s.acknowledge("foreign","generated",true).is_err());assert!(s.acknowledge("main","wrong",true).is_err());s.acknowledge("main","generated",true).unwrap();s.acknowledge("other","generated",false).unwrap();assert_eq!(s.wait_settled("generated").await,Err("settingsNotSettled"));}
     #[test]fn single_cancel_never_authorizes_a_new_owner_or_install(){let s=StartupUpdate::default();s.begin_check("main");s.cancel("other",false);assert_eq!(s.status("other").state,"notOwner");assert!(!s.cancel.load(Ordering::Acquire));s.cancel("main",false);assert!(s.cancel.load(Ordering::Acquire));assert!(!s.status("main").can_install)}
     #[tokio::test]
