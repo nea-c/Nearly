@@ -141,8 +141,16 @@ public static class NearlyOwnedUi {
     public readonly int NativeError;
     public ReadUnavailableException(int error):base("Owned control read unavailable; error="+error){NativeError=error;}
   }
-  public sealed class StartupPendingException : Exception {
-    public StartupPendingException():base("Owned process image not loaded yet"){}
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+  static extern bool QueryFullProcessImageNameW(Microsoft.Win32.SafeHandles.SafeProcessHandle process,uint flags,StringBuilder image,ref uint size);
+  public static string ProcessImage(System.Diagnostics.Process process) {
+    // The kernel image belongs to this exact launched process handle. Module
+    // enumeration can return incomplete/incorrect data during loader startup.
+    var image=new StringBuilder(32768);uint size=(uint)image.Capacity;
+    if(!QueryFullProcessImageNameW(process.SafeHandle,0,image,ref size))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    if(size==0||size>=(uint)image.Capacity)throw new InvalidOperationException("Owned kernel image unavailable");
+    return image.ToString();
   }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc fn, IntPtr p);
@@ -258,7 +266,6 @@ $languageWindow=[IntPtr]::Zero
 $result='failed'
 $stage='launch'
 $startupPhase='not-started'
-$script:processIdentityProved=$false
 $script:processFailureObservation=$null
 function Get-UiProcessObservation($Process,[string]$ExpectedImage,[string]$Stage,[bool]$LanguageWindowObserved,[bool]$MainWindowObserved,[string]$StartupPhase='unknown') {
   $knownStage=if ($Stage -cin @('launch','language','directory','destination-rejection','protection-refused','shortcuts','cancel','install','finish')) { $Stage } else { 'unknown' }
@@ -266,13 +273,12 @@ function Get-UiProcessObservation($Process,[string]$ExpectedImage,[string]$Stage
   $record=[ordered]@{schemaVersion=1;kind='installerQaUiProcessFailure';reason='missing-process';hasExited=$null;exitCode=$null;nativeError=$null;stage=$knownStage;startupPhase=$knownPhase;languageWindowObserved=$LanguageWindowObserved;mainWindowObserved=$MainWindowObserved}
   if ($null -eq $Process) { return [pscustomobject]$record }
   try {
-    # Explicit managed getter calls preserve exceptions. PowerShell's Path
-    # script property can turn a failing MainModule getter into a null value.
+    # Preserve getter/native query exceptions; never infer process identity
+    # from the user-mode loader's mutable MainModule snapshot.
     $record.hasExited=[bool]$Process.get_HasExited()
     if ($record.hasExited) { $record.exitCode=[int]$Process.get_ExitCode();$record.reason='exited' }
     else {
-      $module=$Process.get_MainModule()
-      $image=if ($null -eq $module) { $null } else { $module.get_FileName() }
+      $image=[NearlyOwnedUi]::ProcessImage($Process)
       $record.reason=if ([string]::IsNullOrEmpty($image)) { 'path-unavailable' } elseif ($image -ine $ExpectedImage) { 'image-mismatch' } else { 'active' }
     }
   } catch {
@@ -285,27 +291,23 @@ function Get-UiProcessObservation($Process,[string]$ExpectedImage,[string]$Stage
 function Assert-Process {
   $observation=Get-UiProcessObservation $ownedProcess $Setup $stage ($languageWindow -ne [IntPtr]::Zero) ($main -ne [IntPtr]::Zero) $startupPhase
   if ($observation.reason -ceq 'active') {
-    $script:processIdentityProved=$true;$script:processFailureObservation=$null
+    $script:processFailureObservation=$null
     return
   }
   $script:processFailureObservation=$observation
-  # Process.Path reads MainModule.FileName. During initial loading a live
-  # process can have no MainModule yet. Never enumerate HWNDs or send input
-  # until the image is proved, and never tolerate path loss after that proof.
-  if ($observation.reason -ceq 'path-unavailable' -and !$script:processIdentityProved) { throw [NearlyOwnedUi+StartupPendingException]::new() }
   throw 'Launched setup identity no longer active'
 }
 function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
   $deadline=[DateTime]::UtcNow.AddSeconds($Seconds)
   while ([DateTime]::UtcNow -lt $deadline) {
     # Conditions only inspect controls. Re-enumerate a destroyed child or a
-    # temporarily unavailable text read within this same deadline. An initial
-    # live image may still be loading; no UI condition runs until it is proved.
+    # temporarily unavailable text read within this same deadline. No UI
+    # condition runs until the exact kernel process image has been proved.
     # Input failures and nontransient native errors propagate immediately.
     try { Assert-Process; $value=& $Condition }
     catch {
       $failure=$_.Exception.GetBaseException()
-      if ($failure -isnot [NearlyOwnedUi+WindowChangedException] -and $failure -isnot [NearlyOwnedUi+ReadUnavailableException] -and $failure -isnot [NearlyOwnedUi+StartupPendingException]) { throw }
+      if ($failure -isnot [NearlyOwnedUi+WindowChangedException] -and $failure -isnot [NearlyOwnedUi+ReadUnavailableException]) { throw }
       $value=$null
     }
     # PowerShell converts boxed IntPtr.Zero to true when comparing a Boolean.

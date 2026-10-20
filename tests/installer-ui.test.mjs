@@ -8,7 +8,7 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
-test('startup waits only for an initially missing live image and records finite process failure evidence',{skip:process.platform!=='win32'},()=>{
+test('startup proves the exact kernel process image without reading an unstable module list',{skip:process.platform!=='win32'},()=>{
  assert.equal((fs.readFileSync(script,'utf8').match(/\$ownedProcess=Start-Process/g)||[]).length,1,'The owned setup must launch exactly once');
  const source=String.raw`
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
@@ -17,19 +17,15 @@ using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
  public sealed class ReadUnavailableException:Exception{}
- public sealed class StartupPendingException:Exception{}
-}
-public sealed class ModelModule {
- readonly string mode,image;
- public ModelModule(string mode,string image){this.mode=mode;this.image=image;}
- public string FileName {get{if(mode=="query-error")throw new Exception("sensitive-path token");if(mode=="native0")throw new System.ComponentModel.Win32Exception(0,"sensitive-path token");if(mode=="native5")throw new System.ComponentModel.Win32Exception(5,"sensitive-path token");if(mode=="native299")throw new System.ComponentModel.Win32Exception(299,"sensitive-path token");return mode=="wrong"?"C:foreign-sensitive-path":image;}}
+ public static string ProcessImage(ModelProcess p){return p.KernelImage();}
 }
 public sealed class ModelProcess {
  public string Mode;readonly string image;public int Reads,Checks;
  public ModelProcess(string mode,string image){Mode=mode;this.image=image;}
  public bool HasExited {get{Checks++;if(Mode=="exit-query-error")throw new Exception("sensitive-path token");return Mode=="exited"||Mode=="exit-code-error";}}
  public int ExitCode {get{if(Mode=="exit-code-error")throw new Exception("sensitive-path token");return 8;}}
- public ModelModule MainModule {get{Reads++;if(Mode=="module-query-error")throw new Exception("sensitive-path token");if(Mode=="unavailable"||(Mode=="pending"&&Reads==1))return null;return new ModelModule(Mode,image);}}
+ public object MainModule {get{throw new Exception("unstable module list must never be read");}}
+ public string KernelImage(){Reads++;if(Mode=="query-error")throw new Exception("sensitive-path token");if(Mode=="native0")throw new System.ComponentModel.Win32Exception(0,"sensitive-path token");if(Mode=="native5")throw new System.ComponentModel.Win32Exception(5,"sensitive-path token");if(Mode=="native299")throw new System.ComponentModel.Win32Exception(299,"sensitive-path token");return Mode=="wrong"?"C:foreign-sensitive-path":Mode=="unavailable"?null:image;}
 }
 '@
 $tokens=$null;$errors=$null
@@ -41,15 +37,12 @@ foreach($name in @('Get-UiProcessObservation','Assert-Process','Wait-Ui')){
 $Setup='C:generated-sensitive-path';$stage='language';$startupPhase='spawned';$main=[IntPtr]::Zero;$languageWindow=[IntPtr]::Zero
 function Fake([string]$Mode){
  $script:ownedProcess=[ModelProcess]::new($Mode,$Setup)
- $script:processIdentityProved=$false;$script:processFailureObservation=$null;$script:enumerations=0
+ $script:processFailureObservation=$null;$script:enumerations=0
 }
-Fake 'pending'
+Fake 'active'
 $ready=Wait-Ui {$script:enumerations++;return $true} 1
-if(!$ready -or $ownedProcess.Reads -ne 2 -or $script:enumerations -ne 1 -or !$script:processIdentityProved -or $null -ne $script:processFailureObservation){throw 'Initial live image was not proved before UI enumeration'}
-Fake 'unavailable';$failure=$null
-try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
-if($null -eq $failure -or $failure.Message -cne 'Bounded owned installer UI wait timed out' -or $script:enumerations -ne 0 -or $ownedProcess.Reads -lt 2 -or $ownedProcess.Reads -gt 8 -or $script:processFailureObservation.reason -cne 'path-unavailable'){throw 'Initial pending identity escaped its existing deadline or reached UI'}
-foreach($case in @(@('exited','exited'),@('wrong','image-mismatch'),@('query-error','query-failed'),@('native0','query-failed'),@('native5','query-failed'),@('native299','query-failed'),@('module-query-error','query-failed'),@('exit-query-error','query-failed'),@('exit-code-error','query-failed'),@('missing','missing-process'))){
+if(!$ready -or $ownedProcess.Reads -ne 1 -or $script:enumerations -ne 1 -or $null -ne $script:processFailureObservation){throw 'Exact kernel image was not proved before UI enumeration'}
+foreach($case in @(@('unavailable','path-unavailable'),@('exited','exited'),@('wrong','image-mismatch'),@('query-error','query-failed'),@('native0','query-failed'),@('native5','query-failed'),@('native299','query-failed'),@('exit-query-error','query-failed'),@('exit-code-error','query-failed'),@('missing','missing-process'))){
  Fake $case[0];if($case[0] -ceq 'missing'){$script:ownedProcess=$null}
  $failure=$null;try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
  if($null -eq $failure -or $script:enumerations -ne 0 -or $script:processFailureObservation.reason -cne $case[1]){throw ('Actual exit/wrong image/query error was retried or misclassified: '+$case[0]+' / '+$script:processFailureObservation.reason)}
@@ -58,7 +51,7 @@ foreach($case in @(@('exited','exited'),@('wrong','image-mismatch'),@('query-err
  $expectedError=switch -CaseSensitive($case[0]){'native0'{0}'native5'{5}'native299'{299}default{$null}}
  if($script:processFailureObservation.nativeError -ne $expectedError -or $script:processFailureObservation.startupPhase -cne 'spawned'){throw 'Native error or startup phase evidence lost'}
  $json=ConvertTo-Json $script:processFailureObservation -Compress
- if($json -match 'sensitive|token|Path|Exception'){throw 'Private process data leaked'}
+ if($json -match 'sensitive|token|Exception|[A-Za-z]:|"(?:image|path|errorText)":'){throw 'Private process data leaked'}
 }
 Fake 'active';Assert-Process;$ownedProcess.Mode='unavailable';$failure=$null
 try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
@@ -72,6 +65,16 @@ if($r.stage -cne 'language' -or $r.startupPhase -cne 'language-selected' -or !$r
  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
  assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Initial identity and bounded failure contract passed/);
 });
+test('kernel image query uses the existing process safe handle and reads only this test process',{skip:process.platform!=='win32'},()=>{
+ const text=fs.readFileSync(script,'utf8');
+ const native=text.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+ assert.match(native,/QueryFullProcessImageNameW\(process\.SafeHandle,0,image,ref size\)/);
+ assert.doesNotMatch(native,/OpenProcess|GetProcessById|EnumProcessModules|GetModuleFileName/);
+ const source=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n${native}\n'@\n$process=[Diagnostics.Process]::GetCurrentProcess()\ntry { if([NearlyOwnedUi]::ProcessImage($process) -ine [Environment]::ProcessPath){throw 'Own kernel image differs from runtime executable'} } finally { $process.Dispose() }\n'Own process kernel image ABI passed'`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Own process kernel image ABI passed/);
+});
+
 test('explicit drive-c selects only C while the original drive and negative cases remain D',{skip:process.platform!=='win32'},()=>{
  const guest=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
  for(const path of [script,guest]){
