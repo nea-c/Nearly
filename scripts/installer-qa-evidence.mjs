@@ -8,9 +8,15 @@ const label=v=>exact(/[a-z0-9][a-z0-9-]{0,63}/,v);
 const fail=()=>{throw Error('Public evidence rejected: unsupported or unsafe record');};
 function keys(v,wanted){if(!v||typeof v!=='object'||Array.isArray(v)||JSON.stringify(Object.keys(v).sort())!==JSON.stringify([...wanted].sort()))fail();}
 const bits=v=>Array.isArray(v)&&v.length===2&&v.every(x=>x===0||x===1);
+export function validateUiDestination(reportKind,destination){
+ validateDestination(destination);
+ // C-root coverage is a separate result; a D-root report cannot stand in for it.
+ if(![destination,...(destination==='drive-c'?[]:['drive'])].includes(reportKind))fail();
+ return true;
+}
 export function validatePublicSummary(v){
  keys(v,['schemaVersion','controllerSha','scenario','destinationKind','passed','cases']);
- if(v.schemaVersion!==2||!exact(/[a-f0-9]{40}/,v.controllerSha)||!['success','health-failure'].includes(v.scenario)||!['default','custom','drive'].includes(v.destinationKind)||typeof v.passed!=='boolean'||!Array.isArray(v.cases)||v.cases.length>32)fail();
+ if(v.schemaVersion!==2||!exact(/[a-f0-9]{40}/,v.controllerSha)||!['success','health-failure'].includes(v.scenario)||!['default','custom','drive','drive-c'].includes(v.destinationKind)||typeof v.passed!=='boolean'||!Array.isArray(v.cases)||v.cases.length>32)fail();
  for(const c of v.cases){keys(c,['case','passed']);if(!label(c.case)||typeof c.passed!=='boolean')fail();}
  return v;
 }
@@ -18,7 +24,7 @@ const pages=['language','welcome','directory','destination-rejected','shortcuts-
 const captions={en:['Create a Start menu shortcut','Create a desktop shortcut'],ja:['スタートメニューに登録する','デスクトップショートカットを作成する']};
 export function validateUiEvidence(v){
  keys(v,['schemaVersion','case','language','mode','destinationKind','start','desktop','result','lastStage','events']);
- if(v.schemaVersion!==1||!label(v.case)||!['en','ja'].includes(v.language)||!['Install','Cancel','Reject','Drive'].includes(v.mode)||!['default','custom','drive'].includes(v.destinationKind)||!bits([v.start,v.desktop])||!['failed','installed','cancelled','rejected'].includes(v.result)||!['launch','language','directory','destination-rejection','shortcuts','cancel','install','finish','protection-refused'].includes(v.lastStage)||!Array.isArray(v.events)||v.events.length>32)fail();
+ if(v.schemaVersion!==1||!label(v.case)||!['en','ja'].includes(v.language)||!['Install','Cancel','Reject','Drive'].includes(v.mode)||!['default','custom','drive','drive-c'].includes(v.destinationKind)||!bits([v.start,v.desktop])||!['failed','installed','cancelled','rejected'].includes(v.result)||!['launch','language','directory','destination-rejection','shortcuts','cancel','install','finish','protection-refused'].includes(v.lastStage)||!Array.isArray(v.events)||v.events.length>32)fail();
  for(const event of v.events){
   if(pages.includes(event.stage)){keys(event,['stage','screenshot']);if(event.screenshot!==event.stage+'.png')fail();}
   else if(event.stage==='shortcut-assertions'){
@@ -87,7 +93,8 @@ export async function exportEvidence(e=process.env){
   if(!label(entry.name)||!entry.isDirectory()||entry.isSymbolicLink())fail();
   const dir=path.join(ui,entry.name);await plainDirectory(dir);
   const bytes=await regular(path.join(dir,'evidence.json'),65536),report=validateUiEvidence(JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/,'')));
-  if(report.case!==entry.name||![destination,'drive'].includes(report.destinationKind))fail();
+  if(report.case!==entry.name)fail();
+  validateUiDestination(report.destinationKind,destination);
   // Reserialize validated objects, never copy unvalidated raw JSON bytes.
   await fs.writeFile(path.join(output,entry.name+'.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx'});
   const names=await fs.readdir(dir);if(names.length>16||names.some(n=>n!=='evidence.json'&&!pages.some(p=>n===p+'.png')))fail();

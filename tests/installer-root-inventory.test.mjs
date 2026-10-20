@@ -19,7 +19,12 @@ test('diagnosis workflow is one isolated read-only guest and preserves the ordin
  assert.match(diagnosis,/if \(!\$inventory.complete\)/);
  const guest=text.slice(text.indexOf('  guest:'));
  assert.match(guest,/if: [^\r\n]+&& !inputs\.diagnosis_only/);
- assert.match(guest,/phase: \[candidate\]/);assert.match(guest,/scenario: \[success, health-failure\]/);assert.match(guest,/destination: \[default, custom, drive\]/);assert.match(guest,/phase: production/);
+ assert.match(guest,/phase: \[candidate\]/);assert.match(guest,/scenario: \[success, health-failure\]/);
+ const destinations=/destination: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(guest);
+ const included=/include: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(guest);
+ assert.ok(destinations&&included);
+ assert.deepEqual(JSON.parse(destinations[2]),['default','custom','drive']);assert.deepEqual(JSON.parse(included[2]),[{phase:'production',scenario:'success',destination:'default'}]);
+ assert.deepEqual(JSON.parse(destinations[1]),['drive-c']);assert.deepEqual(JSON.parse(included[1]),[]);
 });
 
 test('mocked root inventory bounds SID, ACL and roots without reading local drives',{skip:process.platform!=='win32'},()=>{

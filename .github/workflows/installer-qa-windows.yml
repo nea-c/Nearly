@@ -15,6 +15,10 @@ on:
         description: Read only existing hosted fixed drive root metadata without installer preparation
         type: boolean
         default: false
+      root_coverage_only:
+        description: Qualify only the explicit C-drive root child without changing any drive permissions
+        type: boolean
+        default: false
 permissions: {}
 concurrency:
   group: nearly-manual-installer-qa
@@ -64,11 +68,8 @@ jobs:
       matrix:
         phase: [candidate]
         scenario: [success, health-failure]
-        destination: [default, custom, drive]
-        include:
-          - phase: production
-            scenario: success
-            destination: default
+        destination: ${{ fromJSON(inputs.root_coverage_only && '["drive-c"]' || '["default","custom","drive"]') }}
+        include: ${{ fromJSON(inputs.root_coverage_only && '[]' || '[{"phase":"production","scenario":"success","destination":"default"}]') }}
     permissions:
       contents: read
       actions: read

@@ -10,6 +10,15 @@ test('public summary permits only bounded typed results and never raw errors or 
  for(const patch of [{token:'secret'},{error:'private path'},{destinationKind:'foreign'},{controllerSha:'wrong'},{cases:[{case:'valid',passed:true,path:'private'}]},{cases:[{case:'../secret',passed:true}]}])assert.throws(()=>evidence.validatePublicSummary({...summary(),...patch}));
 });
 
+test('C-root evidence remains explicit and cannot be attributed to the D-root plan',()=>{
+ assert.equal(evidence.validatePublicSummary({...summary(),destinationKind:'drive-c'}).destinationKind,'drive-c');
+ assert.equal(typeof evidence.validateUiDestination,'function');
+ assert.equal(evidence.validateUiDestination('drive-c','drive-c'),true);
+ assert.throws(()=>evidence.validateUiDestination('drive','drive-c'));
+ assert.throws(()=>evidence.validateUiDestination('drive-c','drive'));
+ for(const value of ['drive-e','DRIVE-C','drive-c\n'])assert.throws(()=>evidence.validatePublicSummary({...summary(),destinationKind:value}));
+});
+
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return(c^0xffffffff)>>>0;}
 function chunk(name,data){const type=Buffer.from(name),size=Buffer.alloc(4),sum=Buffer.alloc(4);size.writeUInt32BE(data.length);sum.writeUInt32BE(crc(Buffer.concat([type,data])));return Buffer.concat([size,type,data,sum]);}
 function png(metadata=true){const header=Buffer.alloc(13);header.writeUInt32BE(640,0);header.writeUInt32BE(480,4);header[8]=8;header[9]=6;return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),...(metadata?[chunk('tEXt',Buffer.from('Comment\0never publish metadata secrets'))]:[]),chunk('IDAT',deflateSync(Buffer.alloc(480*(640*4+1)))),chunk('IEND',Buffer.alloc(0))]);}

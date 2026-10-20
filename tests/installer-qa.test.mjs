@@ -219,6 +219,17 @@ test('destination selection derives exact guest-owned Unicode paths and rejects 
   for(const kind of [undefined,'','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
 });
 
+test('explicit C-root coverage preserves the D-root target and refuses cross-root plans',()=>{
+  const c=qa.validateContext(env(),'win32'),p=qa.createPlan(c,'drive-c');
+  assert.equal(p.installRoot,'C:\\Nearly QA 日本語 123-1');
+  assert.equal(p.destinations.drive,'D:\\Nearly QA 日本語 123-1');
+  assert.equal(p.destinationKind,'drive-c');assert.equal(qa.validatePlan(p,c,'drive-c'),true);
+  assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations.drive},c,'drive-c'));
+  assert.throws(()=>qa.validatePlan(p,c,'drive'));
+  for(const kind of ['drive-e','DRIVE-C','drive-c\n','C:'])assert.throws(()=>qa.validateDestination(kind));
+  assert.match(qa.formatSummary('health-failure','drive-c'),/drive-c/);
+});
+
 test('UI qualification covers every independent checkbox pair in both actual languages',()=>{
   const cases=qa.uiCases();
   assert.equal(cases.length,8);
@@ -398,7 +409,11 @@ test('workflow remains manual, read-only and uploads only validated public evide
   assert.match(text,/QA_COMMAND: \$\{\{ matrix\.phase == 'production' && 'production' \|\| 'run' \}\}/);
   assert.match(text,/fail-fast: false/);assert.match(text,/scenario: \[success, health-failure\]/);
   assert.match(text,/QA_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
-  assert.match(text,/destination: \[default, custom, drive\]/);
+  const destinations=/destination: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(text);
+  assert.ok(destinations);assert.deepEqual(JSON.parse(destinations[1]),['drive-c']);assert.deepEqual(JSON.parse(destinations[2]),['default','custom','drive']);
+  const included=/include: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(text);
+  assert.ok(included);assert.deepEqual(JSON.parse(included[1]),[]);assert.deepEqual(JSON.parse(included[2]),[{phase:'production',scenario:'success',destination:'default'}]);
+  assert.match(text,/root_coverage_only:[\s\S]*?type: boolean\s+default: false/);
   assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
 });
 
@@ -410,5 +425,5 @@ test('production regression is independent and fails closed without blocking can
   const production=source.slice(source.indexOf('export async function production('),source.indexOf('export async function run('));
   assert.match(production,/verifySignedBundle/);assert.match(production,/await ps\('production'/);assert.match(production,/passed:false/);assert.match(production,/throw error/);
   const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
-  assert.match(workflow,/phase: \[candidate\]/);assert.match(workflow,/phase: production/);assert.match(workflow,/QA_COMMAND:/);assert.match(workflow,/if: matrix\.phase != 'production'/);
+  assert.match(workflow,/phase: \[candidate\]/);assert.match(workflow,/"phase":"production"/);assert.match(workflow,/QA_COMMAND:/);assert.match(workflow,/if: matrix\.phase != 'production'/);
 });

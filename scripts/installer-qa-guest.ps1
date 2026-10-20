@@ -21,13 +21,23 @@ if ($env:QA_CONTROLLER_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_SHA -cn
 if ($env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $env:GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z' -or !$env:RUNNER_TEMP -or !$env:LOCALAPPDATA -or $env:SYNCFILES_CONFIG_DIR) { throw 'Unexpected run/storage context' }
 $expectedRoot = Join-Path $env:RUNNER_TEMP "nearly-installer-qa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 if ($RunRoot -cne $expectedRoot) { throw 'Exact run root required' }
-if ($env:QA_DESTINATION -cnotin @('default','custom','drive')) { throw 'Explicit QA destination required' }
+function Resolve-GuestInstallRoot([string]$Action,[string]$DestinationKind,[System.Collections.IDictionary]$Destinations) {
+  if ($DestinationKind -cnotin @('default','custom','drive','drive-c')) { throw 'Explicit QA destination required' }
+  if ($Action -ceq 'production') { return $Destinations.default }
+  if ($Action -ceq 'drive') {
+    if ($DestinationKind -ceq 'drive-c') { return $Destinations['drive-c'] }
+    return $Destinations.drive
+  }
+  return $Destinations[$DestinationKind]
+}
+if ($env:QA_DESTINATION -cnotin @('default','custom','drive','drive-c')) { throw 'Explicit QA destination required' }
 $destinations = [ordered]@{
   default = Join-Path $env:LOCALAPPDATA 'Nearly'
   custom = Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly"
   drive = "D:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+  'drive-c' = "C:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 }
-$install = if ($Action -eq 'production') { $destinations.default } elseif ($Action -eq 'drive') { $destinations.drive } else { $destinations[$env:QA_DESTINATION] }
+$install = Resolve-GuestInstallRoot $Action $env:QA_DESTINATION $destinations
 $exe = Join-Path $install 'Nearly.exe'
 $uninstaller = Join-Path $install 'uninstall.exe'
 $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native'
@@ -216,7 +226,9 @@ function Prepare-EmptyUiRoot {
   Assert-LocalPath $parent
 }
 function Get-PreflightFileTargets([string]$Root,[System.Collections.IDictionary]$Destinations,[string]$StartDirectory,[string]$DesktopShortcut) {
-  return @($Root,$Destinations.default,$Destinations.custom,$Destinations.drive,$StartDirectory,$DesktopShortcut)
+  $targets=@($Root,$Destinations.default,$Destinations.custom,$Destinations.drive,$StartDirectory,$DesktopShortcut)
+  if ($Destinations.Contains('drive-c')) { $targets+=@($Destinations['drive-c']) }
+  return $targets
 }
 
 if ($Action -eq 'preflight') {
@@ -246,7 +258,7 @@ if ($Action -eq 'guard-probe') {
 $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.destinationKind -cne $env:QA_DESTINATION -or $plan.installRoot -cne $destinations[$env:QA_DESTINATION] -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
-foreach ($kind in @('default','custom','drive')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
+foreach ($kind in @('default','custom','drive','drive-c')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -316,7 +328,8 @@ function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[
   & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode -ConsentKind $ConsentKind -ConsentDecision $ConsentDecision
 }
 function New-SharedEmptyDriveFixture {
-  if ($Action -cne 'drive' -or $install -cne $destinations.drive -or (Test-Path -LiteralPath $install)) { throw 'Exact absent owned drive fixture required' }
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or (Test-Path -LiteralPath $install)) { throw 'Exact absent owned drive fixture required' }
   # Only this app-specific leaf is created/protected. Parent/drive ACLs are read-only.
   New-Item -ItemType Directory -Path $install | Out-Null
   $acl=[Security.AccessControl.DirectorySecurity]::new()

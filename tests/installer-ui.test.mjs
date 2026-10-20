@@ -8,6 +8,72 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('explicit drive-c selects only C while the original drive and negative cases remain D',{skip:process.platform!=='win32'},()=>{
+ const guest=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
+ for(const path of [script,guest]){
+  const text=fs.readFileSync(path,'utf8');
+  const original=text.match(/^  drive\s*=\s*("D:[^\r\n]+")/m)?.[1];
+  const explicit=text.match(/^  'drive-c'\s*=\s*("C:[^\r\n]+")/m)?.[1];
+  assert.ok(original&&explicit,'Both explicitly generated drive targets required');
+  assert.equal(explicit,original.replace('"D:','"C:'));
+  assert.ok(explicit.includes(String.fromCharCode(0x65e5,0x672c,0x8a9e)),'Japanese generated path must be preserved');
+ }
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+foreach($entry in @(@('__UI__',@('Resolve-UiDestinationKind')),@('__GUEST__',@('Resolve-GuestInstallRoot','Get-PreflightFileTargets')))){
+ $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($entry[0],[ref]$tokens,[ref]$errors)
+ if($errors.Count){throw 'QA script parse error'}
+ foreach($name in $entry[1]){
+  $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+  if($fn.Count -ne 1){throw 'Explicit destination selector missing'};Invoke-Expression $fn[0].Extent.Text
+ }
+}
+$slash=[char]92
+$destinations=@{default=('C:'+$slash+'local'+$slash+'Nearly');custom=('C:'+$slash+'local'+$slash+'custom');drive=('D:'+$slash+'Nearly QA generated');'drive-c'=('C:'+$slash+'Nearly QA generated')}
+foreach($kind in @('default','custom','drive','drive-c')){
+ $plan=[pscustomobject]@{destinationKind=$kind;installRoot=$destinations[$kind];destinations=[pscustomobject]$destinations}
+ if((Resolve-GuestInstallRoot 'ui' $kind $destinations) -cne $destinations[$kind]){throw 'Ordinary selected destination changed'}
+ if((Resolve-GuestInstallRoot 'production' $kind $destinations) -cne $destinations.default){throw 'Production default changed'}
+ $driveKind=if($kind -ceq 'drive-c'){'drive-c'}else{'drive'}
+ if((Resolve-GuestInstallRoot 'drive' $kind $destinations) -cne $destinations[$driveKind]){throw 'Drive selection silently changed roots'}
+ foreach($mode in @('Install','Cancel','Reject','Drive')){
+  if((Resolve-UiDestinationKind $plan $destinations $destinations[$driveKind] $mode) -cne $driveKind){throw 'Selected drive UI/evidence kind mismatch'}
+  $other=if($driveKind -ceq 'drive-c'){'drive'}else{'drive-c'}
+  $rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $destinations[$other] $mode}catch{$rejected=$true}
+  if(!$rejected){throw 'Unselected drive root accepted'}
+ }
+ if((Resolve-UiDestinationKind $plan $destinations $plan.installRoot 'Install') -cne $kind){throw 'Normal UI evidence kind changed'}
+ $rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $plan.installRoot.ToUpperInvariant() 'Install'}catch{$rejected=$true}
+ if(!$rejected){throw 'Nonexact target spelling accepted'}
+}
+foreach($bad in @('Drive-c','drive-d','other','')){$rejected=$false;try{Resolve-GuestInstallRoot 'drive' $bad $destinations}catch{$rejected=$true};if(!$rejected){throw 'Unknown destination fell back'}}
+$plan=[pscustomobject]@{destinationKind='drive-c';installRoot=$destinations['drive-c'];destinations=[pscustomobject]$destinations}
+$plan.destinations.'drive-c'=$destinations.drive
+$rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $destinations['drive-c'] 'Drive'}catch{$rejected=$true}
+if(!$rejected){throw 'Tampered destination table accepted'}
+$targets=@(Get-PreflightFileTargets ('C:'+$slash+'run') $destinations ('C:'+$slash+'start') ('C:'+$slash+'desktop'))
+if($targets.Count -ne 7 -or $targets -cnotcontains $destinations['drive-c'] -or $targets -cnotcontains $destinations.drive){throw 'Both explicit drives not preflighted'}
+# Execute only the fixture's selection/refusal statements, before any creation,
+# identity/token read or ACL construction. All existence checks are mocked.
+$ast=[Management.Automation.Language.Parser]::ParseFile('__GUEST__',[ref]$null,[ref]$null)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'New-SharedEmptyDriveFixture'},$true)[0]
+$guard=$fn.Body.EndBlock.Statements | Select-Object -First 2
+function Test-Path {param($LiteralPath)return $script:exists}
+foreach($kind in @('drive','drive-c')){
+ $env:QA_DESTINATION=$kind;$Action='drive';$install=$destinations[$kind];$script:exists=$false
+ foreach($statement in $guard){Invoke-Expression $statement.Extent.Text}
+ foreach($bad in @('wrong-root','wrong-action','exists')){
+  $Action='drive';$install=$destinations[$kind];$script:exists=$false
+  switch($bad){'wrong-root'{$install=$destinations[$(if($kind -ceq 'drive-c'){'drive'}else{'drive-c'})]}'wrong-action'{$Action='ui'}'exists'{$script:exists=$true}}
+  $rejected=$false;try{foreach($statement in $guard){Invoke-Expression $statement.Extent.Text}}catch{$rejected=$true}
+  if(!$rejected){throw 'Fixture refusal guard changed'}
+ }
+}
+'Explicit C/D destination contract passed'
+`.replaceAll('__UI__',script.replaceAll("'","''")).replaceAll('__GUEST__',guest.replaceAll("'","''"));
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Explicit C\/D destination contract passed/);
+});
 test('read-only text failures re-enumerate only generic failure or timeout within the existing wait deadline',{skip:process.platform!=='win32'},()=>{
  let csharp=fs.readFileSync(script,'utf8').match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
  assert.ok(csharp,'owned interop source missing');

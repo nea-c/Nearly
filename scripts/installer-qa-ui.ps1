@@ -60,6 +60,16 @@ function Assert-UiSelection([int[]]$Actual,[int[]]$Expected) {
     if ($Actual[$i] -notin @(0,1) -or $Expected[$i] -notin @(0,1) -or $Actual[$i] -ne $Expected[$i]) { throw 'Actual checkbox state differs from requested choice' }
   }
 }
+function Resolve-UiDestinationKind($Plan,[System.Collections.IDictionary]$Destinations,[string]$SelectedRoot,[string]$Mode) {
+  if ($Plan.destinationKind -cnotin @('default','custom','drive','drive-c')) { throw 'Owned destination kind required' }
+  foreach ($name in @('default','custom','drive','drive-c')) {
+    if ($Plan.destinations.$name -cne $Destinations[$name]) { throw 'Generated destination table mismatch' }
+  }
+  $driveKind=if ($Plan.destinationKind -ceq 'drive-c') { 'drive-c' } else { 'drive' }
+  if ($Plan.installRoot -cne $Destinations[$Plan.destinationKind] -or ($SelectedRoot -cne $Plan.installRoot -and $SelectedRoot -cne $Destinations[$driveKind]) -or ($Mode -cin @('Reject','Drive') -and $SelectedRoot -cne $Destinations[$driveKind])) { throw 'Unapproved destination for UI mode' }
+  if ($SelectedRoot -ceq $Destinations[$driveKind]) { return $driveKind }
+  return $Plan.destinationKind
+}
 $context=@{}
 foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $context[$entry.Key]=$entry.Value }
 $expectedRoot=Assert-UiContext $context
@@ -86,14 +96,14 @@ Assert-UiPath $RunRoot
 $planPath=Join-Path $RunRoot 'plan.json'
 Assert-UiInput $planPath
 $plan=Get-Content -LiteralPath $planPath -Raw -Encoding utf8 | ConvertFrom-Json
-if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or $plan.destinationKind -cnotin @('default','custom','drive')) { throw 'Owned plan marker mismatch' }
+if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT -or $plan.destinationKind -cnotin @('default','custom','drive','drive-c') -or $env:QA_DESTINATION -cne $plan.destinationKind) { throw 'Owned plan marker mismatch' }
 $destinations=@{
   default=(Join-Path $env:LOCALAPPDATA 'Nearly')
   custom=(Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly")
   drive="D:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+  'drive-c'="C:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 }
-foreach ($name in @('default','custom','drive')) { if ($plan.destinations.$name -cne $destinations[$name]) { throw 'Generated destination table mismatch' } }
-if ($plan.installRoot -cne $destinations[$plan.destinationKind] -or ($InstallRoot -cne $plan.installRoot -and $InstallRoot -cne $destinations.drive) -or ($Mode -in @('Reject','Drive') -and $InstallRoot -cne $destinations.drive)) { throw 'Unapproved destination for UI mode' }
+$selectedDestinationKind=Resolve-UiDestinationKind $plan $destinations $InstallRoot $Mode
 Assert-UiInput $Setup
 if ([IO.Path]::GetExtension($Setup) -cne '.exe') { throw 'Owned setup EXE required' }
 Assert-UiPath $InstallRoot
@@ -635,6 +645,6 @@ try {
 } finally {
   # Deliberately emit only generated labels, known UI captions and states.
   # Never copy logs, arbitrary window text, settings, tokens, binaries or env.
-  $report=[ordered]@{schemaVersion=1;case=$CaseName;language=$Language;mode=$Mode;destinationKind=$(if($InstallRoot -ceq $destinations.drive){'drive'}else{$plan.destinationKind});start=$Start;desktop=$Desktop;result=$result;lastStage=$stage;events=@($events.ToArray())}
+  $report=[ordered]@{schemaVersion=1;case=$CaseName;language=$Language;mode=$Mode;destinationKind=$selectedDestinationKind;start=$Start;desktop=$Desktop;result=$result;lastStage=$stage;events=@($events.ToArray())}
   $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir 'evidence.json') -Encoding utf8
 }

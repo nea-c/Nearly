@@ -29,10 +29,11 @@ export function validateContext(e,platform=process.platform){
   for(const k of ['GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'])if(!exact(/[1-9][0-9]*/,e[k])||!Number.isSafeInteger(Number(e[k])))fail('Canonical run identity required');
   return Object.freeze({controllerSha:sha,runId:e.GITHUB_RUN_ID,runAttempt:e.GITHUB_RUN_ATTEMPT,runnerTemp:canonicalWindows(e.RUNNER_TEMP),localAppData:canonicalWindows(e.LOCALAPPDATA)});
 }
-export function validateDestination(value){if(!['default','custom','drive'].includes(value))fail('Select exactly one QA_DESTINATION for this fresh guest');return value;}
+export function validateDestination(value){if(!['default','custom','drive','drive-c'].includes(value))fail('Select exactly one QA_DESTINATION for this fresh guest');return value;}
 export function createPlan(c,destinationKind='default'){
   validateDestination(destinationKind);
   const leaf=`Nearly Installer QA ${c.runId}-${c.runAttempt}`,destinations={default:path.win32.join(c.localAppData,'Nearly'),custom:path.win32.join(c.localAppData,leaf,'日本語 space','Nearly'),drive:path.win32.join('D:\\',`Nearly QA 日本語 ${c.runId}-${c.runAttempt}`)};
+  destinations['drive-c']=path.win32.join('C:\\',path.win32.basename(destinations.drive));
   return {schemaVersion:2,controllerSha:c.controllerSha,runId:c.runId,runAttempt:c.runAttempt,runRoot:path.win32.join(c.runnerTemp,`nearly-installer-qa-${c.runId}-${c.runAttempt}`),destinationKind,destinations,installRoot:destinations[destinationKind],sourceVersion:'1.9.0',targetVersion:'2.0.0',...SOURCE};
 }
 export function validatePlan(p,c,destinationKind='default'){
@@ -388,7 +389,7 @@ export async function run(e=process.env){
       await ps('ui',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256,'-Language',language,'-CaseName',`${language}-cancel`,'-UiMode','Cancel'],fixtureEnv);
       results.push({case:`candidate-ui-${language}-cancel`,passed:true});
     }
-    if(destination==='drive'){
+    if(destination==='drive'||destination==='drive-c'){
       await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);results.push({case:'drive-consent-preservation-and-content-refusal',passed:true});
     }
     {

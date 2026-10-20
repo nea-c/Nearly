@@ -29,6 +29,7 @@ fn installed_path(env:&HashMap<String,String>,kind:&str,run:&str,attempt:&str)->
         "default"=>Ok(Path::new(local).join("Nearly")),
         "custom"=>Ok(Path::new(local).join(format!("Nearly Installer QA {run}-{attempt}")).join("日本語 space").join("Nearly")),
         "drive"=>Ok(PathBuf::from(format!("D:\\Nearly QA 日本語 {run}-{attempt}"))),
+        "drive-c"=>Ok(PathBuf::from(format!("C:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} {run}-{attempt}"))),
         _=>Err("qaPlan"),
     }
 }
@@ -43,9 +44,9 @@ fn validate_install_policy(env:&HashMap<String,String>,p:&Plan,image:&Path,args:
     crate::install_root::validate_path(&args[1]).map_err(|_|"qaPolicy")?;
     let plugin=image.parent().ok_or("qaPolicy")?;let folder=plugin.file_name().and_then(|s|s.to_str()).ok_or("qaPolicy")?;
     if image.file_name().and_then(|s|s.to_str())!=Some("Nearly-install-policy.exe")||!nsis_plugin_folder(folder)||!bases.iter().any(|base|plugin.parent().is_some_and(|parent|same(parent,base))){return Err("qaPolicy");}
-    if !["default","custom","drive"].iter().any(|kind|installed_path(env,kind,&p.run_id,&p.run_attempt).is_ok_and(|root|same(&root,Path::new(&args[1])))){return Err("qaPolicy");}
+    if !["default","custom","drive","drive-c"].iter().any(|kind|installed_path(env,kind,&p.run_id,&p.run_attempt).is_ok_and(|root|same(&root,Path::new(&args[1])))){return Err("qaPolicy");}
     // Only after proving the exact extracted helper, arguments and one of this
-    // run's three targets may the common compiled identity validator be reused.
+    // run's four targets may the common compiled identity validator be reused.
     let expected=installed_path(env,&p.destination_kind,&p.run_id,&p.run_attempt)?.join("Nearly.exe");
     validate(env,p,&expected,token,sha)
 }
@@ -55,7 +56,7 @@ fn validate(env:&HashMap<String,String>,p:&Plan,image:&Path,compiled_token:&str,
     if !matches!(get("GITHUB_REF")?,"refs/heads/main"|"refs/heads/codex/private-install-directory"){return Err("qaContext")}
     if env.contains_key("SYNCFILES_CONFIG_DIR")||!matches!(get("NEARLY_QA_SCENARIO")?,"success"|"health-failure"){return Err("qaContext")}
     if !hex(compiled_token,64)||!hex(compiled_sha,40)||p.token!=compiled_token||get("NEARLY_QA_TOKEN")?!=compiled_token||p.controller_sha!=compiled_sha||get("GITHUB_SHA")?!=compiled_sha||get("GITHUB_WORKFLOW_SHA")?!=compiled_sha||get("QA_CONTROLLER_SHA")?!=compiled_sha||get("QA_CONFIRMATION")?!=format!("installer-qa {compiled_sha}"){return Err("qaIdentity")}
-    if p.schema_version!=2||!matches!(p.destination_kind.as_str(),"default"|"custom"|"drive")||get("QA_DESTINATION")?!=p.destination_kind||!id(&p.run_id)||!id(&p.run_attempt)||get("GITHUB_RUN_ID")?!=p.run_id||get("GITHUB_RUN_ATTEMPT")?!=p.run_attempt||p.source_version!="1.9.0"||p.target_version!="2.0.0"||p.target_file!="Nearly_r2.0_x64-setup.exe"||p.signature_file!="Nearly_r2.0_x64-setup.exe.sig"||!hex(&p.target_sha256,64)||!hex(&p.payload_sha256,64)||p.target_bytes==0||p.target_bytes>64*1024*1024{return Err("qaPlan")}
+    if p.schema_version!=2||!matches!(p.destination_kind.as_str(),"default"|"custom"|"drive"|"drive-c")||get("QA_DESTINATION")?!=p.destination_kind||!id(&p.run_id)||!id(&p.run_attempt)||get("GITHUB_RUN_ID")?!=p.run_id||get("GITHUB_RUN_ATTEMPT")?!=p.run_attempt||p.source_version!="1.9.0"||p.target_version!="2.0.0"||p.target_file!="Nearly_r2.0_x64-setup.exe"||p.signature_file!="Nearly_r2.0_x64-setup.exe.sig"||!hex(&p.target_sha256,64)||!hex(&p.payload_sha256,64)||p.target_bytes==0||p.target_bytes>64*1024*1024{return Err("qaPlan")}
     let safe=|s:&str|{let b=s.as_bytes();b.len()>3&&b[0].is_ascii_alphabetic()&&b[1]==b':'&&(b[2]==b'\\'||b[2]==b'/')&&!s[2..].contains(':')&&!s.split(['\\','/']).any(|x|x=="."||x==".."||x.ends_with(' ')||x.ends_with('.'))};
     let temp=get("RUNNER_TEMP")?;let local=get("LOCALAPPDATA")?;let supplied=get("NEARLY_QA_RUN_ROOT")?;
     if !safe(temp)||!safe(local)||!safe(supplied)||!safe(&image.to_string_lossy()){return Err("qaPath")}
@@ -226,6 +227,27 @@ mod tests {
         (e,p,PathBuf::from(r"C:\guest\Local\Nearly\Nearly.exe"))
     }
     #[test] fn exact_manual_guest_context_accepts_installed_image(){let(e,p,i)=fixture();assert!(validate(&e,&p,&i,&p.token,&p.controller_sha).is_ok());}
+    #[test]fn drive_c_is_an_exact_closed_destination_with_bound_identity_and_backups(){
+        let(mut e,mut p,_)=fixture();p.destination_kind="drive-c".into();e.insert("QA_DESTINATION".into(),"drive-c".into());
+        let root=PathBuf::from("C:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-1");let image=root.join("Nearly.exe");
+        assert!(validate(&e,&p,&image,&p.token,&p.controller_sha).is_ok());
+        assert_eq!(installed_path(&e,"drive-c","42","1").unwrap(),root);
+        let backup=root.join(".Nearly-update-state").join("e".repeat(32)).join("previous-image.exe");
+        assert!(validate(&e,&p,&backup,&p.token,&p.controller_sha).is_ok());
+        for bad in [PathBuf::from("D:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-1\\Nearly.exe"),PathBuf::from("C:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-2\\Nearly.exe"),PathBuf::from(r"C:\unrelated\Nearly.exe"),root.join("subfolder").join("Nearly.exe"),root.join(".Nearly-update-state").join("short").join("previous-image.exe"),root.join(".Nearly-update-state").join("E".repeat(32)).join("previous-image.exe"),root.join(".Nearly-update-state").join("e".repeat(32)).join("Nearly.exe")] {assert!(validate(&e,&p,&bad,&p.token,&p.controller_sha).is_err(),"{bad:?}");}
+        for kind in ["default","custom","drive","drive-e","C:"] {let mut wrong=e.clone();wrong.insert("QA_DESTINATION".into(),kind.into());assert!(validate(&wrong,&p,&image,&p.token,&p.controller_sha).is_err());}
+        for key in ["NEARLY_QA_TOKEN","GITHUB_SHA","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT"] {let mut wrong=e.clone();wrong.insert(key.into(),"foreign".into());assert!(validate(&wrong,&p,&image,&p.token,&p.controller_sha).is_err());}
+        p.destination_kind="drive".into();e.insert("QA_DESTINATION".into(),"drive".into());e.insert("QA_DRIVE_ROOT".into(),"C:\\".into());assert!(validate(&e,&p,&image,&p.token,&p.controller_sha).is_err());
+        assert!(installed_path(&e,"drive-e","42","1").is_err());assert!(installed_path(&e,"C:","42","1").is_err());
+    }
+    #[test]fn policy_helper_accepts_only_the_known_run_c_root_with_all_existing_authorization(){
+        let(e,p,_)=fixture();let bases=[PathBuf::from(r"C:\guest\Temp")];let image=Path::new(r"C:\guest\Temp\nszAB12.tmp\Nearly-install-policy.exe");
+        let root="C:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-1";
+        let args=vec!["--nearly-install-check".into(),root.into()];assert!(validate_install_policy(&e,&p,image,&args,&bases,&p.token,&p.controller_sha).is_ok());
+        let prepare=vec!["--nearly-install-prepare".into(),root.into(),format!("new.{}.{}","a".repeat(32),"b".repeat(64))];assert!(validate_install_policy(&e,&p,image,&prepare,&bases,&p.token,&p.controller_sha).is_ok());
+        for path in ["C:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-2","E:\\Nearly QA \u{65e5}\u{672c}\u{8a9e} 42-1",r"C:\unrelated"] {let bad=vec!["--nearly-install-check".into(),path.into()];assert!(validate_install_policy(&e,&p,image,&bad,&bases,&p.token,&p.controller_sha).is_err());}
+        let mut wrong=e.clone();wrong.insert("NEARLY_QA_TOKEN".into(),"c".repeat(64));assert!(validate_install_policy(&wrong,&p,image,&args,&bases,&p.token,&p.controller_sha).is_err());
+    }
     #[test]fn exact_private_install_branch_and_drive_destination_are_authorized(){
         let(mut e,mut p,_)=fixture();e.insert("GITHUB_REF".into(),"refs/heads/codex/private-install-directory".into());p.destination_kind="drive".into();e.insert("QA_DESTINATION".into(),"drive".into());
         let image=Path::new("D:\\Nearly QA 日本語 42-1\\Nearly.exe");assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_ok());
