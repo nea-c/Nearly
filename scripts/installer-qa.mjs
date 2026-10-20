@@ -283,9 +283,23 @@ export function copyFixturePath(relative){
   // dist/build directories, which must remain intact in each source copy.
   return !['.git','build','dist','.test-build','.superpowers','.agents','.codex','.aws','.ssh','test-results','playwright-report'].includes(parts[0])&&!(parts[0]==='src-tauri'&&parts[1]==='target');
 }
+export function instrumentCandidatePolicyDiagnostics(template){
+  if(typeof template!=='string'||template.length>262144||template.includes('NEARLY_QA_POLICY_'))fail('Unexpected candidate diagnostic template');
+  let result=template;
+  for(const [label,message]of [['nearly_policy_bad','NEARLY_QA_POLICY_HELPER'],['nearly_plan_bad','NEARLY_QA_POLICY_EXIT=$0']]){
+    const marker=`  ${label}:`;
+    if(result.split(marker).length!==2)fail('Candidate diagnostic boundary missing or ambiguous');
+    // Failure-only observation in disposable QA fixtures. No admission, write,
+    // signature or exit semantics change; production sources are untouched.
+    result=result.replace(marker,`${marker}\n  MessageBox MB_ICONSTOP|MB_OK "${message}"`);
+  }
+  return result;
+}
 async function buildFixture(p,version,signer,token,baseEnv){
   const paths=fixtureBuildPaths(p,version),dir=paths.sourceDir;
   await fs.cp(root,dir,{recursive:true,errorOnExist:true,force:false,filter:src=>copyFixturePath(path.relative(root,src))});
+  const template=path.join(dir,'src-tauri/windows/installer.nsi');
+  await fs.writeFile(template,instrumentCandidatePolicyDiagnostics(await fs.readFile(template,'utf8')));
   await fs.writeFile(path.join(dir,'version.json'),JSON.stringify({version})+'\n');
   const env={...baseEnv,NEARLY_QA_BUILD_TOKEN:token,NEARLY_QA_CONTROLLER_SHA:p.controllerSha,NEARLY_QA_PUBLIC_KEY:signer.publicRaw.toString('base64'),CARGO_TARGET_DIR:paths.targetDir};
   await execute(process.execPath,['scripts/sync-version.mjs'],{cwd:dir,env});

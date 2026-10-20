@@ -59,7 +59,7 @@ jobs:
           node --input-type=module -e "import {validateContext,validateScenario} from './scripts/installer-qa.mjs'; validateContext(process.env); validateScenario(process.env.QA_SCENARIO);"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Safe orchestration, UI policy and evidence unit tests
-        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs
+        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs tests/installer-passive-observer.test.mjs tests/installer-failure-diagnostic.test.mjs
       - name: Prove standard-user guest startup before dependency preparation
         run: node scripts/installer-qa.mjs preflight
       - name: Prepare pinned cached NSIS tools without installing any runtime

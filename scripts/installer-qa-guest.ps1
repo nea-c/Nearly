@@ -65,6 +65,33 @@ function Wait-Condition([scriptblock]$Condition,[int]$Seconds=30) {
   while ([DateTime]::UtcNow -lt $deadline) { if (& $Condition) { return }; Start-Sleep -Milliseconds 250 }
   throw 'Bounded guest state wait timed out; evidence retained'
 }
+$script:passiveDiagnosticsAttempted=$false
+function Invoke-DiagnosticObserver($Process,[string]$Image) {
+  . (Join-Path $PSScriptRoot 'installer-qa-passive-observer.ps1')
+  Watch-NearlyPassiveInstaller -OwnedProcessId $Process.Id -ExpectedImage $Image -ExpectedStartTimeUtcTicks $Process.StartTime.ToUniversalTime().Ticks -TimeoutSeconds 30
+}
+function Write-ProductionFailureDiagnostic([string]$File,[int]$OriginalExitCode) {
+  # A diagnostic follow-up can change a partially installed payload. Capture the
+  # original state first; the caller ALWAYS throws the original /S failure.
+  if ($Action -cne 'production' -or $File -cne $Setup -or $OriginalExitCode -ne 6 -or $script:passiveDiagnosticsAttempted) { return }
+  $script:passiveDiagnosticsAttempted=$true
+  try {
+    Assert-UnderRun $File
+    if ((Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc') { throw 'Immutable diagnostic artifact differs' }
+    $snapshot=[ordered]@{kind='immutableProductionFailureSnapshot';originalExitCode=$OriginalExitCode;payloadSha256=$null;uninstallerSha256=$null}
+    foreach ($pair in @(@('payloadSha256',$exe),@('uninstallerSha256',$uninstaller))) {
+      if (Test-Path -LiteralPath $pair[1]) {
+        Assert-Regular $pair[1]
+        $snapshot[$pair[0]]=(Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash.ToLowerInvariant()
+      }
+    }
+    Write-Host (ConvertTo-Json -InputObject $snapshot -Compress)
+    Write-Host 'Separate passive diagnostic follows; original silent regression remains failed.'
+    $diagnostic=Start-Process -FilePath $File -ArgumentList '/P' -PassThru -WindowStyle Hidden
+    $observation=Invoke-DiagnosticObserver $diagnostic $File
+    Write-Host (ConvertTo-Json -InputObject $observation -Compress)
+  } catch { Write-Host 'Separate passive diagnostic unavailable; original regression remains failed.' }
+}
 function Invoke-Bounded([string]$File,[string[]]$Arguments) {
   Assert-Regular $File
   $p = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden
@@ -74,6 +101,7 @@ function Invoke-Bounded([string]$File,[string[]]$Arguments) {
       $state=[ordered]@{kind='installerQaProcessFailure';exitCode=$p.ExitCode;payloadPresent=(Test-Path -LiteralPath $exe);uninstallerPresent=(Test-Path -LiteralPath $uninstaller);registrationPresent=(Test-Path -LiteralPath $registration);startShortcutPresent=(Test-Path -LiteralPath $startShortcut);desktopShortcutPresent=(Test-Path -LiteralPath $desktopShortcut)}
       Write-Host (ConvertTo-Json -InputObject $state -Compress)
     } catch { Write-Host 'Bounded installer failure state unavailable' }
+    Write-ProductionFailureDiagnostic $File $p.ExitCode
     throw "Installer exited with $($p.ExitCode)"
   }
 }

@@ -309,9 +309,19 @@ function Get-ProtectionDialog([IntPtr]$Window) {
   if (![NearlyOwnedUi]::DefaultButton($no[0],$ownedProcess.Id) -or [NearlyOwnedUi]::DefaultButton($yes[0],$ownedProcess.Id)) { throw 'Protection must default to No' }
   return @{kind=$specs[0].kind;window=$Window;yes=$yes[0];no=$no[0];defaultNo=$true}
 }
+function Get-CandidatePolicyDiagnostic([string]$Text) {
+  if ($Text -ceq 'NEARLY_QA_POLICY_HELPER') { return 'helper-namespace' }
+  if ($Text -cmatch '\ANEARLY_QA_POLICY_EXIT=(-?[0-9]{1,10}|error|timeout)\z') { return 'helper-exit-'+$Matches[1] }
+}
 function Wait-DirectoryTransition {
   return Wait-Ui {
     foreach ($window in @(Controls ([IntPtr]::Zero) | Where-Object { $_ -ne $main })) {
+      foreach ($control in @(Controls $window)) {
+        if ([NearlyOwnedUi]::Class($control,$ownedProcess.Id) -ceq 'Static') {
+          $code=Get-CandidatePolicyDiagnostic ([NearlyOwnedUi]::Text($control,$ownedProcess.Id))
+          if ($code) { return @{kind='Diagnostic';window=$window;code=$code} }
+        }
+      }
       $protection=Get-ProtectionDialog $window
       if ($null -ne $protection) { return $protection }
       if ($null -ne (Get-RejectionButton $window)) { return @{kind='Reject';window=$window} }
@@ -484,6 +494,10 @@ try {
   Screenshot 'directory'
   Click-Id $main 1
   $transition=Wait-DirectoryTransition
+  if ($transition.kind -eq 'Diagnostic') {
+    Screenshot 'destination-rejected' $transition.window
+    throw "Candidate policy diagnostic: $($transition.code)"
+  }
   if ($transition.kind -eq 'Reject') {
     Screenshot 'destination-rejected' $transition.window
     if ($Mode -ne 'Reject') { throw 'Destination unexpectedly rejected' }
