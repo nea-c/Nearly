@@ -49,7 +49,7 @@ export function formatSummary(scenario,destination='default'){
   validateScenario(scenario);
   validateDestination(destination);
   const lifecycle=scenario==='success'?'native update/restart':'deliberate failed-health rollback';
-  return `Installer QA (${scenario}, ${destination}): signed production setup/uninstall, eight English/Japanese candidate UI choices, cancellation/back navigation and ${lifecycle} passed. QA fixtures remain only on this ephemeral runner; nothing published.\n`;
+  return `Candidate installer QA (${scenario}, ${destination}): eight English/Japanese UI choices, cancellation/back navigation and ${lifecycle} passed. Fixture executables remain on this ephemeral runner. Signed-production regression is reported by its separate job.\n`;
 }
 export function createFixtureSigner(){
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
@@ -256,9 +256,6 @@ async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,c
 const sourceRequest={repository:'nea-c/Nearly',commit:SOURCE.sourceCommit,tag:'r3.1',version:'3.1.0',workflowCommit:SOURCE.sourceCommit,runId:SOURCE.sourceRunId,runAttempt:SOURCE.sourceRunAttempt,mode:'release'};
 export function validatePinnedArtifact(artifact,repositoryId){return validateArtifact(artifact,sourceRequest,{id:SOURCE.artifactId,role:'signed',digest:SOURCE.zipSha256,repositoryId});}
 async function api(suffix,token){const response=await fetch(`https://api.github.com/repos/nea-c/Nearly${suffix}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(30000),redirect:'error'});if(!response.ok){const error=Error(`Pinned GitHub source unavailable (HTTP ${response.status}; no fallback)`);if([404,410].includes(response.status))error.code='PINNED_SOURCE_UNAVAILABLE';throw error;}return response.json();}
-export async function historicalQualification(qualify){
-  try{await qualify();return null;}catch(error){if(error.code==='PINNED_SOURCE_UNAVAILABLE')return error;throw error;}
-}
 async function downloadSigned(p,token){
   if(!token)fail('Read-only GitHub artifact access required');
   const [repo,artifact,run]=await Promise.all([api('',token),api(`/actions/artifacts/${SOURCE.artifactId}`,token),api(`/actions/runs/${SOURCE.sourceRunId}/attempts/${SOURCE.sourceRunAttempt}`,token)]);
@@ -328,6 +325,29 @@ export async function guardProbe(e=process.env){
   const nsis=await requireCachedTools(e.LOCALAPPDATA);
   return guestRunner(createPlan(c,destination),{...cleanChildEnv(e),NEARLY_NSIS_READONLY_QA:'1',NEARLY_NSIS_REQUIRE_PRIVATE_TEMP:'1',NEARLY_NSIS_ROOT:nsis})('guard-probe');
 }
+export async function production(e=process.env){
+  const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION);
+  if(scenario!=='success'||destination!=='default')fail('Signed production regression requires its own default guest');
+  const p=createPlan(c,destination),baseEnv=cleanChildEnv(e),ps=guestRunner(p,baseEnv);validatePlan(p,c,destination);
+  await ps('preflight');await fs.mkdir(p.runRoot);await fs.writeFile(path.join(p.runRoot,'plan.json'),canonical(p),{flag:'wx'});
+  const cases=[];
+  try{
+    if(await execute('git',['rev-parse','HEAD'],{capture:true,env:baseEnv})!==c.controllerSha)fail('Checkout differs from reviewed controller');
+    await loadTrustedPublicKey(root);await downloadSigned(p,e.GH_TOKEN);await ps('extract');
+    const signed=path.join(p.runRoot,'signed'),manifest=JSON.parse(await regular(path.join(signed,'signed-manifest.json'),131072));
+    const checked=await verifySignedBundle(signed,sourceRequest,{manifestHash:SOURCE.manifestHash,unsignedArtifactId:manifest.unsignedArtifactId,unsignedManifestHash:manifest.unsignedManifestHash,toolArtifactId:manifest.toolArtifactId,toolManifestHash:manifest.toolManifestHash});
+    if(checked.assets[0].sha256!==SOURCE.installerSha256)fail('Pinned production installer mismatch');
+    await fs.mkdir(path.join(p.runRoot,'settings'));
+    for(const [name,bytes]of Object.entries(settingsFixture()))await fs.writeFile(path.join(p.runRoot,'settings',name),bytes,{flag:'wx'});
+    await ps('production',['-Setup',path.join(signed,'Nearly_r3.1_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);
+    cases.push({case:'signed-production-setup-uninstall',passed:true});
+    await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:true,cases}),{flag:'wx'});
+    console.log('Signed production setup/reinstall/uninstall: all four shortcut choices and generated settings preservation passed.');
+  }catch(error){
+    cases.push({case:'signed-production-setup-uninstall',passed:false});
+    await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:false,cases}),{flag:'wx'});throw error;
+  }
+}
 export async function run(e=process.env){
   const c=validateContext(e),scenario=validateScenario(e.QA_SCENARIO),destination=validateDestination(e.QA_DESTINATION),p=createPlan(c,destination);validatePlan(p,c,destination);
   const baseEnv=cleanChildEnv(e),ps=guestRunner(p,baseEnv);
@@ -339,15 +359,6 @@ export async function run(e=process.env){
     await loadTrustedPublicKey(root);await requireCachedTools(e.LOCALAPPDATA);
     await fs.mkdir(path.join(p.runRoot,'settings'));
     for(const [name,bytes]of Object.entries(settingsFixture()))await fs.writeFile(path.join(p.runRoot,'settings',name),bytes,{flag:'wx'});
-    const historicalFailure=await historicalQualification(async()=>{
-    await downloadSigned(p,e.GH_TOKEN);await ps('extract');
-    const signed=path.join(p.runRoot,'signed'),manifest=JSON.parse(await regular(path.join(signed,'signed-manifest.json'),131072));
-    const checked=await verifySignedBundle(signed,sourceRequest,{manifestHash:SOURCE.manifestHash,unsignedArtifactId:manifest.unsignedArtifactId,unsignedManifestHash:manifest.unsignedManifestHash,toolArtifactId:manifest.toolArtifactId,toolManifestHash:manifest.toolManifestHash});
-    if(checked.assets[0].sha256!==SOURCE.installerSha256)fail('Pinned production installer mismatch');
-    await ps('production',['-Setup',path.join(signed,'Nearly_r3.1_x64-setup.exe'),'-ExpectedPayload',manifest.payloadSha256]);results.push({case:'signed-production-setup-uninstall',passed:true});
-    console.log('Signed production setup/reinstall/uninstall: all four shortcut choices and generated settings preservation passed.');
-    });
-    if(historicalFailure){results.push({case:'signed-production-setup-uninstall',passed:false});console.log('Pinned historical source unavailable. Independent candidate QA continues; overall qualification will remain failed.');}
     const signer=createFixtureSigner(),token=randomBytes(32).toString('hex');
     const source=await buildFixture(p,p.sourceVersion,signer,token,baseEnv),target=await buildFixture(p,p.targetVersion,signer,token,baseEnv);
     const targetBytes=await regular(target.setup),signature=signer.sign(targetBytes,target.payloadSha256);
@@ -377,7 +388,6 @@ export async function run(e=process.env){
       console.log('QA causal proof: '+JSON.stringify(proof));
       await ps('uninstall',[],env);results.push({case:scenario,passed:true,outcome});
     }
-    if(historicalFailure)throw historicalFailure;
     await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destination,source:SOURCE,passed:true,cases:results}),{flag:'wx'});
     if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario,destination));
     await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:true,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
@@ -388,6 +398,6 @@ export async function run(e=process.env){
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  if(process.argv.length!==3||!['run','preflight','guard-probe'].includes(process.argv[2])){console.error('Only manually authorized hosted guest commands are supported');process.exitCode=1;}
-  else (process.argv[2]==='preflight'?preflight():process.argv[2]==='guard-probe'?guardProbe():run()).catch(error=>{console.error(error.message);process.exitCode=1;});
+  if(process.argv.length!==3||!['run','production','preflight','guard-probe'].includes(process.argv[2])){console.error('Only manually authorized hosted guest commands are supported');process.exitCode=1;}
+  else (process.argv[2]==='preflight'?preflight():process.argv[2]==='guard-probe'?guardProbe():process.argv[2]==='production'?production():run()).catch(error=>{console.error(error.message);process.exitCode=1;});
 }

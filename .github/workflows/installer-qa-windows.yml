@@ -17,15 +17,20 @@ concurrency:
   cancel-in-progress: false
 jobs:
   guest:
-    name: Fresh guest / ${{ matrix.scenario }} / ${{ matrix.destination }}
+    name: Fresh guest / ${{ matrix.phase || 'candidate' }} / ${{ matrix.scenario }} / ${{ matrix.destination }}
     if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory')
     runs-on: windows-2025
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        phase: [candidate]
         scenario: [success, health-failure]
         destination: [default, custom, drive]
+        include:
+          - phase: production
+            scenario: success
+            destination: default
     permissions:
       contents: read
       actions: read
@@ -34,6 +39,7 @@ jobs:
       QA_CONFIRMATION: ${{ inputs.confirmation }}
       QA_SCENARIO: ${{ matrix.scenario }}
       QA_DESTINATION: ${{ matrix.destination }}
+      QA_COMMAND: ${{ matrix.phase == 'production' && 'production' || 'run' }}
       RUSTUP_TOOLCHAIN: 1.97.1
     defaults:
       run:
@@ -61,6 +67,7 @@ jobs:
       - name: Prove actual temporary plugin namespace admission before building
         run: node scripts/installer-qa.mjs guard-probe
       - name: Prepare locked build dependencies in this fresh guest
+        if: matrix.phase != 'production'
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -71,7 +78,7 @@ jobs:
       - name: Qualify actual destination and shortcut UI plus ephemeral QA update/restart/recovery
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/installer-qa.mjs run
+        run: node scripts/installer-qa.mjs $env:QA_COMMAND
       - name: Export only validated public screenshots and bounded result records
         id: evidence
         if: always() && steps.authorized.outcome == 'success'
@@ -80,7 +87,7 @@ jobs:
         if: always() && steps.evidence.outcome == 'success'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: nearly-installer-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scenario }}-${{ matrix.destination }}
+          name: nearly-installer-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scenario }}-${{ matrix.destination }}-${{ matrix.phase || 'candidate' }}
           path: ${{ runner.temp }}/nearly-installer-qa-${{ github.run_id }}-${{ github.run_attempt }}/public-evidence/
           overwrite: false
           if-no-files-found: error

@@ -231,6 +231,7 @@ test('a guest selects exactly one explicit scenario and reports only that lifecy
   for(const scenario of [undefined,null,'','both','success,health-failure','SUCCESS','success\n',['success']])assert.throws(()=>qa.validateScenario(scenario));
   assert.match(qa.formatSummary('success'),/native update\/restart passed/);
   assert.doesNotMatch(qa.formatSummary('success'),/rollback passed/);
+  assert.doesNotMatch(qa.formatSummary('success'),/signed production setup\/uninstall/);
   assert.match(qa.formatSummary('health-failure'),/deliberate failed-health rollback passed/);
   assert.doesNotMatch(qa.formatSummary('health-failure'),/update\/restart passed/);
   assert.throws(()=>qa.formatSummary('both'));
@@ -393,22 +394,21 @@ test('workflow remains manual, read-only and uploads only validated public evide
   assert.doesNotMatch(text,/secrets\.|contents: write|actions: write|pull_request:|push:/);
   assert.match(text,/upload-artifact@[a-f0-9]{40}/);assert.match(text,/public-evidence/);
   assert.match(text,/installer-qa-evidence\.mjs/);
-  assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs run/);
+  assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs \$env:QA_COMMAND/);
+  assert.match(text,/QA_COMMAND: \$\{\{ matrix\.phase == 'production' && 'production' \|\| 'run' \}\}/);
   assert.match(text,/fail-fast: false/);assert.match(text,/scenario: \[success, health-failure\]/);
   assert.match(text,/QA_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
   assert.match(text,/destination: \[default, custom, drive\]/);
   assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
 });
 
-test('unavailable historical source remains a failed qualification while independent candidate checks can continue',async()=>{
-  assert.equal(typeof qa.historicalQualification,'function');
-  assert.equal(await qa.historicalQualification(async()=>{}),null);
-  const unavailable=Object.assign(new Error('Pinned source unavailable'),{code:'PINNED_SOURCE_UNAVAILABLE'});
-  assert.equal(await qa.historicalQualification(async()=>{throw unavailable}),unavailable);
-  for(const failure of [new Error('Bad signature'),Object.assign(new Error('API denied'),{code:'ACCESS_DENIED'})]){
-    await assert.rejects(()=>qa.historicalQualification(async()=>{throw failure}),error=>error===failure);
-  }
+test('production regression is independent and fails closed without blocking candidate qualification',async()=>{
+  assert.equal(typeof qa.production,'function');await assert.rejects(()=>qa.production({...env(),GITHUB_ACTIONS:'false'}));
   const source=await fs.readFile(new URL('../scripts/installer-qa.mjs',import.meta.url),'utf8');
-  assert.ok(source.indexOf('if(historicalFailure)throw historicalFailure')>source.indexOf("await ps('uninstall',[],env)"));
-  assert.ok(source.indexOf('if(historicalFailure)throw historicalFailure')<source.indexOf('destination,source:SOURCE,passed:true'));
+  const candidate=source.slice(source.indexOf('export async function run('),source.indexOf('if(process.argv[1]'));
+  assert.doesNotMatch(candidate,/downloadSigned|historicalFailure|ps\('production'/);
+  const production=source.slice(source.indexOf('export async function production('),source.indexOf('export async function run('));
+  assert.match(production,/verifySignedBundle/);assert.match(production,/await ps\('production'/);assert.match(production,/passed:false/);assert.match(production,/throw error/);
+  const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
+  assert.match(workflow,/phase: \[candidate\]/);assert.match(workflow,/phase: production/);assert.match(workflow,/QA_COMMAND:/);assert.match(workflow,/if: matrix\.phase != 'production'/);
 });

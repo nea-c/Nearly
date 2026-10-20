@@ -13,6 +13,16 @@ pub(crate) struct Plan {
 fn hex(s:&str,n:usize)->bool{s.len()==n&&s.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
 fn id(s:&str)->bool{!s.starts_with('0')&&s.len()<=20&&!s.is_empty()&&s.bytes().all(|b|b.is_ascii_digit())}
 fn same(a:&Path,b:&Path)->bool{a.to_string_lossy().replace('/',"\\").eq_ignore_ascii_case(&b.to_string_lossy().replace('/',"\\"))}
+fn nsis_plugin_folder(folder:&str)->bool {
+    // NSIS v3.11 exehead/util.c my_GetTempFileName uses nsa..nsz.
+    // GetTempFileNameW adds a 16-bit hexadecimal suffix and .TMP:
+    // https://github.com/NSIS-Dev/nsis/blob/v311/Source/exehead/util.c#L470-L478
+    // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-gettempfilenamew
+    let b=folder.as_bytes();
+    (8..=11).contains(&b.len())&&b[..2].eq_ignore_ascii_case(b"ns")
+        &&b[2].is_ascii_alphabetic()&&b[b.len()-4..].eq_ignore_ascii_case(b".tmp")
+        &&b[3..b.len()-4].iter().all(u8::is_ascii_hexdigit)
+}
 fn installed_path(env:&HashMap<String,String>,kind:&str,run:&str,attempt:&str)->Result<PathBuf,&'static str>{
     let local=env.get("LOCALAPPDATA").ok_or("qaContext")?;
     match kind {
@@ -32,7 +42,7 @@ fn validate_install_policy(env:&HashMap<String,String>,p:&Plan,image:&Path,args:
     }
     crate::install_root::validate_path(&args[1]).map_err(|_|"qaPolicy")?;
     let plugin=image.parent().ok_or("qaPolicy")?;let folder=plugin.file_name().and_then(|s|s.to_str()).ok_or("qaPolicy")?;
-    if image.file_name().and_then(|s|s.to_str())!=Some("Nearly-install-policy.exe")||folder.len()<7||folder.len()>32||!folder.starts_with("ns")||!folder.ends_with(".tmp")||!folder[2..folder.len()-4].bytes().all(|b|b.is_ascii_hexdigit())||!bases.iter().any(|base|plugin.parent().is_some_and(|parent|same(parent,base))){return Err("qaPolicy");}
+    if image.file_name().and_then(|s|s.to_str())!=Some("Nearly-install-policy.exe")||!nsis_plugin_folder(folder)||!bases.iter().any(|base|plugin.parent().is_some_and(|parent|same(parent,base))){return Err("qaPolicy");}
     if !["default","custom","drive"].iter().any(|kind|installed_path(env,kind,&p.run_id,&p.run_attempt).is_ok_and(|root|same(&root,Path::new(&args[1])))){return Err("qaPolicy");}
     // Only after proving the exact extracted helper, arguments and one of this
     // run's three targets may the common compiled identity validator be reused.
@@ -223,18 +233,34 @@ mod tests {
     }
     #[test]fn policy_helper_requires_exact_plugin_image_args_target_and_compiled_context(){
         let(mut e,p,_)=fixture();e.insert("GITHUB_REF".into(),"refs/heads/codex/private-install-directory".into());
-        let bases=[PathBuf::from(r"C:\runner\temp"),PathBuf::from(r"C:\guest\Temp")];let image=Path::new(r"C:\guest\Temp\nsAB12.tmp\Nearly-install-policy.exe");
+        let bases=[PathBuf::from(r"C:\runner\temp"),PathBuf::from(r"C:\guest\Temp")];let image=Path::new(r"C:\guest\Temp\nszAB12.tmp\Nearly-install-policy.exe");
         for root in [r"C:\guest\Local\Nearly",r"C:\guest\Local\Nearly Installer QA 42-1\日本語 space\Nearly",r"D:\Nearly QA 日本語 42-1"]{
             let args=vec!["--nearly-install-check".into(),root.into()];assert!(validate_install_policy(&e,&p,image,&args,&bases,&p.token,&p.controller_sha).is_ok(),"{root}");
         }
         let consent=format!("new.{}.{}","a".repeat(32),"b".repeat(64));
         assert!(validate_install_policy(&e,&p,image,&["--nearly-install-prepare".into(),r"D:\Nearly QA 日本語 42-1".into(),consent],&bases,&p.token,&p.controller_sha).is_ok());
-        assert!(validate_install_policy(&e,&p,Path::new(r"C:\runner\temp\ns1.tmp\Nearly-install-policy.exe"),&["--nearly-install-check".into(),r"C:\guest\Local\Nearly".into()],&bases,&p.token,&p.controller_sha).is_ok());
-        for bad in [r"C:\other\nsAB12.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\sub\nsAB12.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\anything.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\nsAB12.tmp\Nearly.exe"]{
+        assert!(validate_install_policy(&e,&p,Path::new(r"C:\runner\temp\nsa1.tmp\Nearly-install-policy.exe"),&["--nearly-install-check".into(),r"C:\guest\Local\Nearly".into()],&bases,&p.token,&p.controller_sha).is_ok());
+        for bad in [r"C:\other\nszAB12.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\sub\nszAB12.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\anything.tmp\Nearly-install-policy.exe",r"C:\guest\Temp\nszAB12.tmp\Nearly.exe"]{
             assert!(validate_install_policy(&e,&p,Path::new(bad),&["--nearly-install-check".into(),r"C:\guest\Local\Nearly".into()],&bases,&p.token,&p.controller_sha).is_err());
         }
         for args in [vec!["--nearly-install-check".into(),r"D:\unrelated".into()],vec!["--nearly-install-prepare".into(),r"C:\guest\Local\Nearly".into(),"invalid".into()],vec!["--other".into(),r"C:\guest\Local\Nearly".into()]]{assert!(validate_install_policy(&e,&p,image,&args,&bases,&p.token,&p.controller_sha).is_err());}
         let mut bad=e.clone();bad.insert("GITHUB_SHA".into(),"c".repeat(40));assert!(validate_install_policy(&bad,&p,image,&["--nearly-install-check".into(),r"C:\guest\Local\Nearly".into()],&bases,&p.token,&p.controller_sha).is_err());
+    }
+    #[test]fn policy_helper_accepts_real_nsis_temp_names_and_rejects_other_formats(){
+        let(e,p,_)=fixture();let bases=[PathBuf::from(r"C:\guest\Temp")];
+        let args=vec!["--nearly-install-check".into(),r"C:\guest\Local\Nearly".into()];
+        for prefix in b'a'..=b'z' {for unique in ["0","1","aF","1aB","FFFF"] {
+            let image=bases[0].join(format!("ns{}{unique}.tmp",prefix as char)).join("Nearly-install-policy.exe");
+            assert!(validate_install_policy(&e,&p,&image,&args,&bases,&p.token,&p.controller_sha).is_ok(),"{image:?}");
+        }}
+        for folder in ["nsa1.TMP","NSzAb12.tmp","nsGfF.TmP"] {
+            let image=bases[0].join(folder).join("Nearly-install-policy.exe");
+            assert!(validate_install_policy(&e,&p,&image,&args,&bases,&p.token,&p.controller_sha).is_ok(),"{folder}");
+        }
+        for folder in ["","ns1.tmp","nsz.tmp","nsz12345.tmp","nsz12g.tmp","nsa-1.tmp","nsa1.tmp.extra","nsa1.tmp ","msz1.tmp","ns_1.tmp","nsé1.tmp","ns😀1.tmp"] {
+            let image=bases[0].join(folder).join("Nearly-install-policy.exe");
+            assert!(validate_install_policy(&e,&p,&image,&args,&bases,&p.token,&p.controller_sha).is_err(),"{folder}");
+        }
     }
     #[test] fn custom_guest_requires_exact_derived_unicode_root_and_destination_identity(){let(mut e,mut p,i)=fixture();p.destination_kind="custom".into();e.insert("QA_DESTINATION".into(),"custom".into());let image=Path::new(r"C:\guest\Local\Nearly Installer QA 42-1\日本語 space\Nearly\Nearly.exe");assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_ok());assert!(validate(&e,&p,&i,&p.token,&p.controller_sha).is_err());assert!(validate(&e,&p,Path::new(r"D:\Nearly QA 日本語 42-1\Nearly.exe"),&p.token,&p.controller_sha).is_err());e.insert("QA_DESTINATION".into(),"default".into());assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_err());p.destination_kind="drive".into();e.insert("QA_DESTINATION".into(),"drive".into());assert!(validate(&e,&p,image,&p.token,&p.controller_sha).is_err());}
     #[test] fn missing_or_foreign_guest_identity_refuses_before_io(){let(e,p,i)=fixture();for k in ["GITHUB_ACTIONS","RUNNER_ENVIRONMENT","RUNNER_OS","GITHUB_REPOSITORY","GITHUB_EVENT_NAME","GITHUB_REF","NEARLY_QA_TOKEN","GITHUB_SHA"]{let mut bad=e.clone();bad.insert(k.into(),"foreign".into());assert!(validate(&bad,&p,&i,&p.token,&p.controller_sha).is_err(),"{k}");}}

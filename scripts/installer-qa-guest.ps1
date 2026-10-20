@@ -69,7 +69,13 @@ function Invoke-Bounded([string]$File,[string[]]$Arguments) {
   Assert-Regular $File
   $p = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden
   if (!$p.WaitForExit(120000)) { throw 'Installer process timeout; runner retained for failure evidence' }
-  if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
+  if ($p.ExitCode -ne 0) {
+    try {
+      $state=[ordered]@{kind='installerQaProcessFailure';exitCode=$p.ExitCode;payloadPresent=(Test-Path -LiteralPath $exe);uninstallerPresent=(Test-Path -LiteralPath $uninstaller);registrationPresent=(Test-Path -LiteralPath $registration);startShortcutPresent=(Test-Path -LiteralPath $startShortcut);desktopShortcutPresent=(Test-Path -LiteralPath $desktopShortcut)}
+      Write-Host (ConvertTo-Json -InputObject $state -Compress)
+    } catch { Write-Host 'Bounded installer failure state unavailable' }
+    throw "Installer exited with $($p.ExitCode)"
+  }
 }
 function Assert-NoApp {
   foreach ($p in @(Get-Process -Name Nearly -ErrorAction SilentlyContinue)) { throw 'Nearly process already running' }
@@ -297,9 +303,12 @@ switch ($Action) {
     Assert-UnderRun $Setup; Assert-NoApp
     foreach ($choice in @(@(0,0),@(0,1),@(1,0),@(1,1))) {
       Seed-Settings; Set-Choices $choice[0] $choice[1]
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=install"
       Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
       # Reinstall is a real ordinary NSIS upgrade of an owned installed payload.
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=reinstall"
       Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=uninstall"
       Uninstall-Owned $true
     }
     Remove-GeneratedSettings
