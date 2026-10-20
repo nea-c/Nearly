@@ -46,6 +46,7 @@ function Start-Process {
  if($ArgumentList -ceq '/P'){return @{Id=123;StartTime=[datetime]'2026-10-20T00:00:00Z'}}
  $p=[pscustomobject]@{ExitCode=6};$p|Add-Member ScriptMethod WaitForExit {param($ms) return $true};return $p
 }
+function Get-ProductionWriteProbe {param($File) if($File -ceq $exe){return 32};if($File -ceq $uninstaller){return 0};throw 'Unexpected probe target'}
 function Watch-NearlyPassiveInstaller {param($OwnedProcessId,$ExpectedImage,$ExpectedStartTimeUtcTicks,$TimeoutSeconds) $script:observations++;throw 'private sentinel must not replace original'}
 # Dot-source resolves to the test observer instead of loading native UI code.
 function Invoke-DiagnosticObserver {param($Process,$Image) Watch-NearlyPassiveInstaller -OwnedProcessId $Process.Id -ExpectedImage $Image -ExpectedStartTimeUtcTicks $Process.StartTime.ToUniversalTime().Ticks -TimeoutSeconds 30}
@@ -63,4 +64,28 @@ if($script:launches -ne 2){throw 'Diagnostic retried'}
   const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});
   assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Original failure retained/);
   assert.doesNotMatch(r.stdout,/private sentinel/);
+  assert.match(r.stdout,/"payloadWriteOpenError":32/);assert.match(r.stdout,/"uninstallerWriteOpenError":0/);
+});
+
+test('write-access diagnosis has no write/delete API and rejects every other target before native access',{skip:process.platform!=='win32'},async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const code=source.match(/function Get-ProductionWriteProbe[\s\S]*?Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+ assert.match(code,/CreateFileW\(path,0x40000000,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero\)/);
+ assert.doesNotMatch(code,/WriteFile|DeleteFile|SetFile|SetSecurity|MoveFile|CREATE_ALWAYS|TRUNCATE_EXISTING/);
+ const script=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(code.replaceAll('NearlyQaWriteProbe','NearlyQaWriteProbeDeclarationsOnly')).toString('base64')}')))\n$source=[IO.File]::ReadAllText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))).toString('base64')}')))\n`+String.raw`
+class NearlyQaWriteProbe {static [int]$Calls=0;static [int]Read([string]$path){[NearlyQaWriteProbe]::Calls++;return 32}}
+$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+$fn=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-ProductionWriteProbe'},$true)
+. ([scriptblock]::Create($fn.Extent.Text))
+function Assert-Regular {param($File) if($File -cnotin @('owned.exe','uninstall.exe')){throw 'Unexpected file'}}
+$exe='owned.exe';$uninstaller='uninstall.exe';$Action='production'
+if((Get-ProductionWriteProbe $exe) -ne 32 -or (Get-ProductionWriteProbe $uninstaller) -ne 32){throw 'Numeric denial lost'}
+foreach($kind in @('foreign','phase')){
+ $Action='production';$file='foreign.exe';if($kind -ceq 'phase'){$Action='ui';$file=$exe}
+ $refused=$false;try{Get-ProductionWriteProbe $file}catch{$refused=$true};if(!$refused){throw 'Unowned probe accepted'}
+}
+if([NearlyQaWriteProbe]::Calls -ne 2){throw 'Native access escaped exact files'}
+'Only mock probes executed; native declarations compiled'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000});assert.equal(r.status,0,r.stderr||r.error?.message);
 });

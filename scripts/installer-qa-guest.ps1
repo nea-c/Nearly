@@ -78,7 +78,12 @@ function Write-ProductionFailureDiagnostic([string]$File,[int]$OriginalExitCode)
   try {
     Assert-UnderRun $File
     if ((Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc') { throw 'Immutable diagnostic artifact differs' }
-    $snapshot=[ordered]@{kind='immutableProductionFailureSnapshot';originalExitCode=$OriginalExitCode;payloadSha256=$null;uninstallerSha256=$null}
+    $snapshot=[ordered]@{kind='immutableProductionFailureSnapshot';originalExitCode=$OriginalExitCode;payloadSha256=$null;uninstallerSha256=$null;payloadWriteOpenError=$null;uninstallerWriteOpenError=$null}
+    foreach ($pair in @(@('payloadWriteOpenError',$exe),@('uninstallerWriteOpenError',$uninstaller))) {
+      if (Test-Path -LiteralPath $pair[1]) { $snapshot[$pair[0]]=Get-ProductionWriteProbe $pair[1] }
+    }
+    # Emit probes even if a subsequent sharing violation prevents hashing.
+    Write-Host (ConvertTo-Json -InputObject $snapshot -Compress)
     foreach ($pair in @(@('payloadSha256',$exe),@('uninstallerSha256',$uninstaller))) {
       if (Test-Path -LiteralPath $pair[1]) {
         Assert-Regular $pair[1]
@@ -279,6 +284,28 @@ public static class NearlyQaShortcut {
   public static bool Matches(string shortcut,string expected) {return TargetMatches(expected,ReadWide(shortcut));}
 }
 '@
+function Get-ProductionWriteProbe([string]$File) {
+  if ($Action -cne 'production' -or $File -cnotin @($exe,$uninstaller)) { throw 'Exact production payload probe required' }
+  Assert-Regular $File
+  if ($null -eq ('NearlyQaWriteProbe' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NearlyQaWriteProbe {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+ public static int Read(string path) {
+  // OPEN_EXISTING + OPEN_REPARSE_POINT, all sharing enabled. Request write
+  // access to diagnose sharing/access denial; never create, truncate or write.
+  using(var handle=CreateFileW(path,0x40000000,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+   return handle.IsInvalid?Marshal.GetLastWin32Error():0;
+  }
+ }
+}
+'@
+  }
+  return [NearlyQaWriteProbe]::Read($File)
+}
 function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice,[string]$ConsentKind='Auto',[string]$ConsentDecision='Yes') {
   if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
   Assert-UnderRun $Setup
