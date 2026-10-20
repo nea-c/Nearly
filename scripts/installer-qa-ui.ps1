@@ -141,6 +141,9 @@ public static class NearlyOwnedUi {
     public readonly int NativeError;
     public ReadUnavailableException(int error):base("Owned control read unavailable; error="+error){NativeError=error;}
   }
+  public sealed class StartupPendingException : Exception {
+    public StartupPendingException():base("Owned process image not loaded yet"){}
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc fn, IntPtr p);
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumProc fn, IntPtr p);
@@ -254,20 +257,55 @@ $main=[IntPtr]::Zero
 $languageWindow=[IntPtr]::Zero
 $result='failed'
 $stage='launch'
+$startupPhase='not-started'
+$script:processIdentityProved=$false
+$script:processFailureObservation=$null
+function Get-UiProcessObservation($Process,[string]$ExpectedImage,[string]$Stage,[bool]$LanguageWindowObserved,[bool]$MainWindowObserved,[string]$StartupPhase='unknown') {
+  $knownStage=if ($Stage -cin @('launch','language','directory','destination-rejection','protection-refused','shortcuts','cancel','install','finish')) { $Stage } else { 'unknown' }
+  $knownPhase=if ($StartupPhase -cin @('not-started','launch-requested','spawned','language-found','language-shown','combo-found','language-selected','language-captured','language-confirmed')) { $StartupPhase } else { 'unknown' }
+  $record=[ordered]@{schemaVersion=1;kind='installerQaUiProcessFailure';reason='missing-process';hasExited=$null;exitCode=$null;nativeError=$null;stage=$knownStage;startupPhase=$knownPhase;languageWindowObserved=$LanguageWindowObserved;mainWindowObserved=$MainWindowObserved}
+  if ($null -eq $Process) { return [pscustomobject]$record }
+  try {
+    # Explicit managed getter calls preserve exceptions. PowerShell's Path
+    # script property can turn a failing MainModule getter into a null value.
+    $record.hasExited=[bool]$Process.get_HasExited()
+    if ($record.hasExited) { $record.exitCode=[int]$Process.get_ExitCode();$record.reason='exited' }
+    else {
+      $module=$Process.get_MainModule()
+      $image=if ($null -eq $module) { $null } else { $module.get_FileName() }
+      $record.reason=if ([string]::IsNullOrEmpty($image)) { 'path-unavailable' } elseif ($image -ine $ExpectedImage) { 'image-mismatch' } else { 'active' }
+    }
+  } catch {
+    $record.reason='query-failed'
+    $failure=$_.Exception.GetBaseException()
+    if ($failure -is [ComponentModel.Win32Exception]) { $record.nativeError=[int]$failure.NativeErrorCode }
+  }
+  return [pscustomobject]$record
+}
 function Assert-Process {
-  if (!$ownedProcess -or $ownedProcess.HasExited -or $ownedProcess.Path -ine $Setup) { throw 'Launched setup identity no longer active' }
+  $observation=Get-UiProcessObservation $ownedProcess $Setup $stage ($languageWindow -ne [IntPtr]::Zero) ($main -ne [IntPtr]::Zero) $startupPhase
+  if ($observation.reason -ceq 'active') {
+    $script:processIdentityProved=$true;$script:processFailureObservation=$null
+    return
+  }
+  $script:processFailureObservation=$observation
+  # Process.Path reads MainModule.FileName. During initial loading a live
+  # process can have no MainModule yet. Never enumerate HWNDs or send input
+  # until the image is proved, and never tolerate path loss after that proof.
+  if ($observation.reason -ceq 'path-unavailable' -and !$script:processIdentityProved) { throw [NearlyOwnedUi+StartupPendingException]::new() }
+  throw 'Launched setup identity no longer active'
 }
 function Wait-Ui([scriptblock]$Condition,[int]$Seconds=30) {
   $deadline=[DateTime]::UtcNow.AddSeconds($Seconds)
   while ([DateTime]::UtcNow -lt $deadline) {
-    Assert-Process
     # Conditions only inspect controls. Re-enumerate a destroyed child or a
-    # temporarily unavailable text read within this same deadline. Input
-    # failures and nontransient native errors still propagate immediately.
-    try { $value=& $Condition }
+    # temporarily unavailable text read within this same deadline. An initial
+    # live image may still be loading; no UI condition runs until it is proved.
+    # Input failures and nontransient native errors propagate immediately.
+    try { Assert-Process; $value=& $Condition }
     catch {
       $failure=$_.Exception.GetBaseException()
-      if ($failure -isnot [NearlyOwnedUi+WindowChangedException] -and $failure -isnot [NearlyOwnedUi+ReadUnavailableException]) { throw }
+      if ($failure -isnot [NearlyOwnedUi+WindowChangedException] -and $failure -isnot [NearlyOwnedUi+ReadUnavailableException] -and $failure -isnot [NearlyOwnedUi+StartupPendingException]) { throw }
       $value=$null
     }
     # PowerShell converts boxed IntPtr.Zero to true when comparing a Boolean.
@@ -489,19 +527,24 @@ function Cancel-Setup([ValidateSet(1,5)][int]$ExpectedExitCode=1) {
   if ($ownedProcess.ExitCode -ne $ExpectedExitCode) { throw 'Unexpected cancelled installer exit code' }
 }
 try {
+  $startupPhase='launch-requested'
   $ownedProcess=Start-Process -FilePath $Setup -PassThru -WindowStyle Hidden
   if ($ownedProcess.Id -le 0) { throw 'Setup did not launch' }
+  $startupPhase='spawned'
   $stage='language'
   $languageWindow=Wait-Ui {
     foreach ($w in @(Controls ([IntPtr]::Zero))) { if (@(Controls $w | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'ComboBox' }).Count -eq 1) { return $w } }
   }
+  $startupPhase='language-found'
   [NearlyOwnedUi]::Show($languageWindow,$ownedProcess.Id)
+  $startupPhase='language-shown'
   # Showing/activating the dialog can transiently hide or recreate its child.
   # Re-query only this owned dialog until exactly one combo is available.
   $combo=Wait-Ui {
     $matches=@(Controls $languageWindow | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'ComboBox' })
     if ($matches.Count -eq 1) { return $matches[0] }
   }
+  $startupPhase='combo-found'
   $count=[NearlyOwnedUi]::Send($combo,$ownedProcess.Id,326,0,0).ToInt32()
   if ($count -ne 2) { throw 'Expected exact English/Japanese language list' }
   $languageIndex=-1
@@ -517,8 +560,11 @@ try {
   if ($languageIndex -lt 0) { throw 'Required actual language label absent' }
   [NearlyOwnedUi]::Send($combo,$ownedProcess.Id,334,$languageIndex,0) | Out-Null
   if ([NearlyOwnedUi]::Send($combo,$ownedProcess.Id,327,0,0).ToInt32() -ne $languageIndex) { throw 'Language selection did not stick' }
+  $startupPhase='language-selected'
   Screenshot 'language' $languageWindow
+  $startupPhase='language-captured'
   Click-Id $languageWindow 1
+  $startupPhase='language-confirmed'
   $main=Wait-Ui {
     foreach ($w in @(Controls ([IntPtr]::Zero))) {
       if ($w -ne $languageWindow -and [NearlyOwnedUi]::Class($w,$ownedProcess.Id) -ceq '#32770' -and @(ById $w 1).Count -eq 1) { return $w }
@@ -633,6 +679,13 @@ try {
     }
   }
 } catch {
+  if ($null -eq $script:processFailureObservation) {
+    $observation=Get-UiProcessObservation $ownedProcess $Setup $stage ($languageWindow -ne [IntPtr]::Zero) ($main -ne [IntPtr]::Zero) $startupPhase
+    if ($observation.reason -cne 'active') { $script:processFailureObservation=$observation }
+  }
+  if ($null -ne $script:processFailureObservation) {
+    try { Write-Host ('QA UI process failure: '+(ConvertTo-Json -InputObject $script:processFailureObservation -Compress)) } catch {}
+  }
   # Preserve only owned-window pixels and bounded numeric/known-kind metadata.
   # Never read arbitrary captions or let diagnostics replace the original error.
   $failureWindow=if ($main -ne [IntPtr]::Zero) { $main } else { $languageWindow }

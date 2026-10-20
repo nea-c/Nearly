@@ -8,6 +8,70 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('startup waits only for an initially missing live image and records finite process failure evidence',{skip:process.platform!=='win32'},()=>{
+ assert.equal((fs.readFileSync(script,'utf8').match(/\$ownedProcess=Start-Process/g)||[]).length,1,'The owned setup must launch exactly once');
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
+}
+public sealed class ModelModule {
+ readonly string mode,image;
+ public ModelModule(string mode,string image){this.mode=mode;this.image=image;}
+ public string FileName {get{if(mode=="query-error")throw new Exception("sensitive-path token");if(mode=="native0")throw new System.ComponentModel.Win32Exception(0,"sensitive-path token");if(mode=="native5")throw new System.ComponentModel.Win32Exception(5,"sensitive-path token");if(mode=="native299")throw new System.ComponentModel.Win32Exception(299,"sensitive-path token");return mode=="wrong"?"C:foreign-sensitive-path":image;}}
+}
+public sealed class ModelProcess {
+ public string Mode;readonly string image;public int Reads,Checks;
+ public ModelProcess(string mode,string image){Mode=mode;this.image=image;}
+ public bool HasExited {get{Checks++;if(Mode=="exit-query-error")throw new Exception("sensitive-path token");return Mode=="exited"||Mode=="exit-code-error";}}
+ public int ExitCode {get{if(Mode=="exit-code-error")throw new Exception("sensitive-path token");return 8;}}
+ public ModelModule MainModule {get{Reads++;if(Mode=="module-query-error")throw new Exception("sensitive-path token");if(Mode=="unavailable"||(Mode=="pending"&&Reads==1))return null;return new ModelModule(Mode,image);}}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('__UI__',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiProcessObservation','Assert-Process','Wait-Ui')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+ if($fn.Count -eq 1){Invoke-Expression $fn[0].Extent.Text}elseif($name -cne 'Get-UiProcessObservation'){throw 'Identity guard missing'}
+}
+$Setup='C:generated-sensitive-path';$stage='language';$startupPhase='spawned';$main=[IntPtr]::Zero;$languageWindow=[IntPtr]::Zero
+function Fake([string]$Mode){
+ $script:ownedProcess=[ModelProcess]::new($Mode,$Setup)
+ $script:processIdentityProved=$false;$script:processFailureObservation=$null;$script:enumerations=0
+}
+Fake 'pending'
+$ready=Wait-Ui {$script:enumerations++;return $true} 1
+if(!$ready -or $ownedProcess.Reads -ne 2 -or $script:enumerations -ne 1 -or !$script:processIdentityProved -or $null -ne $script:processFailureObservation){throw 'Initial live image was not proved before UI enumeration'}
+Fake 'unavailable';$failure=$null
+try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
+if($null -eq $failure -or $failure.Message -cne 'Bounded owned installer UI wait timed out' -or $script:enumerations -ne 0 -or $ownedProcess.Reads -lt 2 -or $ownedProcess.Reads -gt 8 -or $script:processFailureObservation.reason -cne 'path-unavailable'){throw 'Initial pending identity escaped its existing deadline or reached UI'}
+foreach($case in @(@('exited','exited'),@('wrong','image-mismatch'),@('query-error','query-failed'),@('native0','query-failed'),@('native5','query-failed'),@('native299','query-failed'),@('module-query-error','query-failed'),@('exit-query-error','query-failed'),@('exit-code-error','query-failed'),@('missing','missing-process'))){
+ Fake $case[0];if($case[0] -ceq 'missing'){$script:ownedProcess=$null}
+ $failure=$null;try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
+ if($null -eq $failure -or $script:enumerations -ne 0 -or $script:processFailureObservation.reason -cne $case[1]){throw ('Actual exit/wrong image/query error was retried or misclassified: '+$case[0]+' / '+$script:processFailureObservation.reason)}
+ if($case[0] -cne 'missing' -and $ownedProcess.Checks -ne 1){throw 'Process query failure or exit was retried'}
+ if($case[0] -ceq 'exited' -and (!$script:processFailureObservation.hasExited -or $script:processFailureObservation.exitCode -ne 8)){throw 'Actual early exit code lost'}
+ $expectedError=switch -CaseSensitive($case[0]){'native0'{0}'native5'{5}'native299'{299}default{$null}}
+ if($script:processFailureObservation.nativeError -ne $expectedError -or $script:processFailureObservation.startupPhase -cne 'spawned'){throw 'Native error or startup phase evidence lost'}
+ $json=ConvertTo-Json $script:processFailureObservation -Compress
+ if($json -match 'sensitive|token|Path|Exception'){throw 'Private process data leaked'}
+}
+Fake 'active';Assert-Process;$ownedProcess.Mode='unavailable';$failure=$null
+try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
+if($null -eq $failure -or $ownedProcess.Reads -ne 2 -or $script:enumerations -ne 0 -or $script:processFailureObservation.reason -cne 'path-unavailable'){throw 'Identity loss after proof was retried'}
+$languageWindow=[IntPtr]1;$main=[IntPtr]2;Fake 'exited';$r=Get-UiProcessObservation $ownedProcess $Setup 'untrusted private-stage' $true $true
+if($r.stage -cne 'unknown' -or !$r.languageWindowObserved -or !$r.mainWindowObserved -or $r.exitCode -ne 8){throw 'Failure stage/window evidence was not bounded'}
+$r=Get-UiProcessObservation $ownedProcess $Setup 'language' $true $false 'language-selected'
+if($r.stage -cne 'language' -or $r.startupPhase -cne 'language-selected' -or !$r.languageWindowObserved -or $r.mainWindowObserved){throw 'Selected-language failure phase lost'}
+'Initial identity and bounded failure contract passed'
+`.replaceAll('__UI__',script.replaceAll("'","''"));
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Initial identity and bounded failure contract passed/);
+});
 test('explicit drive-c selects only C while the original drive and negative cases remain D',{skip:process.platform!=='win32'},()=>{
  const guest=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
  for(const path of [script,guest]){
@@ -182,6 +246,7 @@ using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
  public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static string Mode="ok";public static int Id=2,Inputs=0,Queries=0;public static bool Gone=false;
  public static string Class(IntPtr h,int pid){if(pid!=7)throw new Exception("Foreign PID");if(Gone&&h==(IntPtr)1)throw new Exception("Destroyed modal queried");if(Mode=="race"&&Queries++==0)throw new WindowChangedException();return h==(IntPtr)10?"#32770":h==(IntPtr)1?(Mode=="dialog"?"Edit":"#32770"):h==(IntPtr)2?"Static":"Button";}
  public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
@@ -351,6 +416,7 @@ using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
  public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static string Class(IntPtr h,int pid){if(h==(IntPtr)3)throw new WindowChangedException();return h==(IntPtr)2?"Button":"sensitive arbitrary class";}
  public static int GetDlgCtrlID(IntPtr h){return h==(IntPtr)2?1001:int.MaxValue;}
  public static bool IsWindowEnabled(IntPtr h){return true;}
@@ -408,6 +474,7 @@ using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
  public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static int Queries=0;
  public static string Class(IntPtr h,int pid){Queries++;if(Queries==1)throw new WindowChangedException();return "Button";}
 }
