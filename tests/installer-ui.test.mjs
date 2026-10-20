@@ -8,6 +8,42 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('directory selection skips an exact existing target and verifies every requested edit',{skip:process.platform!=='win32'},()=>{
+ assert.match(fs.readFileSync(script,'utf8'),/Set-VerifiedDirectorySelection \$edit\r?\n  Screenshot 'directory'/);
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+class NearlyOwnedUi {
+ static [string]$Current='D:\Owned\Nearly'
+ static [int]$Writes=0
+ static [int]$Reads=0
+ static [bool]$Refuse=$false
+ static [bool]$ForbidWrite=$false
+ static [string] Text([IntPtr]$h,[int]$pidValue){if($h -ne 19 -or $pidValue -ne 7){throw 'Foreign directory queried'};[NearlyOwnedUi]::Reads++;return [NearlyOwnedUi]::Current}
+ static [void] SetText([IntPtr]$h,[int]$pidValue,[string]$value){if($h -ne 19 -or $pidValue -ne 7 -or $value -cne 'D:\Owned\Nearly'){throw 'Foreign directory edit'};if([NearlyOwnedUi]::ForbidWrite){throw 'Redundant exact-target edit'};[NearlyOwnedUi]::Writes++;if(![NearlyOwnedUi]::Refuse){[NearlyOwnedUi]::Current=$value}}
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Set-VerifiedDirectorySelection'},$true)
+if($fn.Count -ne 1){throw 'Directory selection implementation missing'}
+Invoke-Expression $fn[0].Extent.Text
+$ownedProcess=[pscustomobject]@{Id=7};$InstallRoot='D:\Owned\Nearly'
+[NearlyOwnedUi]::ForbidWrite=$true
+Set-VerifiedDirectorySelection ([IntPtr]19)
+if([NearlyOwnedUi]::Writes -ne 0 -or [NearlyOwnedUi]::Reads -ne 2){throw 'Exact target must skip writing and verify readback'}
+[NearlyOwnedUi]::ForbidWrite=$false
+foreach($initial in @('D:\Other\Nearly','d:\Owned\Nearly','D:\Owned\NEARLY','D:\Owned\.\Nearly')){
+ [NearlyOwnedUi]::Current=$initial;[NearlyOwnedUi]::Writes=0;[NearlyOwnedUi]::Reads=0
+ Set-VerifiedDirectorySelection ([IntPtr]19)
+ if([NearlyOwnedUi]::Writes -ne 1 -or [NearlyOwnedUi]::Reads -ne 2 -or [NearlyOwnedUi]::Current -cne $InstallRoot){throw 'Mismatch must write the exact target once and verify'}
+}
+[NearlyOwnedUi]::Current='D:\Other\Nearly';[NearlyOwnedUi]::Refuse=$true
+$rejected=$false;try{Set-VerifiedDirectorySelection ([IntPtr]19)}catch{$rejected=$true}
+if(!$rejected){throw 'Failed target readback accepted'}
+'Verified directory selection passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Verified directory selection passed/);
+});
 test('known rejection dialogs select the actual owned OK control and await dismissal without guessing ID',{skip:process.platform!=='win32'},()=>{
  const source=String.raw`
 $ErrorActionPreference='Stop'

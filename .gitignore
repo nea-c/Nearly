@@ -135,6 +135,7 @@ Thumbs.db
 !/scripts/installer-qa.mjs
 !/scripts/installer-qa-guest.ps1
 !/scripts/installer-qa-passive-observer.ps1
+!/scripts/installer-qa-drive-diagnosis.ps1
 !/docs/windows-installer-qa.md
 !/scripts/production-build-policy.mjs
 !/scripts/installer-qa-ui.ps1

@@ -260,6 +260,14 @@ function Click-Id([IntPtr]$Parent,[int]$Id) {
   if ($NavigationMode -ceq 'Command') { [NearlyOwnedUi]::Command($Parent,$button,$ownedProcess.Id,$Id) }
   else { [NearlyOwnedUi]::Click($button,$ownedProcess.Id) }
 }
+function Set-VerifiedDirectorySelection([IntPtr]$Edit) {
+  # The default edit can already contain the exact target. Avoid sending a
+  # redundant WM_SETTEXT, but always read back the owned control afterwards.
+  if ([NearlyOwnedUi]::Text($Edit,$ownedProcess.Id) -cne $InstallRoot) {
+    [NearlyOwnedUi]::SetText($Edit,$ownedProcess.Id,$InstallRoot)
+  }
+  if ([NearlyOwnedUi]::Text($Edit,$ownedProcess.Id) -cne $InstallRoot) { throw 'Actual destination edit did not retain generated destination' }
+}
 function Get-RejectionButton([IntPtr]$Window) {
   if (@(Controls ([IntPtr]::Zero) | Where-Object { $_ -eq $Window }).Count -ne 1 -or [NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770') { return }
   $children=@(Controls $Window)
@@ -491,8 +499,7 @@ try {
   Click-Id $main 1
   $stage='directory'
   $edit=Wait-Ui { $v=@(ById $main 1019 | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Edit' }); if ($v.Count -eq 1) { return $v[0] } }
-  [NearlyOwnedUi]::SetText($edit,$ownedProcess.Id,$InstallRoot)
-  if ([NearlyOwnedUi]::Text($edit,$ownedProcess.Id) -cne $InstallRoot) { throw 'Actual destination edit did not retain generated destination' }
+  Set-VerifiedDirectorySelection $edit
   Screenshot 'directory'
   Click-Id $main 1
   $transition=Wait-DirectoryTransition

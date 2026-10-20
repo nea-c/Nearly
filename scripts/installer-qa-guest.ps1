@@ -237,6 +237,10 @@ if ($Action -eq 'guard-probe') {
   if ($env:NEARLY_NSIS_READONLY_QA -cne '1' -or $env:NEARLY_NSIS_REQUIRE_PRIVATE_TEMP -cne '1' -or $env:NEARLY_NSIS_ROOT -cne (Join-Path $env:LOCALAPPDATA 'tauri\NSIS')) { throw 'Exact read-only guard probe context required' }
   & node --test '--test-name-pattern=temporary plugin ancestry' (Join-Path $PSScriptRoot '..\src-tauri\windows\readonly-root.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
+  if ($env:QA_DESTINATION -ceq 'drive') {
+    . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
+    Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
+  }
   return
 }
 $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
