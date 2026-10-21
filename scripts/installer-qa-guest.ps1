@@ -258,6 +258,10 @@ if ($Action -eq 'guard-probe') {
   if ($LASTEXITCODE -ne 0) { throw 'Generated whole-tree deletion qualification failed' }
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\qa-diagnostics-native.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated diagnostic and shortcut qualification failed' }
+  $env:NEARLY_UNINSTALL_COMPLETION_FIXTURE='1'
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\uninstall-completion.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated uninstall completion and deletion failure qualification failed' }
+  Remove-Item Env:\NEARLY_UNINSTALL_COMPLETION_FIXTURE
   if ($env:QA_DESTINATION -ceq 'drive') {
     . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
     Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
@@ -417,12 +421,23 @@ function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][strin
       Click-Owned $main 1
     }
   } else { Click-Owned $main 1 }
+  $completion=@{observed=$false}
   Wait-Condition {
     if ($p.HasExited) { return $true }
     $buttons=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($_) })
-    if ($buttons.Count -eq 1 -and [NearlyOwnedUi]::Text($buttons[0],$p.Id) -cin @('Close','&Close')) { Click-Owned $main 1 }
+    if ($buttons.Count -eq 1 -and [NearlyOwnedUi]::Text($buttons[0],$p.Id) -cin @('Close','&Close')) {
+      $bars=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'msctls_progress32' })
+      if ($bars.Count -ne 1) { throw 'Exact owned uninstall progress control required' }
+      $position=[NearlyOwnedUi]::Send($bars[0],$p.Id,1032,0,0).ToInt32()
+      $maximum=[NearlyOwnedUi]::Send($bars[0],$p.Id,1031,0,0).ToInt32()
+      if ($maximum -le 0 -or $position -ne $maximum) { throw 'Successful uninstall did not reach its progress maximum' }
+      $completion.observed=$true
+      Write-Host "Uninstall completion progress: mode=$Mode value=$position/$maximum"
+      Click-Owned $main 1
+    }
     return $false
   } 60
+  if (!$completion.observed) { throw 'Uninstall exited before successful completion progress was observed' }
   if ($p.ExitCode -ne 0) { throw "Generated uninstaller option failed: $($p.ExitCode)" }
 }
 function New-SharedEmptyDriveFixture {
