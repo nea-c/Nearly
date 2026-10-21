@@ -146,3 +146,4 @@ Thumbs.db
 !/scripts/installer-probe-codes.mjs
 !/scripts/uninstall-completion-fixture.cs
 !/scripts/payload-sharing-fixture.cs
+!/scripts/release-native-admission.ps1
