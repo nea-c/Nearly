@@ -28,7 +28,7 @@ test('PR measurement uses the same exact checks and build steps as production, w
     }
     for(const s of expected.steps){
       if(s.with?.path==='source')s.with.ref='${{ github.event.pull_request.base.sha }}';
-      if(s.run)s.run=s.run.replaceAll('signed-release.mjs preflight','parallel-release-validation.mjs preflight').replaceAll('signed-release.mjs package','parallel-release-validation.mjs package');
+      if(s.run)s.run=s.run.replaceAll('signed-release.mjs preflight','parallel-release-validation.mjs preflight').replaceAll('signed-release.mjs package','parallel-release-validation.mjs package').replace('./scripts/release-native-admission.ps1','../control/.github/scripts/parallel-native-admission.ps1');
     }
     assert.deepEqual(w.jobs[name],expected,name+' preserves checks, pinning, source SHA checkout and build commands');
   }
@@ -38,4 +38,22 @@ test('PR measurement uses the same exact checks and build steps as production, w
   assert.deepEqual(w.jobs['validation-result'].needs,['browser-ui','unsigned-build']);
   assert.equal(w.jobs['validation-result'].if,`always() && (${w.jobs.policy.if})`,'unrelated PRs must skip the result check as well');
   assert.match(w.jobs['validation-result'].steps[0].run,/BROWSER_RESULT.*BUILD_RESULT.*BROWSER_SOURCE.*RELEASE_COMMIT/s);
+});
+
+test('PR standard-user adapter preserves the complete release pin/launcher/test body without changing production admission',()=>{
+  const release=fs.readFileSync(path.join(root,'scripts/release-native-admission.ps1'),'utf8');
+  const adapter=fs.readFileSync(path.join(root,'.github/scripts/parallel-native-admission.ps1'),'utf8');
+  const contextStart=release.indexOf('$context=@{}'),contextEnd=release.indexOf('$head=& git -C $root rev-parse HEAD');
+  const expected=release.slice(release.indexOf('function Assert-AdmissionResult'),contextStart)
+    +'$root=[IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE \'source\'))\n'
+    +'$context=@{RELEASE_COMMIT=$env:RELEASE_COMMIT}\n'
+    +'if((Get-Location).ProviderPath -cne $root) { throw \'Exact reviewed PR base source required\' }\n'
+    +release.slice(contextEnd).replace("(Join-Path $PSScriptRoot 'installer-qa-standard-user.cs')","(Join-Path $root 'scripts/installer-qa-standard-user.cs')");
+  assert.equal(adapter.slice(adapter.indexOf('function Assert-AdmissionResult')).replaceAll('\r\n','\n'),expected.replaceAll('\r\n','\n'));
+  assert.match(adapter,/GITHUB_ACTIONS.*RUNNER_OS.*RUNNER_ENVIRONMENT/s);
+  assert.match(adapter,/parallel-release-validation\.mjs'\) preflight.*GITHUB_WORKSPACE 'source'/);
+  assert.ok(adapter.indexOf('parallel-release-validation.mjs')<adapter.indexOf('Add-Type'));
+  assert.doesNotMatch(adapter,/Assert-ReleaseNativeContext|Set-Acl|RunAs|LogonUser|Remove-Item|SetEnvironmentVariable\('GITHUB_/i);
+  assert.match(release,/GITHUB_EVENT_NAME','workflow_dispatch'/);
+  assert.match(release,/GITHUB_REF','refs\/heads\/main'/);
 });

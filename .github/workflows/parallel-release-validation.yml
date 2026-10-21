@@ -8,6 +8,7 @@ on:
       - .github/workflows/release-signed-windows.yml
       - .github/workflows/parallel-release-validation.yml
       - .github/scripts/parallel-release-validation.mjs
+      - .github/scripts/parallel-native-admission.ps1
       - tests/signed-workflow.test.mjs
       - tests/signed-parallel-validation.test.mjs
 permissions: {}
@@ -151,7 +152,7 @@ jobs:
         run: cargo +1.97.1 test --offline --locked --manifest-path src-tauri/Cargo.toml -- --skip install_root::native::tests::ordinary_inherited_namespace_is_admitted_by_production_validation --skip install_root::native::tests::generated_custom_root_payload_current_identity_and_namespace_guards --test-threads=1
       - name: Standard-user installation admission tests
         working-directory: source
-        run: ./scripts/release-native-admission.ps1
+        run: ../control/.github/scripts/parallel-native-admission.ps1
       - name: Generated localhost SFTP fixtures
         working-directory: source
         run: |
