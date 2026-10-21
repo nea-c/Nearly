@@ -105,8 +105,15 @@ jobs:
         run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs tests/installer-passive-observer.test.mjs tests/installer-failure-diagnostic.test.mjs tests/installer-drive-diagnosis.test.mjs
       - name: Prove standard-user guest startup before dependency preparation
         run: node scripts/installer-qa.mjs preflight
+      - name: Verify exact signing-plan and source-bound tool contracts without production signing
+        run: node --test tests/signed-release-contract.test.mjs tests/signed-tools.test.mjs
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
+      - name: Compile exact NSIS template and verify payload archive contract
+        run: |
+          $env:NEARLY_NSIS_ROOT=Join-Path $env:LOCALAPPDATA 'tauri\NSIS'
+          node --test src-tauri/windows/*.test.mjs tests/build-installer.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove actual temporary plugin namespace admission before building
         run: node scripts/installer-qa.mjs guard-probe
       - name: Prepare locked build dependencies in this fresh guest
@@ -117,6 +124,8 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 fetch --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 test --locked --manifest-path tools/updater-signer/Cargo.toml --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Qualify actual destination and shortcut UI plus ephemeral QA update/restart/recovery
         env:

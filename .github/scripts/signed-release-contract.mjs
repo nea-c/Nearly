@@ -56,7 +56,7 @@ export async function verifyUnsignedBundle(dir,r,{manifestHash,artifactId,allowS
 }
 export async function createSigningPlan(dir,output,r,options){
   const bundle=await verifyUnsignedBundle(dir,r,options),name=expectedName(r);
-  const m={updaterProtocol:3,version:r.version,arch:'x64',file:name,sourceCommit:r.commit,artifactId:options.artifactId,archiveMember:'Nearly.exe',installerSha256:bundle.assets[0].sha256,payloadSha256:bundle.manifest.payload.sha256};
+  const m={updaterProtocol:3,version:r.version,arch:'x64',file:name,sourceCommit:r.commit,artifactId:options.artifactId,archiveMember:'$PLUGINSDIR/Nearly.exe',installerSha256:bundle.assets[0].sha256,payloadSha256:bundle.manifest.payload.sha256};
   const bytes=canonical(m);await fs.writeFile(output,bytes,{flag:'wx'});return{manifest:m,manifestHash:sha256(bytes)};
 }
 async function trustedRaw(options){return options.trustedPublicRaw||loadTrustedPublicKey(control);}

@@ -112,7 +112,7 @@ impl Manifest {
         }
         if !matches!(
             self.archive_member.as_str(),
-            "Nearly.exe" | "$INSTDIR/Nearly.exe"
+            "Nearly.exe" | "$INSTDIR/Nearly.exe" | "$PLUGINSDIR/Nearly.exe"
         ) {
             return Err("invalid archive member");
         }
@@ -289,7 +289,7 @@ pub fn validate_listing(listing: &str, member: &str) -> Result<()> {
     Ok(())
 }
 pub fn extract_payload(archive: &std::path::Path, member: &str) -> Result<Vec<u8>> {
-    if !matches!(member, "Nearly.exe" | "$INSTDIR/Nearly.exe") {
+    if !matches!(member, "Nearly.exe" | "$INSTDIR/Nearly.exe" | "$PLUGINSDIR/Nearly.exe") {
         return Err("invalid archive member");
     }
     let _archive = read_pinned(archive, MAX_FILE)?;
@@ -497,6 +497,18 @@ mod tests {
         (installer, payload, manifest)
     }
     #[test]
+    fn archive_member_names_are_exact_across_old_and_temporary_layouts() {
+        let (installer, payload, mut m) = fixture();
+        for name in ["Nearly.exe", "$INSTDIR/Nearly.exe", "$PLUGINSDIR/Nearly.exe"] {
+            m.archive_member = name.into();
+            assert!(m.validate(&installer, &payload).is_ok(), "{name}");
+        }
+        for name in ["../Nearly.exe", "$PLUGINSDIR/../Nearly.exe", "$PLUGINSDIR/nearly.exe", "$PLUGINSDIR\\Nearly.exe", "./Nearly.exe", "Other/Nearly.exe"] {
+            m.archive_member = name.into();
+            assert!(m.validate(&installer, &payload).is_err(), "{name}");
+        }
+    }
+    #[test]
     fn signatures_interoperate_with_exact_native_verifier_and_reject_tampering() {
         let (installer, payload, m) = fixture();
         let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
@@ -611,6 +623,15 @@ mod tests {
     }
     #[test]
     fn listing_requires_one_exact_member_and_rejects_case_and_duplicate_ambiguity() {
+        assert!(validate_listing("Path = $PLUGINSDIR\\Nearly.exe\n", "$PLUGINSDIR/Nearly.exe").is_ok());
+        for listing in [
+            "Path = $PLUGINSDIR\\nearly.exe\n",
+            "Path = $PLUGINSDIR\\Nearly.exe\nPath = Nearly.exe\n",
+            "Path = $PLUGINSDIR\\Nearly.exe\nPath = $PLUGINSDIR\\NEARLY.EXE\n",
+            "Path = $PLUGINSDIR\\..\\Nearly.exe\n",
+        ] {
+            assert!(validate_listing(listing, "$PLUGINSDIR/Nearly.exe").is_err());
+        }
         assert!(validate_listing(
             "Path = archive.exe\n\nPath = Nearly.exe\nSize = 256\n",
             "Nearly.exe"

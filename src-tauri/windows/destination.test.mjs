@@ -69,7 +69,7 @@ function pathDecision(destination,{driveType=3,filesystem='NTFS',canonical=desti
  assert.fail('Validator fell through');
 }
 test('actual path validator accepts dedicated local folders and rejects ambiguous or unsupported namespaces',()=>{
- for(const p of ['C:\\Nearly','D:\\Apps\\Nearly','d:\\Components\\Nearly','C:\\Computer\\Nearly','C:\\日本語\\Nearly','.'].slice(0,-1))assert.equal(pathDecision(p),true,p);
+ for(const p of ['C:\\Nearly','D:\\Nearly','E:\\Nearly','D:\\Apps\\Nearly','d:\\Components\\Nearly','C:\\Computer\\Nearly','C:\\日本語\\Nearly','.'].slice(0,-1))assert.equal(pathDecision(p),true,p);
  assert.equal(pathDecision('C:\\'+'x'.repeat(173)),true,'176 UTF16 boundary');
  assert.equal(pathDecision('C:\\'+'x'.repeat(174)),false,'177 UTF16 boundary');
  for(const p of ['C:\\','C:Nearly','Nearly','\\\\server\\Nearly','\\\\?\\C:\\Nearly','C:\\Nearly\\','C:\\\\Nearly','C:/Nearly','C:\\Nearly:stream','C:\\Nearly.','C:\\Nearly ','C:\\..\\Nearly','C:\\.\\Nearly','C:\\CON','C:\\NUL.txt','C:\\CONIN$','C:\\CONOUT$','C:\\COM1','C:\\COM¹.txt','C:\\LPT9.log','C:\\LPT³','C:\\Na\x01me','C:\\'+ 'x'.repeat(237),'C:\\'+'界'.repeat(171)])assert.equal(pathDecision(p),false,JSON.stringify(p));
@@ -88,7 +88,11 @@ test('uninstaller image equivalence is mandatory before mutations and held until
  const open=body('un.NearlyOpenImage');assert.match(open,/CreateFileW\(w "\$NearlyPayload", i \$NearlyImageAccess, i \$NearlyImageShare,/);assert.match(open,/GetFileInformationByHandle/);assert.match(open,/StrCmp \$3 1/);
  const verify=body('un.NearlyVerifyUninstallerImage');assert.match(verify,/GetModuleFileNameW/);assert.match(verify,/ReadFile/);assert.match(verify,/RtlCompareMemory/);assert.match(verify,/StrCmp \$NearlyImageSize \$NearlyImageRemaining/);
  assert.match(verify,/StrCpy \$NearlyImageAccess 0x80010080/);
- const section=s.slice(s.indexOf('Section Uninstall'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')>section.indexOf('StrCpy $NearlyIoWriteHandle $NearlyRegisteredImageHandle'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')<section.indexOf('DeleteRegKey HKCU'));
+ const section=s.slice(s.indexOf('Section Uninstall'));
+ const ordinary=section.slice(section.indexOf('nearly_uninstall_keep_data:'));
+ assert.ok(ordinary.indexOf('Call un.NearlyImageCleanup')>ordinary.indexOf('StrCpy $NearlyIoWriteHandle $NearlyRegisteredImageHandle'));
+ assert.ok(ordinary.indexOf('Call un.NearlyImageCleanup')<ordinary.indexOf('DeleteRegKey HKCU'));
+ assert.match(section,/StrCpy \$NearlyWholeHandle \$NearlyRegisteredImageHandle\s+StrCpy \$NearlyRegisteredImageHandle 0/);
 });
 test('all pending handles and buffers release before rejecting a directory page',()=>{
  const reject=s.match(/Function \$\{prefix\}NearlyRejectRoot\r?\n([\s\S]*?)FunctionEnd/)[1];

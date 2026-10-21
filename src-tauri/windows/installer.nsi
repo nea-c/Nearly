@@ -126,6 +126,26 @@ Var NearlyIoDisposition
 Var NearlyImageDeleteMode
 Var NearlyImageAccess
 Var NearlyImageShare
+Var NearlyRootIdentityHandle
+Var NearlyRootIdentity
+Var NearlyUninstallRootIdentity
+Var NearlyRemoveAll
+Var NearlyRemoveCheckbox
+Var NearlyWholeRoot
+Var NearlyWholeTop
+Var NearlyWholeHandle
+Var NearlyWholeInfo
+Var NearlyWholePath
+Var NearlyWholeEntry
+Var NearlyWholeDepth
+Var NearlyWholeCount
+Var NearlyWholeExpectedKind
+Var NearlyWholeProtected
+Var NearlyWholeStarted
+Var NearlyWholeCursor
+Var NearlyWholeNext
+Var NearlyWholeAttributes
+Var NearlyWholeAncestorIdentity
 
 ; Shared guard implementation. The NSIS/System ABI is 32-bit even for x64 payloads.
 ; Every existing ancestor is opened without FILE_SHARE_DELETE until all mutations
@@ -389,6 +409,38 @@ Function ${prefix}NearlyValidatePayloads
   StrCpy $NearlyPayload "$INSTDIR\uninstall.exe"
   Call ${prefix}NearlyValidatePayload
   StrCpy $NearlyUninstallerSnapshot $NearlySnapshot
+FunctionEnd
+Function ${prefix}NearlyCaptureRootIdentity
+  StrCmp $NearlyLeafNode 0 nearly_capture_bad
+  System::Call '*$NearlyLeafNode(p .r0, p .r1)'
+  StrCpy $NearlyRootIdentityHandle $1
+  Call ${prefix}NearlyRootIdentityForHandle
+  Return
+  nearly_capture_bad:
+  Call ${prefix}NearlyRejectRoot
+FunctionEnd
+Function ${prefix}NearlyRootIdentityForHandle
+  System::Alloc 52
+  Pop $NearlyPendingBuffer
+  StrCmp $NearlyPendingBuffer 0 nearly_identity_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p $NearlyRootIdentityHandle, p $NearlyPendingBuffer) i.r0'
+  StrCmp $0 1 0 nearly_identity_bad
+  System::Call '*$NearlyPendingBuffer(i .r0)'
+  IntOp $0 $0 & 0x410
+  IntCmp $0 0x10 0 nearly_identity_bad nearly_identity_bad
+  IntOp $0 $NearlyPendingBuffer + 28
+  System::Call '*$0(i .r1)'
+  IntOp $0 $NearlyPendingBuffer + 44
+  System::Call '*$0(i .r2, i .r3)'
+  IntFmt $4 "%08X" $1
+  IntFmt $5 "%08X" $2
+  IntFmt $6 "%08X" $3
+  StrCpy $NearlyRootIdentity "$4:$5:$6"
+  System::Free $NearlyPendingBuffer
+  StrCpy $NearlyPendingBuffer 0
+  Return
+  nearly_identity_bad:
+  Call ${prefix}NearlyRejectRoot
 FunctionEnd
 !macroend
 !insertmacro NearlyRootFunctions ""
@@ -975,12 +1027,27 @@ Page custom NearlyShortcutPage NearlyShortcutPageLeave
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.NearlyRemovePage un.NearlyRemovePageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Japanese"
 !insertmacro MUI_RESERVEFILE_LANGDLL
 LangString NearlyShortcutTitle ${LANG_ENGLISH} "Shortcuts"
+LangString NearlyRemoveTitle ${LANG_ENGLISH} "Remove Nearly"
+LangString NearlyRemoveTitle ${LANG_JAPANESE} "Nearly の削除"
+LangString NearlyRemoveSubtitle ${LANG_ENGLISH} "Choose whether to keep the installation folder and your settings."
+LangString NearlyRemoveSubtitle ${LANG_JAPANESE} "インストールフォルダーと設定を残すか選んでください。"
+LangString NearlyRemoveLabel ${LANG_ENGLISH} "Delete the installation folder and ALL its contents (including settings and other files)"
+LangString NearlyRemoveLabel ${LANG_JAPANESE} "インストールフォルダーと中身をすべて削除する（設定・その他のファイルも含む）"
+LangString NearlyKeepNotice ${LANG_ENGLISH} "Leave this unchecked to keep settings and other files. Selected installation folder:"
+LangString NearlyKeepNotice ${LANG_JAPANESE} "チェックしない場合、設定やその他のファイルは残します。対象のインストールフォルダー:"
+LangString NearlyWholeConfirm ${LANG_ENGLISH} "Delete this installation folder itself and EVERYTHING inside it?$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\nSettings, history and other files inside will be permanently removed. Interrupted or failed removal may leave only part of the contents. This cannot be undone."
+LangString NearlyWholeConfirm ${LANG_JAPANESE} "次のインストールフォルダー自体と中身をすべて削除しますか？$\r$\n$\r$\n$INSTDIR$\r$\n$\r$\n設定・履歴・その他のファイルも完全に削除します。中断や失敗で一部だけ削除される場合があります。元には戻せません。"
+LangString NearlyWholeRefused ${LANG_ENGLISH} "The installation folder could not be verified for complete removal. Nothing has been removed by this operation. Keep the option unchecked to uninstall while preserving data."
+LangString NearlyWholeRefused ${LANG_JAPANESE} "フォルダー全体を削除するための確認ができませんでした。この操作では削除していません。チェックを外すと、データを残してアンインストールできます。"
+LangString NearlyWholePartial ${LANG_ENGLISH} "Complete folder removal stopped. Some files may already have been removed; remaining files and installation records were retained where possible. No outside folder was recursively removed."
+LangString NearlyWholePartial ${LANG_JAPANESE} "フォルダー全体の削除を停止しました。一部のファイルは削除済みの可能性があります。残りのファイルと登録情報は可能な限り保持しています。外側のフォルダーを再帰的に削除する処理は行いません。"
 LangString NearlyShortcutTitle ${LANG_JAPANESE} "ショートカット"
 LangString NearlyShortcutSubtitle ${LANG_ENGLISH} "Choose where Nearly appears. Your choices are kept for upgrades."
 LangString NearlyShortcutSubtitle ${LANG_JAPANESE} "Nearly の表示場所を選んでください。更新時もこの選択を保持します。"
@@ -1430,6 +1497,12 @@ Section Install
   nearly_install_create_bad:
     Call NearlyRejectRoot
   nearly_install_root_ready:
+  Call NearlyCaptureRootIdentity
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyRootIdentity"
+  StrCmp $0 "" nearly_install_identity_ready
+  StrCmp $0 $NearlyRootIdentity nearly_install_identity_ready
+  Call NearlyRejectRoot
+  nearly_install_identity_ready:
   Call NearlyIoInit
   Call NearlyValidatePayloads
   System::Call 'kernel32::GetCurrentProcessId() i.r8'
@@ -1453,6 +1526,7 @@ Section Install
   WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINSTKEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegStr HKCU "${UNINSTKEY}" "NearlyOwner" "${BUNDLEID}"
+  WriteRegStr HKCU "${UNINSTKEY}" "NearlyRootIdentity" "$NearlyRootIdentity"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
   WriteRegDWORD HKCU "${UNINSTKEY}" "EstimatedSize" "{{estimated_size}}"
@@ -1594,7 +1668,346 @@ Function un.NearlyVerifyUninstallerImage
 FunctionEnd
 
 
+; Boundaries are compared case-insensitively at separator boundaries. A target
+; containing a protected folder is refused as well as that folder itself.
+!macro NearlyWholeProtect path descendants
+  StrCpy $NearlyWholeProtected "${path}"
+  StrCpy $NearlyWholeExpectedKind ${descendants}
+  Call un.NearlyWholeCheckProtected
+!macroend
+!macro NearlyWholeProtectCommon id
+  ; DONT_VERIFY queries the known path without creating a missing directory.
+  IntOp $0 ${id} | 0x4000
+  System::Call 'shell32::SHGetFolderPathW(p 0, i r0, p 0, i 0, w .r0) i.r1'
+  StrCmp $1 0 0 nearly_whole_authority_bad
+  StrCpy $NearlyWholeProtected $0
+  StrCpy $NearlyWholeExpectedKind 0
+  Call un.NearlyWholeCheckProtected
+!macroend
+Function un.NearlyWholeCheckProtected
+  StrCmp $NearlyWholeProtected "" nearly_whole_protected_done
+  ; Known folders such as Temp can be supplied as 8.3 aliases by Windows.
+  ; Normalize existing aliases before comparing against the canonical target.
+  System::Call 'kernel32::GetLongPathNameW(w "$NearlyWholeProtected", w .r2, i ${NSIS_MAX_STRLEN}) i.r0'
+  StrCmp $0 0 nearly_whole_protected_compare
+  IntCmp $0 ${NSIS_MAX_STRLEN} nearly_whole_invalid 0 nearly_whole_invalid
+  StrCpy $NearlyWholeProtected $2
+  nearly_whole_protected_compare:
+  StrLen $0 $INSTDIR
+  StrCpy $1 $NearlyWholeProtected $0
+  StrCmp $1 $INSTDIR 0 nearly_whole_check_descendant
+  StrCpy $1 $NearlyWholeProtected 1 $0
+  StrCmp $1 "" nearly_whole_invalid
+  StrCmp $1 "\" nearly_whole_invalid
+  nearly_whole_check_descendant:
+  StrCmp $NearlyWholeExpectedKind 1 0 nearly_whole_protected_done
+  StrLen $0 $NearlyWholeProtected
+  StrCpy $1 $INSTDIR $0
+  StrCmp $1 $NearlyWholeProtected 0 nearly_whole_protected_done
+  StrCpy $1 $INSTDIR 1 $0
+  StrCmp $1 "" nearly_whole_invalid
+  StrCmp $1 "\" nearly_whole_invalid
+  nearly_whole_protected_done:
+  Return
+  nearly_whole_invalid:
+  Call un.NearlyWholeRefuse
+FunctionEnd
+Function un.NearlyWholeRefuse
+  StrCpy $NearlyRemoveAll 0
+  SetErrorLevel 9
+  IfSilent +2
+    MessageBox MB_ICONSTOP|MB_OK "$(NearlyWholeRefused)"
+  Abort
+FunctionEnd
+Function un.NearlyWholeValidate
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyOwner"
+  StrCmp $0 "${BUNDLEID}" 0 nearly_whole_authority_bad
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "InstallLocation"
+  StrCmp $0 $INSTDIR 0 nearly_whole_authority_bad
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "UninstallString"
+  StrCmp $0 '"$INSTDIR\uninstall.exe"' 0 nearly_whole_authority_bad
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyRootIdentity"
+  StrCmp $0 "" nearly_whole_authority_bad
+  StrCmp $0 $NearlyUninstallRootIdentity 0 nearly_whole_authority_bad
+  !insertmacro NearlyWholeProtect "$WINDIR" 1
+  !insertmacro NearlyWholeProtect "$PROGRAMFILES" 1
+  !insertmacro NearlyWholeProtect "$PROGRAMFILES64" 1
+  !insertmacro NearlyWholeProtect "$COMMONFILES" 1
+  !insertmacro NearlyWholeProtect "$COMMONFILES64" 1
+  !insertmacro NearlyWholeProtect "$PROFILE" 0
+  !insertmacro NearlyWholeProtect "$APPDATA" 0
+  !insertmacro NearlyWholeProtect "$LOCALAPPDATA" 0
+  !insertmacro NearlyWholeProtect "$DESKTOP" 0
+  !insertmacro NearlyWholeProtect "$DOCUMENTS" 0
+  !insertmacro NearlyWholeProtect "$SMPROGRAMS" 0
+  !insertmacro NearlyWholeProtect "$STARTMENU" 0
+  !insertmacro NearlyWholeProtect "$TEMP" 0
+  ; Public/common storage roots may be writable but are not app directories.
+  !insertmacro NearlyWholeProtectCommon 0x23
+  !insertmacro NearlyWholeProtectCommon 0x19
+  !insertmacro NearlyWholeProtectCommon 0x2e
+  !insertmacro NearlyWholeProtectCommon 0x17
+  !insertmacro NearlyWholeProtectCommon 0x16
+  ${GetParent} "$PROFILE" $0
+  ${GetParent} "$INSTDIR" $1
+  StrCmp $0 $1 nearly_whole_authority_bad
+  Return
+  nearly_whole_authority_bad:
+  Call un.NearlyWholeRefuse
+FunctionEnd
+Function un.NearlyRemovePage
+  !insertmacro MUI_HEADER_TEXT "$(NearlyRemoveTitle)" "$(NearlyRemoveSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  StrCmp $0 error nearly_remove_page_bad
+  ${NSD_CreateLabel} 0 0 100% 70u "$(NearlyKeepNotice)$\r$\n$\r$\n$INSTDIR"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 82u 100% 50u "$(NearlyRemoveLabel)"
+  Pop $NearlyRemoveCheckbox
+  ${NSD_SetState} $NearlyRemoveCheckbox $NearlyRemoveAll
+  nsDialogs::Show
+  Return
+  nearly_remove_page_bad:
+  Abort
+FunctionEnd
+Function un.NearlyRemovePageLeave
+  ${NSD_GetState} $NearlyRemoveCheckbox $NearlyRemoveAll
+  StrCmp $NearlyRemoveAll 1 0 nearly_remove_page_done
+  Call un.NearlyWholeValidate
+  MessageBox MB_ICONEXCLAMATION|MB_YESNO|MB_DEFBUTTON2 "$(NearlyWholeConfirm)" IDYES nearly_remove_page_done
+  ; Declining leaves the page visible; no filesystem effects have occurred.
+  Abort
+  nearly_remove_page_done:
+FunctionEnd
+
+; Only this explicit opt-in path traverses user data. Every ancestor and every
+; opened directory denies write/delete sharing, preventing rename and reparse
+; mutation during traversal. A conflicting existing writer causes refusal.
+Function un.NearlyWholeCleanup
+  StrCmp $NearlyWholeHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyWholeHandle)'
+  StrCpy $NearlyWholeHandle 0
+  StrCmp $NearlyWholeInfo 0 +2
+    System::Free $NearlyWholeInfo
+  StrCpy $NearlyWholeInfo 0
+  nearly_whole_cleanup_next:
+  StrCmp $NearlyWholeTop 0 nearly_whole_cleanup_root
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  StrCpy $NearlyWholeNext $0
+  StrCmp $2 0 +2
+    System::Call 'kernel32::FindClose(p r2)'
+  StrCmp $1 0 +2
+    System::Call 'kernel32::CloseHandle(p r1)'
+  StrCmp $3 0 +2
+    System::Free $3
+  System::Free $NearlyWholeTop
+  StrCpy $NearlyWholeTop $NearlyWholeNext
+  Goto nearly_whole_cleanup_next
+  nearly_whole_cleanup_root:
+  ; The tree node owns this handle once enumeration has begun.
+  StrCmp $NearlyWholeRoot 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyWholeRoot)'
+  StrCpy $NearlyWholeRoot 0
+FunctionEnd
+Function un.NearlyWholeFail
+  Call un.NearlyWholeCleanup
+  SetErrorLevel 9
+  IfSilent nearly_whole_fail_abort
+  StrCmp $NearlyWholeStarted 1 nearly_whole_fail_partial
+  MessageBox MB_ICONSTOP|MB_OK "$(NearlyWholeRefused)"
+  Goto nearly_whole_fail_abort
+  nearly_whole_fail_partial:
+  MessageBox MB_ICONSTOP|MB_OK "$(NearlyWholePartial)"
+  nearly_whole_fail_abort:
+  Abort
+FunctionEnd
+Function un.NearlyWholeInspect
+  System::Alloc 52
+  Pop $NearlyWholeInfo
+  StrCmp $NearlyWholeInfo 0 nearly_whole_inspect_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p $NearlyWholeHandle, p $NearlyWholeInfo) i.r0'
+  StrCmp $0 1 0 nearly_whole_inspect_bad
+  System::Call '*$NearlyWholeInfo(i .r0)'
+  IntOp $NearlyWholeAttributes $0 & 0x410
+  StrCmp $NearlyWholeExpectedKind 2 0 nearly_whole_inspect_known
+  StrCpy $NearlyWholeExpectedKind 0
+  StrCmp $NearlyWholeAttributes 0 nearly_whole_inspect_known
+  StrCpy $NearlyWholeExpectedKind 1
+  nearly_whole_inspect_known:
+  StrCmp $NearlyWholeExpectedKind 1 nearly_whole_inspect_directory
+  StrCmp $NearlyWholeAttributes 0 0 nearly_whole_inspect_bad
+  IntOp $0 $NearlyWholeInfo + 40
+  System::Call '*$0(i .r0)'
+  StrCmp $0 1 0 nearly_whole_inspect_bad
+  Goto nearly_whole_inspect_good
+  nearly_whole_inspect_directory:
+  IntCmp $NearlyWholeAttributes 0x10 0 nearly_whole_inspect_bad nearly_whole_inspect_bad
+  nearly_whole_inspect_good:
+  System::Free $NearlyWholeInfo
+  StrCpy $NearlyWholeInfo 0
+  Return
+  nearly_whole_inspect_bad:
+  Call un.NearlyWholeFail
+FunctionEnd
+Function un.NearlyWholeOpenRoot
+  Call un.NearlyReleaseLeaf
+  StrCpy $NearlyWholeCursor $NearlyGuardHead
+  nearly_whole_strict_ancestor:
+  StrCmp $NearlyWholeCursor 0 nearly_whole_open_root
+  System::Call '*$NearlyWholeCursor(p .r0, p .r1)'
+  StrCpy $NearlyWholeNext $0
+  StrCpy $NearlyRootIdentityHandle $1
+  Call un.NearlyRootIdentityForHandle
+  StrCpy $NearlyWholeAncestorIdentity $NearlyRootIdentity
+  System::Call 'kernel32::GetFinalPathNameByHandleW(p $NearlyRootIdentityHandle, w .r2, i ${NSIS_MAX_STRLEN}, i 0) i.r0'
+  StrCmp $0 0 nearly_whole_open_bad
+  IntCmp $0 ${NSIS_MAX_STRLEN} nearly_whole_open_bad 0 nearly_whole_open_bad
+  System::Call 'kernel32::CreateFileW(w r2, i 0x81, i 1, p 0, i 3, i 0x02200000, p 0) p.s'
+  Pop $NearlyWholeHandle
+  StrCmp $NearlyWholeHandle -1 nearly_whole_open_bad_handle
+  StrCpy $NearlyWholeExpectedKind 1
+  Call un.NearlyWholeInspect
+  StrCpy $NearlyRootIdentityHandle $NearlyWholeHandle
+  Call un.NearlyRootIdentityForHandle
+  StrCmp $NearlyRootIdentity $NearlyWholeAncestorIdentity 0 nearly_whole_open_bad
+  System::Alloc 8
+  Pop $0
+  StrCmp $0 0 nearly_whole_open_bad
+  System::Call '*$0(p $NearlyGuardHead, p $NearlyWholeHandle)'
+  StrCpy $NearlyGuardHead $0
+  StrCpy $NearlyWholeHandle 0
+  StrCpy $NearlyWholeCursor $NearlyWholeNext
+  Goto nearly_whole_strict_ancestor
+  nearly_whole_open_root:
+  System::Call 'kernel32::CreateFileW(w "$INSTDIR", i 0x10081, i 1, p 0, i 3, i 0x02200000, p 0) p.s'
+  Pop $NearlyWholeHandle
+  StrCmp $NearlyWholeHandle -1 nearly_whole_open_bad_handle
+  StrCpy $NearlyWholeExpectedKind 1
+  Call un.NearlyWholeInspect
+  StrCpy $NearlyRootIdentityHandle $NearlyWholeHandle
+  Call un.NearlyRootIdentityForHandle
+  StrCmp $NearlyRootIdentity $NearlyUninstallRootIdentity 0 nearly_whole_open_bad
+  System::Call 'kernel32::GetFinalPathNameByHandleW(p $NearlyWholeHandle, w .r1, i ${NSIS_MAX_STRLEN}, i 0) i.r0'
+  StrCmp $0 0 nearly_whole_open_bad
+  StrCmp $1 "\\?\$INSTDIR" 0 nearly_whole_open_bad
+  StrCpy $NearlyWholeRoot $NearlyWholeHandle
+  StrCpy $NearlyWholeHandle 0
+  Return
+  nearly_whole_open_bad_handle:
+  StrCpy $NearlyWholeHandle 0
+  nearly_whole_open_bad:
+  Call un.NearlyWholeFail
+FunctionEnd
+Function un.NearlyWholeDisposition
+  ; Input: already inspected object handle. No path-based fallback.
+  System::Alloc 4
+  Pop $NearlyWholeInfo
+  StrCmp $NearlyWholeInfo 0 nearly_whole_disposition_bad
+  System::Call '*$NearlyWholeInfo(i 1)'
+  System::Call 'kernel32::SetFileInformationByHandle(p $NearlyWholeHandle, i 4, p $NearlyWholeInfo, i 1) i.r0'
+  StrCmp $0 1 0 nearly_whole_disposition_bad
+  System::Free $NearlyWholeInfo
+  StrCpy $NearlyWholeInfo 0
+  System::Call 'kernel32::CloseHandle(p $NearlyWholeHandle)'
+  StrCpy $NearlyWholeHandle 0
+  Return
+  nearly_whole_disposition_bad:
+  Call un.NearlyWholeFail
+FunctionEnd
+Function un.NearlyRemoveTree
+  ; Input: WholeHandle is the held directory, WholePath its canonical path.
+  ; Linked frames retain every parent handle across recursive calls and Abort.
+  IntOp $NearlyWholeDepth $NearlyWholeDepth + 1
+  IntCmp $NearlyWholeDepth 32 0 0 nearly_whole_tree_bad
+  System::Alloc 16
+  Pop $0
+  StrCmp $0 0 nearly_whole_tree_bad
+  System::Call '*$0(p $NearlyWholeTop, p $NearlyWholeHandle, p 0, p 0)'
+  StrCpy $NearlyWholeTop $0
+  StrCpy $NearlyWholeHandle 0
+  System::Alloc 592
+  Pop $0
+  StrCmp $0 0 nearly_whole_tree_bad
+  IntOp $1 $NearlyWholeTop + 12
+  System::Call '*$1(p r0)'
+  System::Call 'kernel32::FindFirstFileW(w "\\?\$NearlyWholePath\*", p r0) p.r1 ?e'
+  Pop $2
+  StrCmp $1 -1 nearly_whole_tree_empty
+  IntOp $0 $NearlyWholeTop + 8
+  System::Call '*$0(p r1)'
+  Goto nearly_whole_tree_entry
+  nearly_whole_tree_empty:
+  StrCmp $2 2 nearly_whole_tree_done nearly_whole_tree_bad
+  nearly_whole_tree_entry:
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  IntOp $0 $3 + 44
+  System::Call '*$0(&w260 .r1)'
+  StrCpy $NearlyWholeEntry $1
+  StrCmp $NearlyWholeEntry "." nearly_whole_tree_next
+  StrCmp $NearlyWholeEntry ".." nearly_whole_tree_next
+  StrCmp $NearlyWholeDepth 1 0 nearly_whole_tree_open
+  StrCmp $NearlyWholeEntry "uninstall.exe" nearly_whole_tree_next
+  nearly_whole_tree_open:
+  IntOp $NearlyWholeCount $NearlyWholeCount + 1
+  IntCmp $NearlyWholeCount 100000 0 0 nearly_whole_tree_bad
+  StrCpy $1 "$NearlyWholePath\$NearlyWholeEntry"
+  StrLen $0 $1
+  IntCmp $0 900 0 0 nearly_whole_tree_bad
+  ; Open reparse point itself. Directory/file type and link count are checked
+  ; on this same handle before enumerating or setting deletion disposition.
+  System::Call 'kernel32::CreateFileW(w "\\?\$1", i 0x10081, i 1, p 0, i 3, i 0x02200000, p 0) p.s'
+  Pop $NearlyWholeHandle
+  StrCmp $NearlyWholeHandle -1 nearly_whole_tree_open_bad
+  StrCpy $NearlyWholeExpectedKind 2
+  Call un.NearlyWholeInspect
+  StrCmp $NearlyWholeExpectedKind 1 nearly_whole_tree_child
+  Call un.NearlyWholeDisposition
+  Goto nearly_whole_tree_next
+  nearly_whole_tree_child:
+  Push $NearlyWholePath
+  StrCpy $NearlyWholePath "$NearlyWholePath\$NearlyWholeEntry"
+  Call un.NearlyRemoveTree
+  Pop $NearlyWholePath
+  nearly_whole_tree_next:
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  System::Call 'kernel32::FindNextFileW(p r2, p r3) i.r0 ?e'
+  Pop $1
+  StrCmp $0 1 nearly_whole_tree_entry
+  StrCmp $1 18 0 nearly_whole_tree_bad
+  nearly_whole_tree_done:
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  StrCmp $2 0 +2
+    System::Call 'kernel32::FindClose(p r2)'
+  IntOp $0 $NearlyWholeTop + 8
+  System::Call '*$0(p 0)'
+  ; Root stays held until the byte-proven registered uninstaller is removed.
+  StrCmp $NearlyWholeDepth 1 nearly_whole_tree_return
+  StrCpy $NearlyWholeHandle $1
+  IntOp $0 $NearlyWholeTop + 4
+  System::Call '*$0(p 0)'
+  Call un.NearlyWholeDisposition
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  StrCpy $NearlyWholeNext $0
+  System::Free $3
+  System::Free $NearlyWholeTop
+  StrCpy $NearlyWholeTop $NearlyWholeNext
+  nearly_whole_tree_return:
+  IntOp $NearlyWholeDepth $NearlyWholeDepth - 1
+  Return
+  nearly_whole_tree_open_bad:
+  StrCpy $NearlyWholeHandle 0
+  nearly_whole_tree_bad:
+  Call un.NearlyWholeFail
+FunctionEnd
+
 Function un.onInit
+  ; Silent invocations never opt in to recursive deletion.
+  StrCpy $NearlyRemoveAll 0
+  StrCpy $NearlyWholeStarted 0
+  StrCpy $NearlyWholeRoot 0
+  StrCpy $NearlyWholeTop 0
+  StrCpy $NearlyWholeHandle 0
+  StrCpy $NearlyWholeInfo 0
   Call un.NearlyIoInit
   StrCpy $NearlyImageDeleteMode 1
   StrCpy $NearlyGuardHead 0
@@ -1622,6 +2035,8 @@ Function un.onInit
   ; $EXEDIR may describe the Temp copy; use original $INSTDIR binding above.
   Call un.NearlyPinRoot
   StrCmp $NearlyRootMissing 0 0 nearly_uninstall_wrong
+  Call un.NearlyCaptureRootIdentity
+  StrCpy $NearlyUninstallRootIdentity $NearlyRootIdentity
   Call un.NearlyValidatePayloads
   Call un.NearlyVerifyUninstallerImage
   !insertmacro NearlyRequireClosed
@@ -1632,6 +2047,7 @@ Function un.onInit
 FunctionEnd
 
 Function un.onGUIEnd
+  Call un.NearlyWholeCleanup
   Call un.NearlyIoCleanup
   Call un.NearlyImageCleanup
   Call un.NearlyReleaseGuards
@@ -1642,6 +2058,13 @@ FunctionEnd
 Section Uninstall
   !insertmacro NearlyRequireTargetDirectory
   !insertmacro NearlyRequireClosed
+  StrCmp $NearlyRemoveAll 1 0 nearly_uninstall_begin
+  Call un.NearlyWholeValidate
+  Call un.NearlyWholeOpenRoot
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  StrCpy $NearlyWholeStarted 1
+  nearly_uninstall_begin:
   ; Open the observed main payload without write/delete sharing. A missing
   ; originally absent file stays absent; identity changes fail before deletion.
   StrCmp $NearlyMainSnapshot "" nearly_uninstall_main_absent
@@ -1655,19 +2078,58 @@ Section Uninstall
   System::Call 'kernel32::CloseHandle(p $NearlyIoMain)'
   StrCpy $NearlyIoMain 0
   nearly_uninstall_main_absent:
+  StrCmp $NearlyRemoveAll 1 0 nearly_uninstall_keep_data
+  StrCpy $NearlyWholePath $INSTDIR
+  StrCpy $NearlyWholeDepth 0
+  StrCpy $NearlyWholeCount 0
+  StrCpy $NearlyWholeHandle $NearlyWholeRoot
+  StrCpy $NearlyWholeRoot 0
+  Call un.NearlyRemoveTree
+  StrCpy $NearlyWholeHandle $NearlyRegisteredImageHandle
+  StrCpy $NearlyRegisteredImageHandle 0
+  StrCpy $NearlyWholeExpectedKind 0
+  Call un.NearlyWholeInspect
+  Call un.NearlyWholeDisposition
+  Call un.NearlyImageCleanup
+  ; Only after all contents and the exact registered uninstaller are gone may
+  ; the held root be removed. Keep registration on any partial failure.
+  System::Call '*$NearlyWholeTop(p .r0, p .r1, p .r2, p .r3)'
+  StrCpy $NearlyWholeHandle $1
+  IntOp $0 $NearlyWholeTop + 4
+  System::Call '*$0(p 0)'
+  Call un.NearlyWholeDisposition
+  Call un.NearlyWholeCleanup
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR") i.r0 ?e'
+  Pop $1
+  StrCmp $0 -1 0 nearly_uninstall_whole_bad
+  StrCmp $1 2 nearly_uninstall_remove_registration nearly_uninstall_whole_bad
+  nearly_uninstall_keep_data:
   StrCpy $NearlyIoWriteHandle $NearlyRegisteredImageHandle
   Call un.NearlyIoDelete
   ; Complete the disposition on the exact byte-proven registered object.
   Call un.NearlyImageCleanup
+  nearly_uninstall_remove_registration:
   !insertmacro NearlyApplyShortcut "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk" 0
   !insertmacro NearlyApplyShortcut "$DESKTOP\${PRODUCTNAME}.lnk" 0
   RMDir "$SMPROGRAMS\${PRODUCTNAME}"
+  ClearErrors
   DeleteRegKey HKCU "${UNINSTKEY}"
+  IfErrors nearly_uninstall_registration_bad
+  StrCmp $NearlyRemoveAll 1 nearly_uninstall_success
   ; Preferences and all user data remain. Nonrecursive removal only succeeds
   ; for an empty folder; settings.json, backups and WebView data prevent it.
   Call un.NearlyReleaseLeaf
   RMDir "$INSTDIR"
+  nearly_uninstall_success:
+  SetErrorLevel 0
   Return
+  nearly_uninstall_whole_bad:
+  Call un.NearlyWholeFail
+  nearly_uninstall_registration_bad:
+  SetErrorLevel 9
+  IfSilent +2
+    MessageBox MB_ICONSTOP|MB_OK "$(NearlyWholePartial)"
+  Abort
   nearly_uninstall_io_bad:
   Call un.NearlyIoFail
 SectionEnd

@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('preflight','guard-probe','extract','production','ui','drive','source','launch','verify','uninstall')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('preflight','guard-probe','extract','production','ui','drive','uninstall-options','source','launch','verify','uninstall')][string]$Action,
   [Parameter(Mandatory)][string]$RunRoot,
   [string]$Setup,
   [string]$ExpectedPayload,
@@ -254,6 +254,8 @@ if ($Action -eq 'guard-probe') {
   if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\payload-native.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated same-handle payload qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\whole-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated whole-tree deletion qualification failed' }
   if ($env:QA_DESTINATION -ceq 'drive') {
     . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
     Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
@@ -331,6 +333,84 @@ function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[
   if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
   Assert-UnderRun $Setup
   & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode -ConsentKind $ConsentKind -ConsentDecision $ConsentDecision
+}
+function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][string]$Mode) {
+  Assert-NoApp; Assert-Regular $uninstaller
+  Assert-Registration '1.9.0'
+  # Reuse only the reviewed, PID-bound window API class, never the installer UI
+  # script entrypoint. This guest already checked exact hosted SHA/run/root.
+  if (!('NearlyOwnedUi' -as [type])) {
+    $ui=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'installer-qa-ui.ps1'))
+    $match=[regex]::Match($ui,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+    if (!$match.Success) { throw 'Reviewed owned-window helper absent' }
+    Add-Type -TypeDefinition $match.Groups[1].Value
+  }
+  $copy=Join-Path $RunRoot ('uninstall-option-'+$Mode+'.exe')
+  if (Test-Path -LiteralPath $copy) { throw 'Fresh exact generated copy required' }
+  [IO.File]::Copy($uninstaller,$copy,$false)
+  if ((Get-FileHash -LiteralPath $copy).Hash -cne (Get-FileHash -LiteralPath $uninstaller).Hash) { throw 'Generated uninstaller copy mismatch' }
+  $p=Start-Process -FilePath $copy -ArgumentList ('_?='+$install) -PassThru -WindowStyle Hidden
+  if ([NearlyOwnedUi]::ProcessImage($p) -cne $copy) { throw 'Uninstaller process image changed' }
+  function Owned-Windows([IntPtr]$Parent) { return @([NearlyOwnedUi]::Windows($p.Id,$Parent)) }
+  function Owned-Button([IntPtr]$Parent,[int]$Id) {
+    $buttons=@(Owned-Windows $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::Parent($_,$p.Id) -eq $Parent })
+    if ($buttons.Count -ne 1) { throw 'Exact owned dialog button required' }
+    return $buttons[0]
+  }
+  function Click-Owned([IntPtr]$Parent,[int]$Id) {
+    $button=Owned-Button $Parent $Id
+    [NearlyOwnedUi]::Command($Parent,$button,$p.Id,$Id)
+  }
+  $script:optionMain=[IntPtr]::Zero
+  Wait-Condition {
+    $windows=@(Owned-Windows ([IntPtr]::Zero) | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq '#32770' })
+    if ($windows.Count -eq 1) { $script:optionMain=$windows[0];return $true };return $false
+  }
+  $main=$script:optionMain
+  [NearlyOwnedUi]::Show($main,$p.Id)
+  Click-Owned $main 1
+  $script:optionCheck=[IntPtr]::Zero
+  Wait-Condition {
+    $checks=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Checkbox($_,$p.Id) })
+    if ($checks.Count -eq 1) { $script:optionCheck=$checks[0];return $true };return $false
+  }
+  $check=$script:optionCheck
+  if ([NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -ne 0) { throw 'Whole-folder option must default OFF' }
+  $labels=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Static' -and [NearlyOwnedUi]::Text($_,$p.Id).Contains($install) })
+  if ($labels.Count -ne 1 -or ![NearlyOwnedUi]::Text($check,$p.Id).Contains('ALL its contents')) { throw 'Actual path and all-contents warning required' }
+  $mainHash=(Get-FileHash -LiteralPath $exe).Hash
+  if ($Mode -cne 'Keep') {
+    [NearlyOwnedUi]::Click($check,$p.Id)
+    Wait-Condition { [NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -eq 1 }
+    Click-Owned $main 1
+    $script:optionPrompt=[IntPtr]::Zero
+    Wait-Condition {
+      $windows=@(Owned-Windows ([IntPtr]::Zero) | Where-Object { $_ -ne $main -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq '#32770' })
+      if ($windows.Count -eq 1) { $script:optionPrompt=$windows[0];return $true };return $false
+    }
+    $prompt=$script:optionPrompt
+    $texts=@(Owned-Windows $prompt | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Static' } | ForEach-Object { [NearlyOwnedUi]::Text($_,$p.Id) })
+    if (@($texts | Where-Object { $_.Contains($install) -and $_.Contains('EVERYTHING inside') }).Count -ne 1) { throw 'Exact whole-folder confirmation required' }
+    $no=Owned-Button $prompt 7
+    if (![NearlyOwnedUi]::DefaultButton($no,$p.Id)) { throw 'Deletion confirmation must default No' }
+    $answer=if ($Mode -ceq 'Remove') { 6 } else { 7 }
+    [NearlyOwnedUi]::ClickConsent($prompt,(Owned-Button $prompt $answer),$p.Id,$answer)
+    if ($Mode -ceq 'Decline') {
+      Wait-Condition { [NearlyOwnedUi]::IsWindowEnabled($main) }
+      Assert-Payload $ExpectedPayload '1.9.0';Assert-Settings $true
+      if ((Get-FileHash -LiteralPath $exe).Hash -cne $mainHash) { throw 'Declined confirmation changed payload' }
+      [NearlyOwnedUi]::Click($check,$p.Id)
+      Wait-Condition { [NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -eq 0 }
+      Click-Owned $main 1
+    }
+  } else { Click-Owned $main 1 }
+  Wait-Condition {
+    if ($p.HasExited) { return $true }
+    $buttons=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($_) })
+    if ($buttons.Count -eq 1 -and [NearlyOwnedUi]::Text($buttons[0],$p.Id) -cin @('Close','&Close')) { Click-Owned $main 1 }
+    return $false
+  } 60
+  if ($p.ExitCode -ne 0) { throw "Generated uninstaller option failed: $($p.ExitCode)" }
 }
 function New-SharedEmptyDriveFixture {
   $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
@@ -481,6 +561,32 @@ switch ($Action) {
     Seed-Settings; Uninstall-Owned $true; Remove-GeneratedSettings
     if ((Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'Uninstall changed parent permissions' }
     Write-Output 'Ordinary drive install, cancellation, nonempty refusal, existing identity/ACL retention and unchanged parent ACL verified.'
+  }
+  'uninstall-options' {
+    Assert-UnderRun $Setup;Assert-NoApp
+    $outside=Join-Path $RunRoot 'whole-options-outside.bin'
+    [IO.File]::WriteAllText($outside,'generated outside sentinel')
+    $outsideHash=(Get-FileHash -LiteralPath $outside).Hash
+    foreach ($mode in @('Keep','Decline','Remove')) {
+      Prepare-EmptyUiRoot
+      Invoke-Bounded $Setup @('/S',('/D='+$install))
+      Seed-Settings;Assert-Payload $ExpectedPayload '1.9.0'
+      $marker=Join-Path $install 'generated-unknown-file.bin'
+      [IO.File]::WriteAllText($marker,'generated inside whole-folder scope')
+      $markerHash=(Get-FileHash -LiteralPath $marker).Hash
+      Invoke-UninstallOptionUi $mode
+      if ((Get-FileHash -LiteralPath $outside).Hash -cne $outsideHash) { throw 'Outside sentinel changed' }
+      if (Test-Path -LiteralPath $registration) { throw 'Successful uninstall retained registration' }
+      if ($mode -ceq 'Remove') {
+        if (Test-Path -LiteralPath $install) { throw 'Whole-folder option left its root' }
+      } else {
+        Assert-Settings $true
+        if ((Get-FileHash -LiteralPath $marker).Hash -cne $markerHash) { throw 'OFF removed unknown contents' }
+        Remove-Item -LiteralPath $marker
+        Remove-GeneratedSettings
+      }
+      Write-Host "Whole-folder option verified: $mode"
+    }
   }
   'launch' {
     Assert-NoApp; Assert-Regular $exe

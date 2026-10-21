@@ -387,6 +387,8 @@ export async function run(e=process.env){
     if(destination==='drive'||destination==='drive-c'){
       await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);results.push({case:'drive-ordinary-install-and-content-refusal',passed:true});
     }
+    await ps('uninstall-options',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);
+    results.push({case:'whole-folder-default-off-decline-and-remove',passed:true});
     {
       const env={...baseEnv,NEARLY_QA_TOKEN:token,NEARLY_QA_RUN_ROOT:p.runRoot,NEARLY_QA_SCENARIO:scenario};
       await ps('source',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],env);

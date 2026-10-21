@@ -128,7 +128,8 @@ test("actual payload ownership decision blocks unknown EXE/uninstaller and misma
 });
 
 test("one visible page offers two independent upgrade-persistent choices", () => {
-  assert.equal((template.match(/\$\{NSD_CreateCheckbox\}/g) ?? []).length, 2);
+  const page=template.match(/Function NearlyShortcutPage\r?\n([\s\S]*?)FunctionEnd/)[1];
+  assert.equal((page.match(/\$\{NSD_CreateCheckbox\}/g) ?? []).length, 2);
   for (const [name, variable] of [["StartMenuShortcut", "NearlyStartMenu"], ["DesktopShortcut", "NearlyDesktop"]]) {
     assert.match(template, new RegExp(`ReadRegDWORD \\$${variable} HKCU "\\$\\{PREFSKEY\\}" "${name}"\\s+\\$\\{If\\} \\$\\{Errors\\}`));
     assert.match(template, new RegExp(`WriteRegDWORD HKCU "\\$\\{PREFSKEY\\}" "${name}" \\$${variable}`));
@@ -221,8 +222,8 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   const listing=spawnSync(reader,['l','-slt','-bd','--',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
   assert.equal(listing.status,0,listing.stderr);
   const members=listing.stdout.split(/\r?\n/).filter(l=>l.startsWith('Path = ')).map(l=>l.slice(7)).filter(n=>n.replaceAll('\\','/').split('/').at(-1).toLowerCase()==='nearly.exe');
-  assert.deepEqual(members,['Nearly.exe'],'single exact member matches the signing-plan contract');
-  const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'Nearly.exe'],{windowsHide:true,timeout:30000});
+  assert.deepEqual(members,['$PLUGINSDIR\\Nearly.exe'],'single exact member matches the signing-plan contract');
+  const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'$PLUGINSDIR/Nearly.exe'],{windowsHide:true,timeout:30000});
   assert.equal(extracted.status,0);assert.ok(extracted.stdout.equals(fs.readFileSync(payload)));
 });
 
