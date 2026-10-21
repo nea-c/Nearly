@@ -73,7 +73,7 @@ export function sideBookmarkBar(
   const tree=sideTreeAdapter(side==='local'?store.localBookmarkTree:store.remoteBookmarkTree);
   const key=side==='local'?LOCAL_BOOKMARK_SCOPE:(w.connection?connectionKey(w.connection):'');
   const items=bookmarkTreeButtons(tree.nodes,sideBookmarkAdapter(records,side),key,null,side);
-  return `<nav id="${side}-bookmarks" class="side-bookmark-bar" tabindex="0" aria-haspopup="menu" aria-expanded="false" data-side-bookmarks="${side}" aria-label="${esc(label+' '+t('ブックマーク'))}"><div class="bookmark-items">${items}</div><button type="button" id="${side}-bookmark-more" data-bookmark-overflow hidden aria-haspopup="menu" aria-expanded="false" aria-label="${esc(t('他のブックマーク'))}">${overflowIcon}</button></nav>`;
+  return `<nav id="${side}-bookmarks" class="side-bookmark-bar" tabindex="0" aria-haspopup="menu" aria-expanded="false" data-side-bookmarks="${side}" aria-label="${esc(label+' '+t('ブックマーク'))}"><div class="bookmark-items">${items || html`<span class="bookmark-empty">右クリックでブックマークを追加</span>`}</div><button type="button" id="${side}-bookmark-more" data-bookmark-overflow hidden aria-haspopup="menu" aria-expanded="false" aria-label="${esc(t('他のブックマーク'))}">${overflowIcon}</button></nav>`;
 }
 export function bindSideBookmarks(
   store: Store,
@@ -160,7 +160,7 @@ export function bindSideBookmarks(
           .querySelectorAll<HTMLInputElement>("input,button")
           .forEach((e) => (e.disabled = true));
         try {
-          await mutate((candidate) => {
+          const saved = await mutate((candidate) => {
             if (!owned()) throw Error(t("ブックマークの表示が変更されました"));
             if (remove) candidate.removeSideBookmark(side, record!.id, key);
             else
@@ -168,12 +168,17 @@ export function bindSideBookmarks(
                 side,
                 { id: record?.id, name, path },
                 profile,
-              ); if(!record&&parentId)candidate.moveSideBookmarkNode(side,saved.id,parentId,null,profile); }
+              ); if(!record&&parentId)candidate.moveSideBookmarkNode(side,saved.id,parentId,null,profile); return saved; }
           });
           if (overlay === view && owned()) {
             if (remove) returnFocus = bar;
             close();
             render();
+            if (!record && saved && !parentId) {
+              const item = document.getElementById(`${side}-bookmark-${saved.id}`);
+              const target = item && !item.hidden ? item : document.querySelector<HTMLElement>(`#${side}-bookmark-more:not([hidden])`);
+              target?.focus({preventScroll:true});
+            }
           }
         } catch (e) {
           error(e);
@@ -230,6 +235,7 @@ export function bindSideBookmarks(
       else if(change.action==='rename')candidate.renameSideBookmarkNode(side,change.id,change.name,profile);
       else if(change.action==='move')candidate.moveSideBookmarkNode(side,change.id,change.parentId,change.beforeId,profile);
       else if(change.action==='ungroup')candidate.ungroupSideBookmarkFolder(side,change.id,profile);
+      else if(tree.nodes.find(n=>n.id===change.id)?.kind==='group')candidate.ungroupSideBookmarkFolder(side,change.id,profile);
       else candidate.removeSideBookmark(side,change.id,key);
     });},
     refresh:()=>{if(owned())render();},

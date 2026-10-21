@@ -2353,30 +2353,30 @@ function filePane(side: Side) {
                         (id) =>
                           html`<td
                             data-column="${id}"
+                            data-cell="${id}"
                             title="${id === "name" ? tr("親フォルダ") : ""}"
                           >
                             ${
                               id === "name"
                                 ? html`<span class="entry-label"
                                     ><span
-                                      class="parent-folder-icon"
+                                      class="folder-glyph parent-folder-glyph"
                                       data-entry-icon
                                       aria-hidden="true"
                                       ><svg
-                                        width="18"
-                                        height="16"
-                                        viewBox="0 0 18 16"
+                                        class="parent-folder-arrow"
+                                        data-parent-arrow
+                                        width="12"
+                                        height="12"
+                                        viewBox="0 0 12 12"
                                         fill="none"
                                       >
                                         <path
-                                          d="M1 4V2h6l2 2h8v11H1Z"
-                                          fill="#e7b650"
-                                          stroke="#af822b"
-                                        />
-                                        <path
-                                          d="M9 12V6m-3 3 3-3 3 3"
-                                          stroke="#374c65"
+                                          d="M6 10V2M2.5 5.5 6 2l3.5 3.5"
+                                          stroke="#455238"
                                           stroke-width="1.5"
+                                          stroke-linecap="round"
+                                          stroke-linejoin="round"
                                         /></svg></span
                                     ><span>..（親フォルダ）</span></span
                                   >`

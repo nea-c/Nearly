@@ -369,6 +369,7 @@ function showOperation(
           : remote
             ? t("削除")
             : t("ごみ箱へ移動");
+  const duplicateParent = prompt === "duplicate" ? parentPath(state.side, state.items[0].path) : undefined;
   const allowed = native && (!remote || state.profile?.mode === "sftp");
   const overlay = document.createElement("div");
   overlay.className = "overlay operation-overlay";
@@ -393,10 +394,10 @@ function showOperation(
     </ul>
     ${
       action !== "delete"
-        ? html`<div class="target">
+        ? html`${prompt !== "duplicate" ? html`<div class="target">
               <small>移動先 / コピー先のフォルダ</small
               ><code>${esc(state.destination)}</code>
-            </div>
+            </div>` : ""}
             <p class="subtle">
               同名の項目は上書きせず、失敗として表示します。途中で失敗したコピー先は残り、元の項目は保持されます。
             </p>`
@@ -409,6 +410,7 @@ function showOperation(
             </p>`
     }${!remote && state.host.syncRoots.length ? html`<p class="warning">同期中です。ローカルの変更・コピー・移動はアップロードに反映される場合があります。ローカル削除も、実行中の同期で「ファイルを削除する」が有効ならリモートへ反映されます。</p>` : ""}${remote && !state.host.sessionId ? html`<label>秘密鍵のパスフレーズ（必要な場合のみ）<input name="operation-passphrase" type="password" autocomplete="off" /></label>` : ""}${!allowed ? html`<p class="mock-note">ブラウザプレビュー／リモートのモックでは実ファイル操作を行いません。</p>` : ""}
     ${prompt ? html`<label>${prompt === "duplicate" ? t("複製の名前") : t("移動先の既存フォルダー")}<input name="operation-destination" autocomplete="off" value="${esc(prompt === "duplicate" ? state.items[0].name : state.destination)}" /></label>` : ""}
+    ${prompt === "duplicate" ? html`<label>${esc(t("移動先の既存フォルダー"))}<input name="operation-folder" autocomplete="off" spellcheck="false" value="${esc(duplicateParent)}" /></label>` : ""}
     ${remote && action === "copy" ? html`<p class="subtle">リモートコピーはクライアント経由のSFTP転送です。</p>` : ""}
     <div class="operation-results" aria-live="polite"></div>
     <div class="actions">
@@ -467,7 +469,10 @@ function showOperation(
     let destination = state.destination, duplicateTarget: string | undefined;
     try {
       const input=overlay.querySelector<HTMLInputElement>("[name=operation-destination]");
-      if(prompt === "duplicate") duplicateTarget=createTargetPath(state.side, parentPath(state.side, state.items[0].path), input!.value);
+      if(prompt === "duplicate") {
+        destination=overlay.querySelector<HTMLInputElement>("[name=operation-folder]")!.value;
+        duplicateTarget=createTargetPath(state.side, destination, input!.value);
+      }
       if(prompt === "move") {
         destination=input!.value;
         if ((remote ? !destination.startsWith("/") : !/^[A-Za-z]:[\\/]/.test(destination)) || destination.split(/[\\/]/).some(p=>p === "." || p === "..") || /[\x00-\x1f]/.test(destination)) throw Error(t("移動先には既存の絶対フォルダーパスを指定してください。"));

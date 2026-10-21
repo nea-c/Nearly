@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "nearly"
-version = "3.2.0"
+version = "3.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -2976,6 +2976,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
+ "tauri-winres",
  "tokio",
  "webview2-com",
  "windows 0.61.3",

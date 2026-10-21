@@ -20,7 +20,7 @@ for(const side of ['paired','local','remote'])test(`${side} context blocks backg
   await page.mouse.click(settings.x+8,settings.y+8);
   await expect(menu(page)).toHaveCount(0);await expect(page.locator('#settings-popup')).toHaveCount(0);
   await expect(target).not.toHaveAttribute('data-bookmark-context-target');
-  await expect(target).toBeFocused();await expect(path).toHaveValue(before);
+  await expect(target).not.toBeFocused();await expect(path).toHaveValue(before);
   await bar.click({button:'right',position:{x:2,y:2}});
   await expect(page.locator('[data-bookmark-context-target]')).toHaveCount(0);
   await page.keyboard.press('Escape');await expect(bar).toBeFocused();

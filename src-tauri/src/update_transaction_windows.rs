@@ -757,6 +757,7 @@ impl PreparedTransaction {
         if result.is_err(){self.fenced=true;}
         result
     }
+    #[cfg(test)]
     pub(crate) fn bind_installer(
         &mut self,
         launched: &crate::update_handoff::LaunchedInstaller,
@@ -764,6 +765,7 @@ impl PreparedTransaction {
         let key = crate::update_package::production_key().ok_or(Error::Disabled)?;
         self.bind_native(launched, &key)
     }
+    #[cfg(test)]
     fn bind_native(
         &mut self,
         launched: &crate::update_handoff::LaunchedInstaller,
@@ -800,7 +802,9 @@ impl PreparedTransaction {
         self.bind_native(launched, key)
     }
 }
+#[cfg(test)]
 struct ProcessGuard(*mut std::ffi::c_void);
+#[cfg(test)]
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         unsafe {
@@ -808,6 +812,7 @@ impl Drop for ProcessGuard {
         }
     }
 }
+#[cfg(test)]
 fn launched_process(
     launched: &crate::update_handoff::LaunchedInstaller,
     context: &NativeContext,

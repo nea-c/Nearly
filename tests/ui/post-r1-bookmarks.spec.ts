@@ -293,9 +293,9 @@ test('review nested visible-group Escape restores top opener and does not refocu
   await page.keyboard.press('Escape');await expect(group).toBeFocused();
   await page.keyboard.press('ArrowDown');await page.keyboard.press('Control+t');await expect(page.locator('#connect-form')).toBeVisible();const input=page.locator('#connect-form input').first();await input.focus();await page.keyboard.press('Escape');await expect(input).toBeFocused();await expect(page.locator('.bookmark-menu-stack')).toHaveCount(0);
 });
-test('review nested overflow Escape and nested-entry context restore the real overflow opener',async({page})=>{
+test('review nested overflow context Escape retains its entry; next Escape restores overflow opener',async({page})=>{
   await boot(page,'en',40,true);const more=page.locator('#bookmark-more');await more.click();const menu=page.locator('#bookmark-overflow-menu');await menu.evaluate(e=>e.scrollTop=e.scrollHeight);
   const group=menu.locator('[data-bookmark-group=hidden-group]');await group.focus();await page.keyboard.press('ArrowRight');await expect(page.locator('[data-bookmark-open=p0]')).toBeFocused();await page.keyboard.press('Escape');await expect(more).toBeFocused();
-  await more.click();await menu.evaluate(e=>e.scrollTop=e.scrollHeight);await group.focus();await page.keyboard.press('ArrowRight');await page.locator('[data-bookmark-open=p0]').press('Shift+F10');await expect(page.locator('#bookmark-tree-context')).toBeVisible();await page.keyboard.press('Escape');await expect(more).toBeFocused();
+  await more.click();await menu.evaluate(e=>e.scrollTop=e.scrollHeight);await group.focus();await page.keyboard.press('ArrowRight');await page.locator('[data-bookmark-open=p0]').press('Shift+F10');await expect(page.locator('#bookmark-tree-context')).toBeVisible();await page.keyboard.press('Escape');await expect(page.locator('[data-bookmark-open=p0]')).toBeFocused();await expect(page.locator('#bookmark-overflow-menu')).toBeVisible();await page.keyboard.press('Escape');await expect(more).toBeFocused();
 });
 

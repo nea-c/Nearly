@@ -36,17 +36,27 @@ pub(crate) mod native {
     #[link(name="advapi32")]
     unsafe extern "system" {
         fn RegGetValueW(key:Handle,sub:*const u16,value:*const u16,flags:u32,kind:*mut u32,data:*mut c_void,bytes:*mut u32)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn GetSecurityInfo(handle:Handle,kind:u32,flags:u32,owner:*mut Handle,group:*mut Handle,dacl:*mut Handle,sacl:*mut Handle,descriptor:*mut Handle)->u32;
         fn OpenProcessToken(process:Handle,access:u32,token:*mut Handle)->i32;
         fn GetTokenInformation(token:Handle,class:u32,data:Handle,length:u32,needed:*mut u32)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn ConvertStringSidToSidW(value:*const u16,sid:*mut Handle)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn ConvertSidToStringSidW(sid:Handle,value:*mut *mut u16)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor:Handle,revision:u32,information:u32,text:*mut *mut u16,length:*mut u32)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn LookupAccountNameW(system:*const u16,name:*const u16,sid:Handle,sid_bytes:*mut u32,domain:*mut u16,domain_chars:*mut u32,kind:*mut u32)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn EqualSid(a:Handle,b:Handle)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn IsValidSid(sid:Handle)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn GetLengthSid(sid:Handle)->u32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn GetAce(acl:Handle,index:u32,ace:*mut Handle)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn IsValidAcl(acl:Handle)->i32;
         #[cfg(test)] fn ConvertStringSecurityDescriptorToSecurityDescriptorW(value:*const u16,revision:u32,descriptor:*mut Handle,size:*mut u32)->i32;
         #[cfg(test)] fn GetSecurityDescriptorOwner(descriptor:Handle,owner:*mut Handle,defaulted:*mut i32)->i32;
@@ -56,6 +66,7 @@ pub(crate) mod native {
     unsafe extern "system" {
         fn GetCurrentProcess()->Handle;
         fn CloseHandle(handle:Handle)->i32;
+        #[cfg(any(test, feature="installer-qa"))]
         fn LocalFree(memory:Handle)->Handle;
         fn GetDriveTypeW(root:*const u16)->u32;
         fn GetVolumeNameForVolumeMountPointW(root:*const u16,name:*mut u16,length:u32)->i32;
@@ -64,7 +75,9 @@ pub(crate) mod native {
         fn CompareStringOrdinal(first:*const u16,first_length:i32,second:*const u16,second_length:i32,ignore_case:i32)->i32;
     }
     fn wide(value:&str)->Vec<u16>{std::ffi::OsStr::new(value).encode_wide().chain(Some(0)).collect()}
+    #[cfg(any(test, feature="installer-qa"))]
     struct Local(Handle);
+    #[cfg(any(test, feature="installer-qa"))]
     impl Drop for Local {fn drop(&mut self){unsafe{LocalFree(self.0);}}}
     struct Token(Handle);
     impl Drop for Token {fn drop(&mut self){unsafe{CloseHandle(self.0);}}}
@@ -80,7 +93,11 @@ pub(crate) mod native {
         String::from_utf16(&data[..count-1]).map(Some).map_err(|_|"Invalid installation registration".into())
     }
     fn registry(value:&str)->Result<String,String>{registry_optional(value)?.ok_or_else(||"Per-user installation registration is unavailable".into())}
+    // The retired preparation CLI's private-ACL policy is QA/test-only. Normal
+    // registration admission below uses OS access, pinned paths and file identity.
+    #[cfg(any(test, feature="installer-qa"))]
     pub(crate) struct Trusted {user:Vec<usize>,system:Vec<Local>,installer:Vec<usize>,creator_owner:Local}
+    #[cfg(any(test, feature="installer-qa"))]
     impl Trusted {
         pub(crate) fn capture()->Result<Self,String>{
             let mut token=std::ptr::null_mut();
@@ -141,8 +158,10 @@ pub(crate) mod native {
         "Installation requires a private writable directory"=>QaSecurityRejection::ForeignDangerousRights,
         _=>QaSecurityRejection::Other,
     }}
+    #[cfg(any(test, feature="installer-qa"))]
     pub(crate) struct SecuritySnapshot {pub(crate) bytes:Vec<u8>,pub(crate) user_owned:bool,pub(crate) private:bool,
         #[cfg(feature="installer-qa")] pub(crate) qa_rejection:Option<QaSecurityRejection>}
+    #[cfg(any(test, feature="installer-qa"))]
     pub(crate) fn inspect_directory(file:&File,path:&Path,leaf:bool,trusted:&Trusted)->Result<SecuritySnapshot,String>{
         let volume=path.parent().is_none();
         if volume {verify_volume_root(path,file)?;}
@@ -162,21 +181,25 @@ pub(crate) mod native {
         Ok(SecuritySnapshot{bytes,user_owned,private:admission.is_ok(),
             #[cfg(feature="installer-qa")] qa_rejection:admission.as_ref().err().map(|error|qa_security_rejection(error))})
     }
+    #[cfg(any(test, feature="installer-qa"))]
     pub(crate) fn require_unregistered(path:&Path)->Result<(),String>{
         if let Some(root)=registry_optional("InstallLocation")? {
             let same=match(dunce::canonicalize(&root),dunce::canonicalize(path)){(Ok(a),Ok(b))=>a==b,_=>false};
             if same||root.eq_ignore_ascii_case(&path.to_string_lossy()) {return Err("Registered installations cannot be prepared implicitly".into());}
         }Ok(())
     }
+    #[cfg(any(test, feature="installer-qa"))]
     fn safe_security(file:&File,leaf:bool,trusted:&Trusted)->Result<(),String>{
         let mut owner=std::ptr::null_mut(); let mut acl=std::ptr::null_mut(); let mut sd=std::ptr::null_mut();
         if unsafe{GetSecurityInfo(file.as_raw_handle(),1,5,&mut owner,std::ptr::null_mut(),&mut acl,std::ptr::null_mut(),&mut sd)}!=0{return Err("Cannot inspect installation permissions".into());}
         let _descriptor=Local(sd);
         safe_acl(owner,acl,leaf,trusted)
     }
+    #[cfg(any(test, feature="installer-qa"))]
     fn safe_acl(owner:Handle,acl:Handle,leaf:bool,trusted:&Trusted)->Result<(),String>{
         safe_acl_scope(owner,acl,leaf,false,trusted)
     }
+    #[cfg(any(test, feature="installer-qa"))]
     fn safe_acl_scope(owner:Handle,acl:Handle,leaf:bool,volume:bool,trusted:&Trusted)->Result<(),String>{
         if !trusted.contains(owner) || acl.is_null() || unsafe{IsValidAcl(acl)}==0{return Err("Installation requires a privately controlled directory".into());}
         let count=unsafe{*((acl as *const u8).add(4) as *const u16)} as u32;
@@ -410,9 +433,11 @@ pub(crate) mod native {
     }
 }
 
+#[cfg(test)]
 fn dangerous_rights(mask:u32,leaf:bool)->bool {
     dangerous_rights_at(mask,leaf,false)
 }
+#[cfg(any(test, feature="installer-qa"))]
 fn dangerous_rights_at(mask:u32,leaf:bool,volume:bool)->bool {
     // DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER, generic write/all.
     mask & (if volume&&!leaf {0}else{0x00010000}|0x40|0x00040000|0x00080000|0x40000000|0x10000000

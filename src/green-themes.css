@@ -31,6 +31,7 @@
   --warning-border: #9c8254;
   --success-text: #91c9b2;
   --disabled-text: #a2b3a9;
+  --navigation-disabled-text: #6c8577;
   --selection-marquee: #8bcbb025;
   --overlay: #070b09a6;
   --shadow-dialog: #00000088;
@@ -75,6 +76,7 @@
   --warning-border: #a58a50;
   --success-text: #26613d;
   --disabled-text: #536e5e;
+  --navigation-disabled-text: #7b9183;
   --selection-marquee: #24653d25;
   --overlay: #12332166;
   --shadow-dialog: #17332230;
@@ -333,7 +335,7 @@
 :root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled,
 :root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled:hover,
 :root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled:active {
-  color: var(--disabled-text);
+  color: var(--navigation-disabled-text);
 }
 :root:is([data-theme="forest"], [data-theme="mint"]) #connection-context-menu [data-menu-action=delete] { color: var(--danger-text); }
 :root:is([data-theme="forest"], [data-theme="mint"]) #connection-context-menu [data-menu-action=delete]:is(:hover,:focus-visible):not(:disabled) { color: var(--danger-text); background: var(--danger-subtle); }

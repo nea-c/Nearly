@@ -2,7 +2,9 @@
 //! and directory locks through this call and process exit. No shell is involved.
 //! A ready installer has opened and identified this process; it still cannot
 //! mutate anything until that exact process handle signals exit.
-use std::{path::{Path, PathBuf}, process::{Child, Command}, time::{Duration, Instant}};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::{path::Path, process::{Child, Command}, time::{Duration, Instant}};
 pub(crate) use crate::startup_update::HANDOFF_RELEASE_VALIDATED;
 #[cfg(windows)]
 pub(crate) use crate::update_recovery_windows::launch_verified_recovery;
@@ -14,6 +16,9 @@ pub(crate) fn installed_executable() -> Result<PathBuf,String> {
     #[cfg(not(windows))] { Err("Installed update transactions require Windows".into()) }
 }
 
+// Protocol 2 is rejected by current installers. Retain its old implementation
+// only for historical readiness/cancellation regression tests.
+#[cfg(test)]
 pub struct LaunchedInstaller { pub child: Child, identity:crate::update_transaction::ProcessIdentity, #[cfg(windows)] abort:native::CancelOnDrop, #[cfg(windows)] _health_events:native::HealthEvents, #[cfg(windows)] _installation:crate::install_root::RegisteredInstallation }
 /// Only this module can attest that an attempt never obtained a child process.
 /// After spawn, even readiness failure is deliberately an uncertain outcome.
@@ -29,9 +34,11 @@ impl std::fmt::Display for LaunchFailure {
 }
 /// Keep the spawn boundary in one place so failure proof cannot accidentally
 /// include identify/readiness errors after the OS has returned a child handle.
+#[cfg(test)]
 fn spawn_installer(command:&mut Command,nonce:&str)->Result<Child,LaunchFailure> {
     command.spawn().map_err(|e|LaunchFailure::before_spawn(nonce,format!("Cannot launch verified installer: {e}")))
 }
+#[cfg(test)]
 impl LaunchedInstaller {
     pub(crate) fn process_identity(&self)->crate::update_transaction::ProcessIdentity {self.identity.clone()}
     /// Call only after sealed settings cleanup succeeds, immediately before
@@ -43,7 +50,7 @@ impl LaunchedInstaller {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 mod native {
     use super::*;
     use std::{ffi::c_void, os::windows::ffi::OsStrExt};
@@ -221,12 +228,14 @@ mod native {
     }
 }
 
+#[cfg(test)]
 fn validate_sibling(installer:&Path,current:&Path,installed:&Path)->Result<(),String> {
     let canonical=|p:&Path|std::fs::canonicalize(p).map_err(|e|e.to_string());
     let current=canonical(current)?;
     let candidate=canonical(installer)?;
     validate_canonical_layout(&candidate,&current,&canonical(installed)?)
 }
+#[cfg(test)]
 fn validate_canonical_layout(candidate:&Path,current:&Path,installed:&Path)->Result<(),String> {
     if current != installed { return Err("Installer updates require the registered per-user Nearly.exe".into()); }
     let name=candidate.file_name().and_then(|v|v.to_str()).ok_or("Invalid staged installer name")?;
@@ -234,8 +243,10 @@ fn validate_canonical_layout(candidate:&Path,current:&Path,installed:&Path)->Res
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_nonce(nonce:&str)->Result<(),String>{if nonce.len()!=32||!nonce.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)){return Err("Invalid installer transaction nonce".into());}Ok(())}
 
+#[cfg(test)]
 pub fn launch_verified_sibling(installer:&Path,nonce:&str)->Result<LaunchedInstaller,LaunchFailure> {
     #[cfg(windows)] { native::launch(installer,nonce) }
     #[cfg(not(windows))] { let _=installer; Err(LaunchFailure::before_spawn(nonce,"Installer handoff requires Windows".into())) }

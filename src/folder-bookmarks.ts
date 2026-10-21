@@ -52,7 +52,7 @@ export function bookmarkBar(store: Store, w: Workspace) {
     store.folderBookmarks,
     connectionKey(w.connection!),
   );
-  return html`<nav id="paired-bookmarks" class="bookmark-bar" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-label="この接続先のフォルダ組み合わせ"><div class="bookmark-items">${items || html`<span class="bookmark-empty">フォルダの組み合わせを登録</span>`}</div>${store.bookmarkTreeWarning ? html`<span class="bookmark-tree-warning" title="${esc(t(store.bookmarkTreeWarning))}" role="status">分類を確認</span>` : ""}<button type="button" id="bookmark-more" data-bookmark-overflow hidden aria-expanded="false" aria-label="ブックマークメニュー" aria-haspopup="menu" title="ブックマークメニュー">${overflowIcon}</button></nav>`;
+  return html`<nav id="paired-bookmarks" class="bookmark-bar" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-label="この接続先のフォルダ組み合わせ"><div class="bookmark-items">${items || html`<span class="bookmark-empty">右クリックでブックマークを追加</span>`}</div>${store.bookmarkTreeWarning ? html`<span class="bookmark-tree-warning" title="${esc(t(store.bookmarkTreeWarning))}" role="status">分類を確認</span>` : ""}<button type="button" id="bookmark-more" data-bookmark-overflow hidden aria-expanded="false" aria-label="ブックマークメニュー" aria-haspopup="menu" title="ブックマークメニュー">${overflowIcon}</button></nav>`;
 }
 export function bindBookmarks(
   store: Store,

@@ -1,5 +1,5 @@
 /** Make a portalled popup modal without moving its content or changing save behavior. */
-export function popupBarrier(surface: HTMLElement, dismiss: () => void, layer: number, target?: HTMLElement) {
+export function popupBarrier(surface: HTMLElement, dismiss: (event?: Event) => void, layer: number, target?: HTMLElement) {
   const backdrop = document.createElement('div');
   backdrop.className = 'popup-backdrop';
   backdrop.style.zIndex = String(layer);
@@ -34,11 +34,11 @@ export function popupBarrier(surface: HTMLElement, dismiss: () => void, layer: n
     if (event.target instanceof Node && surface.contains(event.target)) return;
     stop(event);
     if (event instanceof PointerEvent && event.type === 'pointerdown') outsidePointer = {id:event.pointerId,button:event.button,released:false};
-    if (['click','auxclick','contextmenu'].includes(event.type)) dismiss();
+    if (['click','auxclick','contextmenu'].includes(event.type)) dismiss(event);
   };
   const keys = (event: KeyboardEvent) => {
     if (childPopup()) return;
-    if (event.key === 'Escape') { stop(event); dismiss(); return; }
+    if (event.key === 'Escape') { stop(event); dismiss(event); return; }
     if (event.key === 'F5' || event.altKey && ['ArrowLeft','ArrowRight','Home'].includes(event.key) ||
         (event.ctrlKey || event.metaKey) && ['t','w','Tab'].includes(event.key)) { stop(event); return; }
     if (event.key === 'Tab') {
