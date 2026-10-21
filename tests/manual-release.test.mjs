@@ -156,6 +156,17 @@ test('public download follows only trusted HTTPS hosts and never sends authentic
   await assert.rejects(()=>publisher.downloadPublic({...b,browser_download_url:url}),/redirect/);
 });
 
+test('reviewed protected-area fixture history remains exact and never exempts payloads or modified tests',async()=>{
+ const source=Buffer.from((await fs.readFile(new URL('../src-tauri/windows/whole-folder.test.mjs',import.meta.url),'utf8')).replaceAll('\r\n','\n'));
+ assert.equal(sha(source),'bf895b4812deede57739a46d698ebb56c4c8cfa308674740ffd4cd37cd832c81');
+ const record=b=>Buffer.concat([Buffer.from(commit+' blob '+b.length+'\n'),b,Buffer.from('\n')]);
+ assert.throws(()=>contracts.auditBytes(source),/privacy/i);
+ assert.equal(contracts.auditGitObjects(record(source)),1);
+ for(const changed of [Buffer.concat([source,Buffer.from('\n')]),Buffer.from(source.toString().replaceAll('Fixture','PrivatePerson')),Buffer.concat([source,Buffer.from(['C:','Users','private-person','private-folder'].join(String.fromCharCode(92)))])]){
+  assert.throws(()=>contracts.auditGitObjects(record(changed)),/privacy/i);
+ }
+});
+
 test('exact reviewed hosted guest source history never exempts changed blobs or payloads',async()=>{
  const source=await fs.readFile(new URL('./fixtures/reviewed-public-installer-qa.txt',import.meta.url));
  assert.equal(sha(source),'06a67db742b5753eb05d9c9f0279c51ed060641f8f65e505f110e5100d38187d');
