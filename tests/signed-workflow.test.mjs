@@ -11,7 +11,7 @@ const text=fs.readFileSync(path.join(root,'.github/workflows/release-signed-wind
 
 test('verification-only mode builds/signs/uploads but can never start the contents-write publisher',()=>{
   assert.deepEqual(w.on.workflow_dispatch.inputs.mode.options,['validate','verify-signature','release']);
-  const allowed=(expression,mode)=>Function('return ('+expression.replace(/inputs\.mode/g,JSON.stringify(mode)).replace(/needs\.[a-z-]+\.result/g,"'success'")+')')();
+  const allowed=(expression,mode)=>Function('return ('+expression.replace(/inputs\.mode/g,JSON.stringify(mode)).replace(/needs\.browser-ui\.outputs\.source-commit|inputs\.commit/g,JSON.stringify('a'.repeat(40))).replace(/needs\.[a-z-]+\.result/g,"'success'")+')')();
   for(const mode of ['validate','verify-signature','release','unknown']){
     const signs=['verify-signature','release'].includes(mode);
     assert.equal(allowed(w.jobs['trusted-signer'].if,mode),signs);
@@ -21,8 +21,8 @@ test('verification-only mode builds/signs/uploads but can never start the conten
     for(const job of Object.values(w.jobs))if(job.permissions.contents==='write')assert.equal(allowed(job.if,mode),mode==='release');
   }
 });
-test('completed local workflow is manual exact-input only, defaults to validation and separates five jobs',()=>{
-  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);assert.equal(w.on.workflow_dispatch.inputs.mode.default,'validate');assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(),['mode','commit','version','confirmation'].sort());assert.deepEqual(w.permissions,{});assert.equal(w.concurrency['cancel-in-progress'],false);assert.deepEqual(Object.keys(w.jobs),['policy','trusted-signer','unsigned-build','sign','publish']);assert.match(w.jobs.policy.if,/workflow_dispatch.*refs\/heads\/main/);
+test('completed local workflow is manual exact-input only, defaults to validation and separates six jobs',()=>{
+  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);assert.equal(w.on.workflow_dispatch.inputs.mode.default,'validate');assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(),['mode','commit','version','confirmation'].sort());assert.deepEqual(w.permissions,{});assert.equal(w.concurrency['cancel-in-progress'],false);assert.deepEqual(Object.keys(w.jobs),['policy','trusted-signer','browser-ui','unsigned-build','sign','publish']);assert.match(w.jobs.policy.if,/workflow_dispatch.*refs\/heads\/main/);
   assert.deepEqual(w.jobs.publish.permissions,{contents:'write',actions:'read'});assert.equal(w.jobs.publish.environment,undefined);
   for(const[name,job]of Object.entries(w.jobs))if(name!=='publish')assert.notEqual(job.permissions.contents,'write');
 });
@@ -50,4 +50,49 @@ test('runner paths are resolved only in permitted step contexts and both native 
   const native=w.jobs.sign.steps.filter(s=>s.run?.includes('nearly-updater-signer.exe'));
   assert.equal(native.length,2);
   for(const step of native)assert.equal(step.env.NEARLY_UPDATER_EXTRACTOR,'${{ runner.temp }}/nearly-tools/7z.exe');
+});
+
+test('browser checks run independently on the audited exact source and remain mandatory before signing',()=>{
+  const ui=w.jobs['browser-ui'];
+  assert.ok(ui,'parallel browser job required');
+  assert.equal(ui.needs,'policy');
+  assert.equal(w.jobs['unsigned-build'].needs,'policy');
+  assert.equal(ui['runs-on'],w.jobs['unsigned-build']['runs-on']);
+  assert.deepEqual(ui.permissions,{contents:'read'});
+  assert.equal(ui.environment,undefined);
+  assert.equal(ui['continue-on-error'],undefined);
+  assert.doesNotMatch(JSON.stringify(ui),/secrets\.|GH_TOKEN|upload-artifact|download-artifact|cargo|rustup/);
+  const source=ui.steps.find(s=>s.with?.path==='source');
+  assert.equal(source.with.ref,'${{ inputs.commit }}');
+  assert.equal(source.with['fetch-depth'],'0');
+  const commands=ui.steps.filter(s=>s.run).map(s=>s.run);
+  assert.ok(commands[0].includes('signed-release.mjs preflight source'));
+  assert.ok(commands.includes('npm ci'));
+  const checks=ui.steps.find(s=>s.name==='Browser regression and production UI checks');
+  assert.equal(checks['working-directory'],'source');
+  assert.equal(checks.run.trim(),'npm run test:ui\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\nnpm run test:ui:production\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+  const final=ui.steps.at(-1);
+  assert.equal(final.id,'verified');
+  assert.match(final.run,/signed-release\.mjs preflight source[\s\S]*if \(\$LASTEXITCODE -ne 0\)[\s\S]*git -C source rev-parse HEAD[\s\S]*GITHUB_OUTPUT/);
+  assert.equal(ui.outputs['source-commit'],'${{ steps.verified.outputs.source-commit }}');
+  for(const cmd of ['npm run test:ui','npm run test:ui:production']){
+    assert.equal(Object.values(w.jobs).flatMap(j=>j.steps).filter(s=>s.run?.split('\n').includes(cmd)).length,1,cmd+' runs exactly once');
+    assert.ok(!w.jobs['unsigned-build'].steps.some(s=>s.run?.split('\n').includes(cmd)));
+  }
+  assert.ok(w.jobs.sign.needs.includes('browser-ui'));
+  assert.match(w.jobs.sign.if,/needs\.browser-ui\.result == 'success'/);
+  assert.match(w.jobs.sign.if,/needs\.browser-ui\.outputs\.source-commit == inputs\.commit/);
+  assert.ok(!w.jobs.sign.if.includes('always('));
+});
+
+test('failed, skipped, cancelled or wrong-source browser checks cannot reach the signing gate',()=>{
+  const sha='a'.repeat(40);
+  for(const result of ['success','failure','skipped','cancelled'])for(const source of [sha,'b'.repeat(40),'']){
+    const expression=w.jobs.sign.if
+      .replace(/needs\.browser-ui\.result/g,JSON.stringify(result))
+      .replace(/needs\.browser-ui\.outputs\.source-commit/g,JSON.stringify(source))
+      .replace(/needs\.[a-z-]+\.result/g,"'success'")
+      .replace(/inputs\.mode/g,"'release'").replace(/inputs\.commit/g,JSON.stringify(sha));
+    assert.equal(Function('return ('+expression+')')(),result==='success'&&source===sha,`${result}/${source}`);
+  }
 });
