@@ -42,6 +42,7 @@ mod version;
 mod update_package;
 mod update_handoff;
 mod install_root;
+#[cfg(any(test, feature="installer-qa"))]
 mod install_prepare;
 mod update_cleanup;
 mod update_transaction;
@@ -2006,6 +2007,9 @@ fn main() {
     #[cfg(feature="installer-qa")]
     {#[cfg(windows)] if !installer_qa::authorized()&&!installer_qa::authorized_install_policy(std::env::args_os()){std::process::exit(78);}
      #[cfg(not(windows))] std::process::exit(78);}
+    // Legacy preparation protocol is confined to disposable QA fixtures.
+    // Production installation uses NSIS/Windows access checks directly.
+    #[cfg(feature="installer-qa")]
     if let Some(code)=install_prepare::dispatch(std::env::args_os()){std::process::exit(code);}
     #[cfg(all(feature="installer-qa",windows))]
     installer_qa::trace("startup",if std::env::current_exe().ok().is_some_and(|p|p.file_name().is_some_and(|n|n=="previous-image.exe")){"helper"}else if env!("CARGO_PKG_VERSION")=="1.9.0"{"source"}else{"target"});

@@ -32,8 +32,8 @@ function Assert-UiContext([hashtable]$Context) {
 }
 function Get-UiCaptions([string]$Name) {
   switch -CaseSensitive ($Name) {
-    'en' { return @{Start='Create a Start menu shortcut';Desktop='Create a desktop shortcut';Lang='English';Reject='Choose a dedicated private writable folder on a local fixed drive, with an existing parent (path up to 176 characters). Shared, redirected, ambiguous or unrelated nonempty folders cannot be used.';ProtectNew='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nAfter you click Install, create this folder so only your account, Administrators and SYSTEM can change it. Other users will not have access. The drive and other folders are not changed. Continue?';ProtectExisting='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nThis folder is empty but other users can change it. After you click Install, preserve the empty original at:$\r$\n$NearlyPreservedRoot$\r$\nThen create a dedicated replacement for your account, Administrators and SYSTEM. Other users will not have access. No existing files or drive permissions are changed. The preserved empty folder is kept for you to review. Continue?'} }
-    'ja' { return @{Start='スタートメニューに登録する';Desktop='デスクトップショートカットを作成する';Lang='日本語';Reject='ローカル固定ドライブ上の、このユーザー専用の書き込み可能なフォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。共有・転送先・不明なファイルがあるフォルダーは使用できません。';ProtectNew='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\n［インストール］を押した後、このフォルダーを現在のユーザー・管理者・SYSTEMだけが変更できる専用フォルダーとして作成します。他のユーザーはアクセスできません。ドライブ全体や他のフォルダーは変更しません。続けますか？';ProtectExisting='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\nこの空フォルダーは他のユーザーも変更できます。［インストール］を押した後、元の空フォルダーを次の場所へ退避します:$\r$\n$NearlyPreservedRoot$\r$\nその後、現在のユーザー・管理者・SYSTEMだけの専用フォルダーを作り直します。他のユーザーはアクセスできません。既存ファイルやドライブ全体の権限は変更しません。退避した空フォルダーは確認用に残します。続けますか？'} }
+    'en' { return @{Start='Create a Start menu shortcut';Desktop='Create a desktop shortcut';Lang='English';Reject='Choose a writable application folder on a local fixed drive, with an existing parent (path up to 176 characters). Redirected or ambiguous paths cannot be used. Check access permissions if writing fails.';ExistingFiles='The Nearly folder contains an EXE or uninstaller from an unrecognized installation. Move that existing installation or use its own uninstaller before trying again. Nothing was overwritten.';ProtectNew='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nAfter you click Install, create this folder so only your account, Administrators and SYSTEM can change it. Other users will not have access. The drive and other folders are not changed. Continue?';ProtectExisting='Install Nearly.exe in:$\r$\n$INSTDIR$\r$\n$\r$\nThis folder is empty but other users can change it. After you click Install, preserve the empty original at:$\r$\n$NearlyPreservedRoot$\r$\nThen create a dedicated replacement for your account, Administrators and SYSTEM. Other users will not have access. No existing files or drive permissions are changed. The preserved empty folder is kept for you to review. Continue?'} }
+    'ja' { return @{Start='スタートメニューに登録する';Desktop='デスクトップショートカットを作成する';Lang='日本語';Reject='ローカル固定ドライブ上の、書き込み可能なアプリ用フォルダーを選択してください。親フォルダーは既存である必要があり、パスは176文字以内にしてください。転送先や曖昧なパスは使用できません。書き込めない場合はアクセス権限を確認してください。';ExistingFiles='Nearly フォルダーに、このセットアップが管理していない EXE またはアンインストーラーがあります。既存のアプリを別の場所に移すか、元のアンインストーラーを使用してから再実行してください。上書きは行っていません。';ProtectNew='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\n［インストール］を押した後、このフォルダーを現在のユーザー・管理者・SYSTEMだけが変更できる専用フォルダーとして作成します。他のユーザーはアクセスできません。ドライブ全体や他のフォルダーは変更しません。続けますか？';ProtectExisting='Nearly.exe のインストール先:$\r$\n$INSTDIR$\r$\n$\r$\nこの空フォルダーは他のユーザーも変更できます。［インストール］を押した後、元の空フォルダーを次の場所へ退避します:$\r$\n$NearlyPreservedRoot$\r$\nその後、現在のユーザー・管理者・SYSTEMだけの専用フォルダーを作り直します。他のユーザーはアクセスできません。既存ファイルやドライブ全体の権限は変更しません。退避した空フォルダーは確認用に残します。続けますか？'} }
     default { throw 'Unsupported UI language' }
   }
 }
@@ -341,14 +341,14 @@ function Set-VerifiedDirectorySelection([IntPtr]$Edit) {
 function Get-RejectionButton([IntPtr]$Window) {
   if (@(Controls ([IntPtr]::Zero) | Where-Object { $_ -eq $Window }).Count -ne 1 -or [NearlyOwnedUi]::Class($Window,$ownedProcess.Id) -cne '#32770') { return }
   $children=@(Controls $Window)
-  $message=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Static' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Reject })
+  $message=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Static' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -cin @($captions.Reject,$captions.ExistingFiles) })
   if ($message.Count -ne 1) { return }
   $buttons=@($children | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::IsWindowVisible($_) -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -cin @('OK','&OK') })
   if ($buttons.Count -ne 1) { return }
   $button=[IntPtr]$buttons[0]
   $id=[NearlyOwnedUi]::GetDlgCtrlID($button)
   if ($id -notin @(1,2) -or [NearlyOwnedUi]::Parent($button,$ownedProcess.Id) -ne $Window -or ![NearlyOwnedUi]::IsWindowEnabled($button)) { return }
-  return @{button=$button;id=$id}
+  return @{button=$button;id=$id;exitCode=$(if([NearlyOwnedUi]::Text($message[0],$ownedProcess.Id) -ceq $captions.ExistingFiles){7}else{5})}
 }
 function Dismiss-Rejection([IntPtr]$Window) {
   $caller=(Get-PSCallStack)[1].ScriptLineNumber
@@ -404,7 +404,7 @@ function Wait-DirectoryTransition {
       }
       $protection=Get-ProtectionDialog $window
       if ($null -ne $protection) { return $protection }
-      if ($null -ne (Get-RejectionButton $window)) { return @{kind='Reject';window=$window} }
+      if ($null -ne (Get-RejectionButton $window)) { return @{kind='Reject';window=$window;exitCode=(Get-RejectionButton $window).exitCode} }
     }
     if (@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'Button' -and [NearlyOwnedUi]::Text($_,$ownedProcess.Id) -ceq $captions.Start }).Count -eq 1) { return @{kind='None'} }
   }
@@ -511,7 +511,7 @@ function Get-InstallNavigation {
   $progress=@(Controls $main | Where-Object { [NearlyOwnedUi]::Class($_,$ownedProcess.Id) -ceq 'msctls_progress32' })
   if ($progress.Count -eq 1 -and (($Language -eq 'en' -and $text -match 'Next') -or ($Language -eq 'ja' -and $text -match '次へ'))) { return @{kind='next'} }
 }
-function Cancel-Setup([ValidateSet(1,5)][int]$ExpectedExitCode=1) {
+function Cancel-Setup([ValidateSet(1,5,7)][int]$ExpectedExitCode=1) {
   Click-Id $main 2
   # Welcome/finish implementations may exit immediately; otherwise answer the
   # owned confirmation only. IDYES=6; no arbitrary dialog receives this input.
@@ -592,7 +592,7 @@ try {
     Dismiss-Rejection $transition.window
     Assert-NoInstallMutation
     Write-UiObservation 'before-reject-cancel'
-    Cancel-Setup -ExpectedExitCode 5
+    Cancel-Setup -ExpectedExitCode $transition.exitCode
     $result='rejected'
   } else {
     if ($Mode -eq 'Reject') { throw 'Nonempty destination unexpectedly accepted or offered protection' }

@@ -7,32 +7,6 @@ import {fileURLToPath} from 'node:url';
 const source=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8');
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 
-test('compiled NSIS consent decisions retain the worker token across the real GetParent macro', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
- const output=path.join(root,'test-results','nsis-readonly-consent');fs.mkdirSync(output,{recursive:true});
- const nsis=process.env.NEARLY_NSIS_ROOT;assert.ok(nsis);
- const original=source.match(/Function NearlyCheckFreshPlan\r?\n([\s\S]*?)FunctionEnd/)[1];
- for(const kind of ['empty','new','ready']){
-  const token=`${kind}.${'a'.repeat(32)}.${'b'.repeat(64)}`;
-  // Replace only external planner/dialog boundaries; execute the compiled
-  // production decisions and actual FileFunc GetParent implementation.
-  let body=original.replace(/nsExec::ExecToStack[^\r\n]+/,`Push "${token}"\n  Push ${kind==='ready'?0:10}`)
-   .replace('IfSilent nearly_plan_bad','; simulated interactive decision')
-   .replace(/MessageBox[^\r\n]+/g,'Goto nearly_plan_accept');
-  const exe=path.join(output,`${kind}-READONLY-CONSENT.exe`);
-  const preserved=kind==='empty'?`D:\\.Nearly-preserved-${'a'.repeat(32)}`:'';
-  const declarations=source.match(/^Var .+$/gm).join('\n');
-  const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!include "FileFunc.nsh"\n${declarations}\nFunction NearlyEnsurePolicyHelper\n Return\nFunctionEnd\nFunction NearlyCleanupPolicyHelper\n Return\nFunctionEnd\nFunction NearlyRejectRoot\n SetErrorLevel 5\n Quit\nFunctionEnd\nFunction NearlyCheckFreshPlan\n${body}\nFunctionEnd\nSection\n StrCpy $INSTDIR "D:\\Nearly"\n StrCpy $NearlyPassive 0\n Call NearlyCheckFreshPlan\n StrCmpS $NearlyConsentPath "D:\\Nearly" +3\n  SetErrorLevel 9\n  Quit\n StrCmpS $NearlyConsentToken "${token}" +3\n  SetErrorLevel 9\n  Quit\n StrCmpS $NearlyPreservedRoot "${preserved}" +3\n  SetErrorLevel 9\n  Quit\n SetErrorLevel 0\nSectionEnd\n`;
-  assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im);
-  assert.doesNotMatch(script,/nsExec|System::|--nearly-install-prepare/);
-  const nsi=path.join(output,kind+'.nsi');fs.writeFileSync(nsi,script);
-  const compile=spawnSync(path.join(nsis,'Bin','makensis.exe'),['/V2','/INPUTCHARSET','UTF8',nsi],{encoding:'utf8',windowsHide:true,env:{...process.env,NSISDIR:nsis},timeout:30000});
-  fs.writeFileSync(path.join(output,kind+'.compile.log'),`${compile.stdout}\n${compile.stderr}`);assert.equal(compile.status,0,compile.stderr||compile.stdout);
-  const run=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:15000});
-  fs.writeFileSync(path.join(output,kind+'.result.json'),JSON.stringify({status:run.status,error:run.error?.message},null,2));
-  assert.equal(run.status,0,`${kind}: ${run.error?.message||run.stderr}`);
- }
-});
-
 test('default destination calculation accepts an absent generated leaf without creating it', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
  const output=path.join(root,'test-results','nsis-readonly-default');fs.mkdirSync(output,{recursive:true});
  const parent=path.join(output,'generated parent 日本語');fs.mkdirSync(parent,{recursive:true});
@@ -55,7 +29,7 @@ test('default destination calculation accepts an absent generated leaf without c
  assert.equal(run.status,0,run.error?.message||'An absent default must retain its exact nonempty path');
  assert.equal(fs.existsSync(target),false,'Path calculation must not create the default installation');
 });
-test('read-only native System ABI harness exercises pinned ancestors and inherited ACL rejection', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
+test('read-only native System ABI harness exercises ordinary namespaces and image integrity', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
  const output=path.join(root,'test-results','nsis-readonly-root');fs.mkdirSync(output,{recursive:true});
  const nsis=process.env.NEARLY_NSIS_ROOT;
  assert.ok(nsis,'Use the existing cached compiler only');
@@ -65,66 +39,32 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
  for(const [name,mode,mask,sddl,expected] of [
   ['existing-payload-metadata','payload',0,'',0],
   ['pinned-ancestors','path',0,'',0],
-  ['private-root','acl','0x500D0156','O:SYD:(A;;FA;;;SY)',0],
-  ['foreign-inherit-only-root','acl','0x500D0156','O:SYD:(A;OICIIO;FA;;;WD)(A;;FA;;;SY)',5],
-  ['foreign-inherit-only-parent','acl','0x500D0040','O:SYD:(A;OICIIO;FA;;;WD)(A;;FA;;;SY)',0],
-  ['creator-inherit-only-root','acl','0x500D0156','O:SYD:(A;OICIIO;FA;;;CO)(A;;FA;;;SY)',0],
-  ['creator-effective-root','acl','0x500D0156','O:SYD:(A;;FA;;;CO)(A;;FA;;;SY)',5],
   ['image-current','image',0,'',0],
   ['image-exact-copy','image',0,'',0],
   ['image-stale-bytes','image',0,'',5],
   ['image-truncated','image',0,'',5],
   ['image-missing','image',0,'',5],
-  ['foreign-write-root','acl','0x500D0156','O:SYD:(A;;FA;;;WD)(A;;FA;;;SY)',5],
-  ['authenticated-users-modify-parent','acl','0x500D0040','O:SYD:(A;;0x1301bf;;;AU)(A;;FA;;;SY)',5],
-  ['authenticated-users-modify-volume-root','acl','0x500C0040','O:SYD:(A;;0x1301bf;;;AU)(A;;FA;;;SY)',0],
-  ['volume-root-delete','acl','0x500C0040','O:SYD:(A;;SD;;;AU)(A;;FA;;;SY)',0],
-  ['ordinary-parent-delete','acl','0x500D0040','O:SYD:(A;;SD;;;AU)(A;;FA;;;SY)',5],
-  ['volume-root-delete-child','acl','0x500C0040','O:SYD:(A;;0x40;;;AU)(A;;FA;;;SY)',5],
-  ['volume-root-write-dacl','acl','0x500C0040','O:SYD:(A;;WD;;;AU)(A;;FA;;;SY)',5],
-  ['volume-root-write-owner','acl','0x500C0040','O:SYD:(A;;WO;;;AU)(A;;FA;;;SY)',5],
-  ['authenticated-users-inherited-modify-root','acl','0x500D0156','O:SYD:(A;ID;0x1301bf;;;AU)(A;OICIIOID;SDGXGWGR;;;AU)(A;;FA;;;SY)',5],
  ]){
   const exe=path.join(output,`${name}-READONLY-ROOT-TEST.exe`);
   let functions=macro;
 
-  if(mode==='acl')functions=functions.replace(/  StrCpy \$NearlySecurity 0\r?\n  System::Call 'advapi32::GetSecurityInfo[^\n]+\n  StrCpy \$NearlyOwnerSid \$1\r?\n  StrCpy \$NearlyDacl \$2\r?\n  StrCpy \$NearlySecurity \$3/,String.raw`  System::Call 'advapi32::GetSecurityDescriptorOwner(p $NearlySecurity, *p .r1, *i .r2) i.r0'
-  StrCmp $0 1 0 nearly_acl_bad
-  StrCpy $NearlyOwnerSid $1
-  System::Call 'advapi32::GetSecurityDescriptorDacl(p $NearlySecurity, *i .r1, *p .r2, *i .r3) i.r0'
-  StrCmp $0 1 0 nearly_acl_bad
-  StrCmp $1 1 0 nearly_acl_bad
-  StrCpy $NearlyDacl $2
-  StrCpy $0 0`);
   let target='';
   if(mode==='payload'){
    target=path.join(output,'generated-existing-payload-READONLY.bin');
    fs.writeFileSync(target,Buffer.from('Generated metadata fixture; never executable.'));
-   // Isolate the real existing-file metadata ABI from this checkout's ACL.
-   // The production ACL function is unchanged and tested independently above.
-   const acl=/Function \$\{prefix\}NearlyCheckAcl\r?\n[\s\S]*?FunctionEnd/;
-   assert.match(functions,acl);
-   functions=functions.replace(acl,'Function ${prefix}NearlyCheckAcl\n  StrCpy $R8 1\n  Return\nFunctionEnd');
   }
   if(mode==='image'){
    target=name==='image-current'?exe:path.join(output,name+'-comparison-READONLY.bin');
    const imageFunctions=source.slice(source.indexOf('Function un.NearlyImageCleanup'),source.indexOf('Function un.onInit')).replaceAll('un.Nearly','Nearly').replace('StrCpy $NearlyPayload "$INSTDIR\\uninstall.exe"', 'StrCpy $NearlyPayload "'+target+'"');
    functions+='\n'+imageFunctions;
   }
-  const section=mode==='payload'?`  StrCpy $NearlyPayload "${target}"\n  StrCpy $R8 0\n  Call NearlyValidatePayload\n  StrCmp $R8 1 +3\n    SetErrorLevel 9\n    Quit`:mode==='image'?'  Call NearlyVerifyUninstallerImage\n  Call NearlyImageCleanup':mode==='path'?String.raw`  StrCpy $INSTDIR "C:\Windows\Nearly-readonly-root-test-nonexistent"
+  const section=mode==='payload'?`  StrCpy $NearlyPayload "${target}"\n  Call NearlyValidatePayload`:mode==='image'?'  Call NearlyVerifyUninstallerImage\n  Call NearlyImageCleanup':String.raw`  StrCpy $INSTDIR "C:\Windows\Nearly-readonly-root-test-nonexistent"
   Call NearlyPinRoot
   StrCmp $NearlyRootMissing 1 +3
     SetErrorLevel 9
     Quit
-  Call NearlyReleaseGuards`:String.raw`  Call NearlyInitSids
-  System::Call 'advapi32::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "SDDL", i 1, *p .s, p 0) i.r0'
-  Pop $NearlySecurity
-  StrCmp $0 1 +3
-    SetErrorLevel 9
-    Quit
-  StrCpy $NearlyMask MASK
-  Call NearlyCheckAcl`.replace('SDDL',sddl).replace('MASK',mask);
-  const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!define MAINBINARYNAME "Nearly"\nLoadLanguageFile "${nsis}\\Contrib\\Language files\\English.nlf"\nLangString NearlyCannotWrite 1033 "Read-only guard rejected test input"\n${declarations}\n!macro Harness prefix\n${functions}\n!macroend\n!insertmacro Harness ""\nSection\n  StrCpy $NearlyUserSid 0\n  StrCpy $NearlyGuardHead 0\n  StrCpy $NearlyLeafNode 0\n  StrCpy $NearlyHandle 0\n  StrCpy $NearlyPendingBuffer 0\n  StrCpy $NearlyEnum 0\n  StrCpy $NearlyFindData 0\n${section}\n  SetErrorLevel 0\nSectionEnd\n`;
+  Call NearlyReleaseGuards`;
+  const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!define MAINBINARYNAME "Nearly"\nLoadLanguageFile "${nsis}\\Contrib\\Language files\\English.nlf"\nLangString NearlyCannotWrite 1033 "Read-only guard rejected test input"\n${declarations}\n!macro Harness prefix\n${functions}\n!macroend\n!insertmacro Harness ""\nSection\n  StrCpy $NearlyGuardHead 0\n  StrCpy $NearlyLeafNode 0\n  StrCpy $NearlyHandle 0\n  StrCpy $NearlyPendingBuffer 0\n  StrCpy $NearlyEnum 0\n  StrCpy $NearlyFindData 0\n${section}\n  SetErrorLevel 0\nSectionEnd\n`;
   assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im,'No installation, payload, filesystem or registry mutations in this harness');
   assert.doesNotMatch(script,/::(?:CreateDirectory|DeleteFile|SetSecurity|SetNamedSecurity|MoveFile|ReplaceFile|CreateProcess|ShellExecute)/i);
   const nsi=path.join(output,name+'.nsi');fs.writeFileSync(nsi,script);
@@ -143,15 +83,15 @@ test('read-only native System ABI harness exercises pinned ancestors and inherit
  }
 });
 
-test('temporary plugin ancestry reports a bounded compiled read-only diagnosis', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
+test('temporary plugin namespace uses ordinary OS access without private-ACL admission', {skip:process.platform!=='win32'||process.env.NEARLY_NSIS_READONLY_QA!=='1'},()=>{
  const output=path.join(root,'test-results','nsis-readonly-plugin');fs.mkdirSync(output,{recursive:true});
  const nsis=process.env.NEARLY_NSIS_ROOT;assert.ok(nsis,'Use existing pinned NSIS tools');
  const declarations=source.match(/^Var .+$/gm).join('\n');
  let functions=source.match(/!macro NearlyRootFunctions prefix\r?\n([\s\S]*?)!macroend/)[1];
  functions=functions.replace(/Function \$\{prefix\}NearlyRejectRoot\r?\n[\s\S]*?FunctionEnd/,'Function ${prefix}NearlyRejectRoot\n  IntOp $0 $R9 << 16\n  IntOp $0 $0 | $NearlyIndex\n  SetErrorLevel $0\n  Quit\nFunctionEnd');
- for(const [label,code]of [['acl',11],['sids',12],['path',13],['pin',14],['root',15],['payload',16]])functions=functions.replace(`nearly_${label}_bad:`,`nearly_${label}_bad:\n  StrCpy $R9 ${code}`);
+ for(const [label,code]of [['path',13],['pin',14],['root',15],['payload',16]])functions=functions.replace(`nearly_${label}_bad:`,`nearly_${label}_bad:\n  StrCpy $R9 ${code}`);
  const exe=path.join(output,'TEMP-PLUGIN-READONLY-GUARD.exe');
- const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!define MAINBINARYNAME "Nearly"\n${declarations}\n!macro Harness prefix\n${functions}\n!macroend\n!insertmacro Harness ""\nSection\n  StrCpy $NearlyUserSid 0\n  StrCpy $NearlyGuardHead 0\n  StrCpy $NearlyLeafNode 0\n  StrCpy $NearlyHandle 0\n  StrCpy $NearlyPendingBuffer 0\n  StrCpy $NearlyEnum 0\n  StrCpy $NearlyFindData 0\n  StrCpy $NearlyIndex 0\n  StrCpy $R9 17\n  InitPluginsDir\n  System::Call 'kernel32::GetLongPathNameW(w "$PLUGINSDIR", w .r0, i 1024) i.r1'\n  StrCmp $1 0 0 +3\n    SetErrorLevel 1179648\n    Quit\n  StrCpy $INSTDIR $0\n  StrCpy $NearlyPolicyChecking 1\n  Call NearlyPinRoot\n  Call NearlyReleaseGuards\n  SetErrorLevel 0\nSectionEnd\n`;
+ const script=`Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile "${exe}"\n!define MAINBINARYNAME "Nearly"\n${declarations}\n!macro Harness prefix\n${functions}\n!macroend\n!insertmacro Harness ""\nSection\n  StrCpy $NearlyGuardHead 0\n  StrCpy $NearlyLeafNode 0\n  StrCpy $NearlyHandle 0\n  StrCpy $NearlyPendingBuffer 0\n  StrCpy $NearlyEnum 0\n  StrCpy $NearlyFindData 0\n  StrCpy $NearlyIndex 0\n  StrCpy $R9 17\n  InitPluginsDir\n  System::Call 'kernel32::GetLongPathNameW(w "$PLUGINSDIR", w .r0, i 1024) i.r1'\n  StrCmp $1 0 0 +3\n    SetErrorLevel 1179648\n    Quit\n  StrCpy $INSTDIR $0\n  Call NearlyPinRoot\n  Call NearlyReleaseGuards\n  SetErrorLevel 0\nSectionEnd\n`;
  assert.doesNotMatch(script,/^\s*(?:File|Delete|RMDir|CreateDirectory|CreateShortcut|WriteReg\w*|DeleteReg\w*|WriteUninstaller|Exec\w*|SetOutPath)\s/im);
  assert.doesNotMatch(script,/::(?:CreateDirectory|DeleteFile|SetSecurity|SetNamedSecurity|MoveFile|ReplaceFile|CreateProcess|ShellExecute)/i);
  const nsi=path.join(output,'temporary-plugin-readonly.nsi');fs.writeFileSync(nsi,script);
@@ -186,6 +126,5 @@ try {
   const diagnostic=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(query,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:15000,maxBuffer:32768});
   if(diagnostic.status===0)try{const records=JSON.parse(diagnostic.stdout);console.log('Read-only temporary ACL classes: '+JSON.stringify(records));}catch{}
  }
- assert.ok(run.status===0||result.stage>=11&&result.stage<=18&&result.pathIndex<=176,'Unexpected diagnostic result: '+JSON.stringify(result));
- if(process.env.NEARLY_NSIS_REQUIRE_PRIVATE_TEMP==='1')assert.equal(run.status,0,'Actual temporary plugin ancestry rejected: '+JSON.stringify(result));
+ assert.equal(run.status,0,'Ordinary temporary plugin namespace must be usable: '+JSON.stringify(result));
 });

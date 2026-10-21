@@ -252,7 +252,7 @@ public static class NearlyOwnedUi {
  public sealed class StartupPendingException:Exception{}
  public static string Mode="ok";public static int Id=2,Inputs=0,Queries=0;public static bool Gone=false;
  public static string Class(IntPtr h,int pid){if(pid!=7)throw new Exception("Foreign PID");if(Gone&&h==(IntPtr)1)throw new Exception("Destroyed modal queried");if(Mode=="race"&&Queries++==0)throw new WindowChangedException();return h==(IntPtr)10?"#32770":h==(IntPtr)1?(Mode=="dialog"?"Edit":"#32770"):h==(IntPtr)2?"Static":"Button";}
- public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
+ public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":Mode=="existing"?"known existing files":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
  public static IntPtr Parent(IntPtr h,int pid){return Mode=="parent"?(IntPtr)9:(IntPtr)1;}
  public static int GetDlgCtrlID(IntPtr h){return Id;}
  public static bool IsWindowVisible(IntPtr h){return Mode!="hidden";}
@@ -273,13 +273,18 @@ function Assert-Process {}
 function Controls([IntPtr]$Parent){if($Parent -eq [IntPtr]::Zero){if(![NearlyOwnedUi]::Gone){return [IntPtr]1};$script:postQueries++;if($script:postQueries -eq 1){return [IntPtr]1};return};if([NearlyOwnedUi]::Mode -eq 'duplicate'){return @([IntPtr]2,[IntPtr]3,[IntPtr]4)};return @([IntPtr]2,[IntPtr]3)}
 function Failure-ControlSnapshot {return @(@{kind='button';id=2;enabled=$true})}
 function Write-UiObservation {}
-$ownedProcess=[pscustomobject]@{Id=7};$captions=@{Reject='known rejection'};$main=[IntPtr]10;$NavigationMode='Command'
+$ownedProcess=[pscustomobject]@{Id=7};$captions=@{Reject='known rejection';ExistingFiles='known existing files'};$main=[IntPtr]10;$NavigationMode='Command'
 foreach($mode in @('caption','message','dialog','duplicate','hidden','parent')){
  [NearlyOwnedUi]::Mode=$mode
  if($null -ne (Get-RejectionButton ([IntPtr]1))){throw ('Unsafe modal accepted: '+$mode)}
 }
 [NearlyOwnedUi]::Mode='ok';[NearlyOwnedUi]::Id=6
 if($null -ne (Get-RejectionButton ([IntPtr]1))){throw 'Foreign button ID accepted'}
+[NearlyOwnedUi]::Id=2
+foreach($case in @(@('ok',5),@('existing',7))){
+ [NearlyOwnedUi]::Mode=$case[0]
+ if((Get-RejectionButton ([IntPtr]1)).exitCode -ne $case[1]){throw 'Product rejection exit code lost'}
+}
 foreach($mode in @('ok','amp','race')){
  [NearlyOwnedUi]::Mode=$mode;[NearlyOwnedUi]::Id=2;[NearlyOwnedUi]::Gone=$false;$script:postQueries=0
  Dismiss-Rejection ([IntPtr]1)
@@ -306,6 +311,7 @@ Cancel-Setup
 $ownedProcess.ExitCode=5;$rejected=$false;try{Cancel-Setup}catch{$rejected=$true}
 if(!$rejected){throw 'Ordinary cancellation wrongly accepted refusal code'}
 Cancel-Setup -ExpectedExitCode 5
+$ownedProcess.ExitCode=7;Cancel-Setup -ExpectedExitCode 7
 $ownedProcess.ExitCode=0;$rejected=$false;try{Cancel-Setup -ExpectedExitCode 5}catch{$rejected=$true}
 if(!$rejected){throw 'Refusal must not accept success exit'}
 'Distinct cancellation outcomes passed'
@@ -634,7 +640,7 @@ Invoke-Expression $fn[0].Extent.Text
   assert.equal(r.status,0,r.stderr||r.error?.message);
   const actual=JSON.parse(r.stdout);
   const template=fs.readFileSync(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
-  for(const [lang,nsis]of [['en','ENGLISH'],['ja','JAPANESE']])for(const [key,id]of [['Start','NearlyStartMenuText'],['Desktop','NearlyDesktopText'],['Reject','NearlyCannotWrite'],['ProtectNew','NearlyProtectNew'],['ProtectExisting','NearlyProtectExisting']]){
+  for(const [lang,nsis]of [['en','ENGLISH'],['ja','JAPANESE']])for(const [key,id]of [['Start','NearlyStartMenuText'],['Desktop','NearlyDesktopText'],['Reject','NearlyCannotWrite']]){
     const expected=template.split('\n').find(line=>line.startsWith(`LangString ${id} \${LANG_${nsis}} `))?.match(/"(.*)"/)?.[1];
     assert.ok(expected,`${lang} ${id} caption missing`);
     assert.equal(actual[lang][key],expected,`${lang} ${id} selector differs`);

@@ -1,4 +1,4 @@
-//! Read-only admission for the one owned per-user installation. Directory
+//! Read-only namespace admission for the one owned per-user installation. Directory
 //! guards must overlap the transaction/recovery capture; a returned path alone
 //! is never authority to mutate an installation.
 use std::path::{Path, PathBuf};
@@ -264,11 +264,15 @@ pub(crate) mod native {
                 || String::from_utf16_lossy(&filesystem[..filesystem.iter().position(|c|*c==0).unwrap_or(filesystem.len())])!="NTFS" {
                 return Err("Installation requires a local NTFS filesystem".into());
             }
-            let root=PathBuf::from(value); let trusted=Trusted::capture()?;
+            // Match ordinary current-user NSIS installation: Windows decides
+            // access from its existing ACLs. This is not private-ACL admission.
+            // Namespace/object identity and package authenticity remain separate.
+            let root=PathBuf::from(value);
             let mut paths:Vec<_>=root.ancestors().collect(); paths.reverse(); let mut guards=Vec::new();
             for path in paths {
-                let guard=fs::directory(path,0x20081).map_err(|_|"Cannot pin installation directory")?;
-                if !inspect_directory(&guard,path,path==root,&trusted)?.private{return Err("Installation requires a private writable directory".into());}
+                let guard=fs::directory(path,0x81).map_err(|_|"Cannot pin installation directory")?;
+                validate_final_root_name(path,&guard)?;
+                if path.parent().is_none(){verify_volume_root(path,&guard)?;}
                 guards.push(guard);
             }
             validate_final_root_name(&root,guards.last().ok_or("Missing installation directory pin")?)?;
@@ -276,13 +280,12 @@ pub(crate) mod native {
             // observation handles allow replacement by the existing recovery
             // protocol; directory guards retain the namespace throughout.
             for name in ["Nearly.exe","uninstall.exe"] {
-                let file=match OpenOptions::new().access_mode(0x20080).share_mode(7).custom_flags(0x00200000).open(root.join(name)) {
+                let file=match OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x00200000).open(root.join(name)) {
                     Ok(file)=>file,
                     Err(error) if recovery && error.kind()==std::io::ErrorKind::NotFound=>continue,
                     Err(_)=>return Err("Registered installation payload is unavailable".into()),
                 };
                 fs::regular(&file).map_err(|_|"Unsafe registered installation payload")?;
-                safe_security(&file,true,&trusted)?;
             }
             Ok(Self{root,_guards:guards})
         }
@@ -340,8 +343,30 @@ pub(crate) mod native {
                 guards.push(guard);
             }
         }
+        #[test] fn ordinary_inherited_namespace_is_admitted_by_production_validation(){
+            let parent=std::env::current_dir().unwrap().join("target");
+            std::fs::create_dir_all(&parent).unwrap();
+            let root=parent.join(format!("nearly-admission-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir(&root).unwrap();
+            let root=dunce::canonicalize(root).unwrap();
+            std::fs::write(root.join("Nearly.exe"),b"generated ordinary namespace").unwrap();
+            std::fs::write(root.join("uninstall.exe"),b"generated uninstaller").unwrap();
+            let value=root.to_str().unwrap();
+            let normal=RegisteredInstallation::validate("local.syncfiles.native",value,false).unwrap();
+            let recovery=RegisteredInstallation::validate("local.syncfiles.native",value,true).unwrap();
+            assert_eq!(normal.root(),recovery.root());
+            assert_eq!(normal.root(),root);
+            drop((normal,recovery));
+            // Generated fixtures may be retained when the managed environment
+            // disallows deletion. Cleanup is not an admission test assertion.
+            let _=std::fs::remove_file(root.join("Nearly.exe"));
+            let _=std::fs::remove_file(root.join("uninstall.exe"));
+            let _=std::fs::remove_dir(root);
+        }
         #[test] fn generated_custom_root_payload_current_identity_and_namespace_guards(){
-            let raw_root=std::env::temp_dir().join(format!("nearly-install-root-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let fixture_parent=std::env::current_dir().unwrap().join("target");
+            std::fs::create_dir_all(&fixture_parent).unwrap();
+            let raw_root=fixture_parent.join(format!("nearly-os-root-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             std::fs::create_dir(&raw_root).unwrap();
             // Hosted TEMP may use an 8.3 alias. Positive namespace checks need
             // the actual long path; the product must still reject that alias.
@@ -350,22 +375,22 @@ pub(crate) mod native {
             std::fs::write(root.join("uninstall.exe"),b"fixture uninstaller").unwrap();
             let value=root.to_str().unwrap();
             assert!(RegisteredInstallation::validate("foreign",value,false).is_err());
-            // This namespace-only fixture deliberately bypasses ACL admission;
-            // the host temp ACL may be writable by Everyone. ACL admission is
-            // tested with synthetic descriptors above without changing ACLs.
-            let installation=RegisteredInstallation{root:root.clone(),_guards:root.ancestors().map(|path|fs::directory(path,0x81).unwrap()).collect()};
-            assert!(validate_final_root_name(&root,&installation._guards[0]).is_ok());
+            // Exercise production admission. Inherited OS permissions must not
+            // require a special owner/ACL or a test-only bypass.
+            let installation=RegisteredInstallation::validate("local.syncfiles.native",value,false).expect("OS-readable ordinary namespace must be admitted");
+            assert!(validate_final_root_name(&root,installation._guards.last().unwrap()).is_ok());
             let raw_name:Vec<_>=raw_root.as_os_str().encode_wide().collect();
             let final_name:Vec<_>=root.as_os_str().encode_wide().collect();
             if unsafe{CompareStringOrdinal(raw_name.as_ptr(),raw_name.len() as i32,final_name.as_ptr(),final_name.len() as i32,1)}!=2 {
-                assert!(validate_final_root_name(&raw_root,&installation._guards[0]).is_err(),"short-path aliases must stay rejected");
+                assert!(validate_final_root_name(&raw_root,installation._guards.last().unwrap()).is_err(),"short-path aliases must stay rejected");
             }
-            assert!(validate_final_root_name(&root.with_extension("other"),&installation._guards[0]).is_err());
+            assert!(validate_final_root_name(&root.with_extension("other"),installation._guards.last().unwrap()).is_err());
             let image=OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x00200000).open(root.join("Nearly.exe")).unwrap();
             assert!(fs::regular(&image).is_ok());
             let alias=root.join("alias.exe");
             std::fs::hard_link(root.join("Nearly.exe"),&alias).unwrap();
             assert!(fs::regular(&image).is_err(),"payload hard links must fail closed");
+            assert!(RegisteredInstallation::validate("local.syncfiles.native",value,false).is_err(),"production admission must reject hard-linked payloads");
             std::fs::remove_file(alias).unwrap();
             drop(image);
             assert!(!installation.is_current().unwrap());
@@ -378,6 +403,7 @@ pub(crate) mod native {
             drop(next);
             std::fs::remove_file(root.join("uninstall.exe")).unwrap();
             assert!(RegisteredInstallation::validate("local.syncfiles.native",value,false).is_err());
+            assert!(RegisteredInstallation::validate("local.syncfiles.native",value,true).is_ok(),"recovery may capture an interrupted payload without changing namespace policy");
             std::fs::remove_file(root.join("Nearly.exe")).unwrap();
             std::fs::remove_dir(root).unwrap();
         }

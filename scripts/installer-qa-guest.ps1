@@ -247,8 +247,13 @@ if ($Action -eq 'guard-probe') {
   Assert-NoApp
   if (Test-Path -LiteralPath $RunRoot) { throw 'Guard probe must precede run-root creation' }
   if ($env:NEARLY_NSIS_READONLY_QA -cne '1' -or $env:NEARLY_NSIS_REQUIRE_PRIVATE_TEMP -cne '1' -or $env:NEARLY_NSIS_ROOT -cne (Join-Path $env:LOCALAPPDATA 'tauri\NSIS')) { throw 'Exact read-only guard probe context required' }
-  & node --test '--test-name-pattern=temporary plugin ancestry' (Join-Path $PSScriptRoot '..\src-tauri\windows\readonly-root.test.mjs')
+  $tempTestName='temporary plugin namespace uses ordinary OS access without private-ACL admission'
+  $tempTestFile=Join-Path $PSScriptRoot '..\src-tauri\windows\readonly-root.test.mjs'
+  if ([regex]::Matches([IO.File]::ReadAllText($tempTestFile),[regex]::Escape("test('$tempTestName'")).Count -ne 1) { throw 'Exact temporary namespace test is missing or duplicated' }
+  & node --test ("--test-name-pattern=^"+[regex]::Escape($tempTestName)+'$') $tempTestFile
   if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\payload-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated same-handle payload qualification failed' }
   if ($env:QA_DESTINATION -ceq 'drive') {
     . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
     Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
@@ -338,6 +343,31 @@ function New-SharedEmptyDriveFixture {
   $acl.SetSecurityDescriptorSddlForm("O:$sid"+'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)')
   Set-Acl -LiteralPath $install -AclObject $acl
 }
+function Test-OwnedDriveWriteDenial {
+  # Only a disposable, exact guest fixture may receive this negative-test ACL.
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Exact empty generated drive fixture required' }
+  Assert-UnderRun $Setup
+  $original=Get-Acl -LiteralPath $install
+  $denied=Get-Acl -LiteralPath $install
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::CreateFiles,[Security.AccessControl.AccessControlType]::Deny)
+  $denied.AddAccessRule($rule)
+  try {
+    Set-Acl -LiteralPath $install -AclObject $denied
+    $failed=$false
+    try { [IO.File]::WriteAllBytes((Join-Path $install 'write-denial-check.tmp'),[byte[]]@(1)) } catch [UnauthorizedAccessException] { $failed=$true }
+    if (!$failed) { throw 'Fixture did not deny actual file creation' }
+    $p=Start-Process -FilePath $Setup -ArgumentList @('/S',('/D='+$install)) -PassThru -WindowStyle Hidden
+    if (!$p.WaitForExit(120000)) { throw 'Write-denied setup timed out' }
+    if ($p.ExitCode -ne 5) { throw 'Write-denied setup did not report access refusal' }
+    foreach ($target in @($exe,$uninstaller,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Write refusal changed installed state' } }
+    if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Write refusal left unexpected files' }
+  } finally {
+    Set-Acl -LiteralPath $install -AclObject $original
+  }
+  if ((Get-Acl -LiteralPath $install).Sddl -cne $original.Sddl) { throw 'Generated fixture ACL was not restored' }
+}
 function Get-DirectoryIdentity([string]$Path) {
   Assert-LocalPath $Path
   if (!(Test-Path -LiteralPath $Path -PathType Container)) { throw 'Directory identity requires existing directory' }
@@ -410,8 +440,8 @@ switch ($Action) {
       Invoke-Bounded $Setup @('/S')
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       Uninstall-Owned $true
-      if ($env:QA_DESTINATION -ceq 'default') {
-        # Actual unregistered reinstall with only known retained data.
+      if ($env:QA_DESTINATION -cin @('default','custom','drive','drive-c')) {
+        # Actual unregistered reinstall with only known retained data at any root.
         Invoke-Bounded $Setup @('/S')
         Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
         Uninstall-Owned $true
@@ -428,9 +458,7 @@ switch ($Action) {
     $prior=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | ForEach-Object Name)
     New-SharedEmptyDriveFixture
     $originalId=Get-DirectoryIdentity $install; $originalAcl=(Get-Acl -LiteralPath $install).Sddl
-    Invoke-Ui 'Install' 'drive-consent-no' 'en' 1 0 'Existing' 'No'
-    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Declined consent changed original folder' }
-    Invoke-Ui 'Cancel' 'drive-consent-yes-cancel' 'ja' 1 0 'Existing' 'Yes'
+    Invoke-Ui 'Cancel' 'drive-ordinary-cancel' 'ja' 1 0 'None' 'Yes'
     if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Cancel before Install changed original folder' }
     foreach ($target in @($exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled consent changed installed state' } }
     $marker=Join-Path $install 'owned-nonempty-fixture.txt'; $markerBytes=[Text.Encoding]::UTF8.GetBytes('generated unrelated content must survive')
@@ -439,16 +467,15 @@ switch ($Action) {
     if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($marker)) -cne [Convert]::ToBase64String($markerBytes)) { throw 'Nonempty refusal damaged existing contents' }
     if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 1) { throw 'Nonempty refusal changed directory entries' }
     Remove-Item -LiteralPath $marker
-    Invoke-Ui 'Drive' 'drive-consent-install' 'en' 1 0 'Existing' 'Yes'
+    Test-OwnedDriveWriteDenial
+    Invoke-Ui 'Drive' 'drive-ordinary-install' 'en' 1 0 'None' 'Yes'
     Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
-    if ((Get-DirectoryIdentity $install) -ceq $originalId) { throw 'Shared original was not replaced with a fresh private object' }
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl) { throw 'Ordinary install replaced the folder or changed its ACL' }
     $preserved=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | Where-Object Name -CNotIn $prior)
-    if ($preserved.Count -ne 1 -or $preserved[0].Name -cnotmatch '\A\.Nearly-preserved-[a-f0-9]{32}\z') { throw 'Exact preserved original missing or ambiguous' }
-    $preservedPath=$preserved[0].FullName
-    if ((Get-DirectoryIdentity $preservedPath) -cne $originalId -or (Get-Acl -LiteralPath $preservedPath).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $preservedPath -Force).Count -ne 0) { throw 'Preserved original identity/permissions/content changed' }
+    if ($preserved.Count -ne 0) { throw 'Ordinary install unexpectedly preserved/replaced a directory' }
     Seed-Settings; Uninstall-Owned $true; Remove-GeneratedSettings
-    if ((Get-DirectoryIdentity $preservedPath) -cne $originalId -or (Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'Uninstall removed original or changed parent permissions' }
-    Write-Output 'Drive consent No/Yes+Cancel/nonempty refusal/Yes+Install, original identity+ACL retention and unchanged parent ACL verified.'
+    if ((Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'Uninstall changed parent permissions' }
+    Write-Output 'Ordinary drive install, cancellation, nonempty refusal, existing identity/ACL retention and unchanged parent ACL verified.'
   }
   'launch' {
     Assert-NoApp; Assert-Regular $exe

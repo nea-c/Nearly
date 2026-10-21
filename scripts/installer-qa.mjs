@@ -285,20 +285,12 @@ export function copyFixturePath(relative){
   return !['.git','build','dist','.test-build','.superpowers','.agents','.codex','.aws','.ssh','test-results','playwright-report'].includes(parts[0])&&!(parts[0]==='src-tauri'&&parts[1]==='target');
 }
 export function instrumentCandidatePolicyDiagnostics(template){
-  if(typeof template!=='string'||template.length>262144||template.includes('NEARLY_QA_POLICY_'))fail('Unexpected candidate diagnostic template');
-  let result=template;
-  for(const [label,message]of [['nearly_policy_bad','NEARLY_QA_POLICY_HELPER'],['nearly_plan_bad','NEARLY_QA_POLICY_EXIT=$0']]){
-    const marker=`  ${label}:`;
-    if(result.split(marker).length!==2)fail('Candidate diagnostic boundary missing or ambiguous');
-    // Failure-only observation in disposable QA fixtures. No admission, write,
-    // signature or exit semantics change; production sources are untouched.
-    // LeafKind=36 is the expected nonempty-folder refusal. Let its ordinary
-    // rejection dialog run unchanged so QA can verify refusal and preservation.
-    const expectedRefusal=label==='nearly_plan_bad'?'\n  StrCmpS $0 36 +2':'';
-    result=result.replace(marker,`${marker}${expectedRefusal}\n  MessageBox MB_ICONSTOP|MB_OK "${message}"`);
-  }
-  return result;
+  // Standard NSIS has no private-leaf helper protocol to instrument. Qualify
+  // the exact product template without adding failure-only modal behavior.
+  if(typeof template!=='string'||template.length>262144||!template.includes('Function NearlyDirectoryLeave')||!template.includes('RequestExecutionLevel user')||/NEARLY_QA_POLICY_|NearlyEnsurePolicyHelper|--nearly-install-(?:check|prepare)/.test(template))fail('Unexpected standard installer template');
+  return template;
 }
+
 async function buildFixture(p,version,signer,token,baseEnv){
   const paths=fixtureBuildPaths(p,version),dir=paths.sourceDir;
   await fs.cp(root,dir,{recursive:true,errorOnExist:true,force:false,filter:src=>copyFixturePath(path.relative(root,src))});
@@ -393,7 +385,7 @@ export async function run(e=process.env){
       results.push({case:`candidate-ui-${language}-cancel`,passed:true});
     }
     if(destination==='drive'||destination==='drive-c'){
-      await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);results.push({case:'drive-consent-preservation-and-content-refusal',passed:true});
+      await ps('drive',['-Setup',source.setup,'-ExpectedPayload',source.payloadSha256],fixtureEnv);results.push({case:'drive-ordinary-install-and-content-refusal',passed:true});
     }
     {
       const env={...baseEnv,NEARLY_QA_TOKEN:token,NEARLY_QA_RUN_ROOT:p.runRoot,NEARLY_QA_SCENARIO:scenario};

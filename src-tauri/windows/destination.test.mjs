@@ -21,10 +21,11 @@ test('registered resolution precedes stage authentication; ordinary effects stay
  assert.match(body('NearlyResolveRegistration'),/NearlyRequestedRoot/);
  assert.match(body('NearlyResolveRegistration'),/NearlyRegisteredRoot/);
 });
-test('root guard pins ancestors, validates filesystem and ACLs without changing security',()=>{
- for(const token of ['GetDriveTypeW','GetFullPathNameW','GetFileInformationByHandle','GetSecurityInfo','GetAce','EqualSid','GetTokenInformation','NearlyReleaseLeaf','0x02200000','0x500D0156','0x500D0040']) assert.ok(s.includes(token),token);
+test('root guard pins ancestors and validates filesystem without private ACL admission or security changes',()=>{
+ for(const token of ['GetDriveTypeW','GetFullPathNameW','GetFileInformationByHandle','GetTokenInformation','NearlyReleaseLeaf','0x02200000']) assert.ok(s.includes(token),token);
  assert.doesNotMatch(s,/SetSecurityInfo|SetNamedSecurityInfo|SetFileSecurity|icacls|takeown/i);
- assert.match(s,/CreateFileW\(w "\$NearlyWalk", i 0x20081, i 3,/);
+ assert.doesNotMatch(s,/NearlyCheckAcl|GetSecurityInfo|EqualSid/);
+ assert.match(s,/CreateFileW\(w "\$NearlyWalk", i 0x81, i 3,/);
  assert.match(s,/NumberOfLinks|single-link/);
 });
 test('uninstall uses registered root plus original image directory and retains ancestors until nonrecursive removal',()=>{
@@ -84,9 +85,10 @@ test('pointer state is explicitly initialized before first guard use and cleanup
 
 test('uninstaller image equivalence is mandatory before mutations and held until self-delete',()=>{
  const init=body('un.onInit');assert.ok(init.includes('Call un.NearlyVerifyUninstallerImage'));
- const open=body('un.NearlyOpenImage');assert.match(open,/CreateFileW\(w "\$NearlyPayload", i 0x80000080, i 1,/);assert.match(open,/GetFileInformationByHandle/);assert.match(open,/StrCmp \$3 1/);
+ const open=body('un.NearlyOpenImage');assert.match(open,/CreateFileW\(w "\$NearlyPayload", i \$NearlyImageAccess, i \$NearlyImageShare,/);assert.match(open,/GetFileInformationByHandle/);assert.match(open,/StrCmp \$3 1/);
  const verify=body('un.NearlyVerifyUninstallerImage');assert.match(verify,/GetModuleFileNameW/);assert.match(verify,/ReadFile/);assert.match(verify,/RtlCompareMemory/);assert.match(verify,/StrCmp \$NearlyImageSize \$NearlyImageRemaining/);
- const section=s.slice(s.indexOf('Section Uninstall'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')>section.indexOf('Delete "$INSTDIR\\${MAINBINARYNAME}.exe"'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')<section.indexOf('Delete "$INSTDIR\\uninstall.exe"'));
+ assert.match(verify,/StrCpy \$NearlyImageAccess 0x80010080/);
+ const section=s.slice(s.indexOf('Section Uninstall'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')>section.indexOf('StrCpy $NearlyIoWriteHandle $NearlyRegisteredImageHandle'));assert.ok(section.indexOf('Call un.NearlyImageCleanup')<section.indexOf('DeleteRegKey HKCU'));
 });
 test('all pending handles and buffers release before rejecting a directory page',()=>{
  const reject=s.match(/Function \$\{prefix\}NearlyRejectRoot\r?\n([\s\S]*?)FunctionEnd/)[1];
