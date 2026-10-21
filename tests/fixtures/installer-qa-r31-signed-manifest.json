@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "kind": "signed-updater",
+  "repository": "nea-c/Nearly",
+  "commit": "0dd697f2d832ec9fd07e9278559e18819b65bd3a",
+  "tag": "r3.1",
+  "version": "3.1.0",
+  "workflowCommit": "0dd697f2d832ec9fd07e9278559e18819b65bd3a",
+  "runId": "39288652319",
+  "runAttempt": "1",
+  "mode": "release",
+  "tree": "d80b35dfe4874d97cd79c8df1d822320fb9211fd",
+  "publicKeySha256": "2592845a518adb9df5b7773dd58672ea411b3038758bfaf2808a3cb13dcc8695",
+  "payloadSha256": "7d9926db7b7c59e88de8baf3d1b8cc6a131788ef2ad43c68bb7f258efc5a540d",
+  "unsignedArtifactId": "12205937438",
+  "unsignedManifestHash": "8b4501ca5f4e7cbc7c6be7475726908d513184552f5d3ede9ae6b2ad85088786",
+  "toolArtifactId": "12204797381",
+  "toolManifestHash": "d72832803277b81ec284475b0930cd745476984faa9e71ffc29d4248cef77e07",
+  "assets": [
+    {
+      "name": "Nearly_r3.1_x64-setup.exe",
+      "bytes": 5896024,
+      "sha256": "fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc"
+    },
+    {
+      "name": "Nearly_r3.1_x64-setup.exe.sha256",
+      "bytes": 92,
+      "sha256": "16ccd21421c70440f229a3da70b0e934626ecaf90836061a396e8bdda2079199"
+    },
+    {
+      "name": "Nearly_r3.1_x64-setup.exe.sig",
+      "bytes": 528,
+      "sha256": "43473c441f9a7e4b34f6115d466c5e56c4681dbc5280616d4e1e58ed2642ff76"
+    }
+  ]
+}

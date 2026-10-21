@@ -44,4 +44,14 @@ The isolated hosted QA-feature success/restart and health-failure rollback resul
 
 Tests use ephemeral in-memory fixture keys, an upstream minisign vector, loopback HTTP servers and harmless owned test-runner processes. NSIS is compiled without executing setup. See [the design](update-installer-design.md) and [native handoff](../src-tauri/windows/UPDATE-HANDOFF.md).
 
+## Ordinary-permissions custom directories (candidate)
+
+The installer accepts a dedicated Windows-writable folder such as `D:\Nearly` or `E:\Nearly`, with the application directly inside. New folders use ordinary inherited permissions; existing ACLs and drive permissions remain unchanged. The candidate removes all-ancestor private-ACL admission and fresh-install preparation helpers, consent tokens and empty-folder replacement. It retains local fixed NTFS/path limits, namespace handles, reparse/single-link checks, exact registered image ownership and same-handle payload I/O. Unknown content is not adopted. Recognized retained settings-only folders can be reinstalled at the default or a custom destination.
+
+This is a non-elevated current-user installer. It respects Windows access denial and is not a boundary against arbitrary code already running with the same user's full authority. A shared writable installation has greater local tamper exposure than a private folder. Remote updates still require the trusted public signature, hashes, version/architecture/protocol binding and authenticated journal/recovery checks. Those checks do not make an already replaced running application trustworthy.
+
+Installer, updater admission and startup recovery use consistent namespace/object checks. An owned registration fixes the existing destination; this is not an automatic relocation mechanism. Manual setup is not an atomic two-file transaction: later I/O failure may leave an already written owned payload changed. Automatic update recovery retains its separate signature and journal protocol.
+
+The installer does not change OS or tool sandbox restrictions. Qualification uses disposable hosted Windows fixtures; see [windows-installer-qa.md](windows-installer-qa.md) for exact source commits, native tests and lifecycle results. No real-PC installation or arbitrary power-loss recovery is established by those results. Whole-folder uninstall is a separate explicit OFF-by-default operation described in [windows-installer.md](windows-installer.md).
+
 Primary sources: [Tauri updater](https://v2.tauri.app/plugin/updater/), [official signed-comment format](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.3/crates/tauri-cli/src/helpers/updater_signature.rs), [minisign verifier](https://github.com/jedisct1/rust-minisign-verify), [ring Ed25519](https://docs.rs/ring/0.17.14/ring/signature/index.html).

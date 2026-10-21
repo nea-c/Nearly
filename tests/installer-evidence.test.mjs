@@ -6,7 +6,17 @@ const summary=()=>({schemaVersion:2,controllerSha:'a'.repeat(40),scenario:'succe
 test('public summary permits only bounded typed results and never raw errors or authorization',()=>{
  assert.equal(typeof evidence.validatePublicSummary,'function');
  assert.deepEqual(evidence.validatePublicSummary(summary()),summary());
- for(const patch of [{token:'secret'},{error:'private path'},{destinationKind:'drive'},{controllerSha:'wrong'},{cases:[{case:'valid',passed:true,path:'private'}]},{cases:[{case:'../secret',passed:true}]}])assert.throws(()=>evidence.validatePublicSummary({...summary(),...patch}));
+ assert.equal(evidence.validatePublicSummary({...summary(),destinationKind:'drive'}).destinationKind,'drive');
+ for(const patch of [{token:'secret'},{error:'private path'},{destinationKind:'foreign'},{controllerSha:'wrong'},{cases:[{case:'valid',passed:true,path:'private'}]},{cases:[{case:'../secret',passed:true}]}])assert.throws(()=>evidence.validatePublicSummary({...summary(),...patch}));
+});
+
+test('C-root evidence remains explicit and cannot be attributed to the D-root plan',()=>{
+ assert.equal(evidence.validatePublicSummary({...summary(),destinationKind:'drive-c'}).destinationKind,'drive-c');
+ assert.equal(typeof evidence.validateUiDestination,'function');
+ assert.equal(evidence.validateUiDestination('drive-c','drive-c'),true);
+ assert.throws(()=>evidence.validateUiDestination('drive','drive-c'));
+ assert.throws(()=>evidence.validateUiDestination('drive-c','drive'));
+ for(const value of ['drive-e','DRIVE-C','drive-c\n'])assert.throws(()=>evidence.validatePublicSummary({...summary(),destinationKind:value}));
 });
 
 function crc(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return(c^0xffffffff)>>>0;}

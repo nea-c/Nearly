@@ -1,5 +1,5 @@
 param(
-  [Parameter(Mandatory)][ValidateSet('preflight','extract','production','ui','drive','source','launch','verify','uninstall')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('preflight','guard-probe','extract','production','ui','drive','uninstall-options','source','launch','verify','uninstall')][string]$Action,
   [Parameter(Mandatory)][string]$RunRoot,
   [string]$Setup,
   [string]$ExpectedPayload,
@@ -16,18 +16,28 @@ Set-StrictMode -Version Latest
 
 # This file is never invoked by unit tests. Every entrypoint requires the same
 # explicit manual guest authorization; a path alone does not authorize mutation.
-if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_REPOSITORY -cne 'nea-c/Nearly' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/main') { throw 'Manual hosted Windows guest required' }
+if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_REPOSITORY -cne 'nea-c/Nearly' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cnotin @('refs/heads/main','refs/heads/codex/private-install-directory')) { throw 'Manual hosted Windows guest required' }
 if ($env:QA_CONTROLLER_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_SHA -cne $env:QA_CONTROLLER_SHA -or $env:GITHUB_WORKFLOW_SHA -cne $env:QA_CONTROLLER_SHA -or $env:QA_CONFIRMATION -cne "installer-qa $env:QA_CONTROLLER_SHA") { throw 'Exact SHA confirmation required' }
 if ($env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $env:GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z' -or !$env:RUNNER_TEMP -or !$env:LOCALAPPDATA -or $env:SYNCFILES_CONFIG_DIR) { throw 'Unexpected run/storage context' }
 $expectedRoot = Join-Path $env:RUNNER_TEMP "nearly-installer-qa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 if ($RunRoot -cne $expectedRoot) { throw 'Exact run root required' }
-if ($env:QA_DESTINATION -cnotin @('default','custom')) { throw 'Explicit QA destination required' }
+function Resolve-GuestInstallRoot([string]$Action,[string]$DestinationKind,[System.Collections.IDictionary]$Destinations) {
+  if ($DestinationKind -cnotin @('default','custom','drive','drive-c')) { throw 'Explicit QA destination required' }
+  if ($Action -ceq 'production') { return $Destinations.default }
+  if ($Action -ceq 'drive') {
+    if ($DestinationKind -ceq 'drive-c') { return $Destinations['drive-c'] }
+    return $Destinations.drive
+  }
+  return $Destinations[$DestinationKind]
+}
+if ($env:QA_DESTINATION -cnotin @('default','custom','drive','drive-c')) { throw 'Explicit QA destination required' }
 $destinations = [ordered]@{
   default = Join-Path $env:LOCALAPPDATA 'Nearly'
   custom = Join-Path $env:LOCALAPPDATA "Nearly Installer QA $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\日本語 space\Nearly"
   drive = "D:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+  'drive-c' = "C:\Nearly QA 日本語 $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 }
-$install = if ($Action -eq 'production') { $destinations.default } elseif ($Action -eq 'drive') { $destinations.drive } else { $destinations[$env:QA_DESTINATION] }
+$install = Resolve-GuestInstallRoot $Action $env:QA_DESTINATION $destinations
 $exe = Join-Path $install 'Nearly.exe'
 $uninstaller = Join-Path $install 'uninstall.exe'
 $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\local.syncfiles.native'
@@ -65,11 +75,50 @@ function Wait-Condition([scriptblock]$Condition,[int]$Seconds=30) {
   while ([DateTime]::UtcNow -lt $deadline) { if (& $Condition) { return }; Start-Sleep -Milliseconds 250 }
   throw 'Bounded guest state wait timed out; evidence retained'
 }
+$script:passiveDiagnosticsAttempted=$false
+function Invoke-DiagnosticObserver($Process,[string]$Image) {
+  . (Join-Path $PSScriptRoot 'installer-qa-passive-observer.ps1')
+  Watch-NearlyPassiveInstaller -OwnedProcessId $Process.Id -ExpectedImage $Image -ExpectedStartTimeUtcTicks $Process.StartTime.ToUniversalTime().Ticks -TimeoutSeconds 30
+}
+function Write-ProductionFailureDiagnostic([string]$File,[int]$OriginalExitCode) {
+  # A diagnostic follow-up can change a partially installed payload. Capture the
+  # original state first; the caller ALWAYS throws the original /S failure.
+  if ($Action -cne 'production' -or $File -cne $Setup -or $OriginalExitCode -ne 6 -or $script:passiveDiagnosticsAttempted) { return }
+  $script:passiveDiagnosticsAttempted=$true
+  try {
+    Assert-UnderRun $File
+    if ((Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc') { throw 'Immutable diagnostic artifact differs' }
+    $snapshot=[ordered]@{kind='immutableProductionFailureSnapshot';originalExitCode=$OriginalExitCode;payloadSha256=$null;uninstallerSha256=$null;payloadWriteOpenError=$null;uninstallerWriteOpenError=$null}
+    foreach ($pair in @(@('payloadWriteOpenError',$exe),@('uninstallerWriteOpenError',$uninstaller))) {
+      if (Test-Path -LiteralPath $pair[1]) { $snapshot[$pair[0]]=Get-ProductionWriteProbe $pair[1] }
+    }
+    # Emit probes even if a subsequent sharing violation prevents hashing.
+    Write-Host (ConvertTo-Json -InputObject $snapshot -Compress)
+    foreach ($pair in @(@('payloadSha256',$exe),@('uninstallerSha256',$uninstaller))) {
+      if (Test-Path -LiteralPath $pair[1]) {
+        Assert-Regular $pair[1]
+        $snapshot[$pair[0]]=(Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash.ToLowerInvariant()
+      }
+    }
+    Write-Host (ConvertTo-Json -InputObject $snapshot -Compress)
+    Write-Host 'Separate passive diagnostic follows; original silent regression remains failed.'
+    $diagnostic=Start-Process -FilePath $File -ArgumentList '/P' -PassThru -WindowStyle Hidden
+    $observation=Invoke-DiagnosticObserver $diagnostic $File
+    Write-Host (ConvertTo-Json -InputObject $observation -Compress)
+  } catch { Write-Host 'Separate passive diagnostic unavailable; original regression remains failed.' }
+}
 function Invoke-Bounded([string]$File,[string[]]$Arguments) {
   Assert-Regular $File
   $p = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden
   if (!$p.WaitForExit(120000)) { throw 'Installer process timeout; runner retained for failure evidence' }
-  if ($p.ExitCode -ne 0) { throw "Installer exited with $($p.ExitCode)" }
+  if ($p.ExitCode -ne 0) {
+    try {
+      $state=[ordered]@{kind='installerQaProcessFailure';exitCode=$p.ExitCode;payloadPresent=(Test-Path -LiteralPath $exe);uninstallerPresent=(Test-Path -LiteralPath $uninstaller);registrationPresent=(Test-Path -LiteralPath $registration);startShortcutPresent=(Test-Path -LiteralPath $startShortcut);desktopShortcutPresent=(Test-Path -LiteralPath $desktopShortcut)}
+      Write-Host (ConvertTo-Json -InputObject $state -Compress)
+    } catch { Write-Host 'Bounded installer failure state unavailable' }
+    Write-ProductionFailureDiagnostic $File $p.ExitCode
+    throw "Installer exited with $($p.ExitCode)"
+  }
 }
 function Assert-NoApp {
   foreach ($p in @(Get-Process -Name Nearly -ErrorAction SilentlyContinue)) { throw 'Nearly process already running' }
@@ -177,7 +226,9 @@ function Prepare-EmptyUiRoot {
   Assert-LocalPath $parent
 }
 function Get-PreflightFileTargets([string]$Root,[System.Collections.IDictionary]$Destinations,[string]$StartDirectory,[string]$DesktopShortcut) {
-  return @($Root,$Destinations.default,$Destinations.custom,$Destinations.drive,$StartDirectory,$DesktopShortcut)
+  $targets=@($Root,$Destinations.default,$Destinations.custom,$Destinations.drive,$StartDirectory,$DesktopShortcut)
+  if ($Destinations.Contains('drive-c')) { $targets+=@($Destinations['drive-c']) }
+  return $targets
 }
 
 if ($Action -eq 'preflight') {
@@ -192,10 +243,31 @@ if ($Action -eq 'preflight') {
   if (!$available) { throw 'WebView2 unavailable; no runtime download and no skipped pass' }
   return
 }
+if ($Action -eq 'guard-probe') {
+  Assert-NoApp
+  if (Test-Path -LiteralPath $RunRoot) { throw 'Guard probe must precede run-root creation' }
+  if ($env:NEARLY_NSIS_READONLY_QA -cne '1' -or $env:NEARLY_NSIS_REQUIRE_PRIVATE_TEMP -cne '1' -or $env:NEARLY_NSIS_ROOT -cne (Join-Path $env:LOCALAPPDATA 'tauri\NSIS')) { throw 'Exact read-only guard probe context required' }
+  $tempTestName='temporary plugin namespace uses ordinary OS access without private-ACL admission'
+  $tempTestFile=Join-Path $PSScriptRoot '..\src-tauri\windows\readonly-root.test.mjs'
+  if ([regex]::Matches([IO.File]::ReadAllText($tempTestFile),[regex]::Escape("test('$tempTestName'")).Count -ne 1) { throw 'Exact temporary namespace test is missing or duplicated' }
+  & node --test ("--test-name-pattern=^"+[regex]::Escape($tempTestName)+'$') $tempTestFile
+  if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\payload-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated same-handle payload qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\whole-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated whole-tree deletion qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\qa-diagnostics-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated diagnostic and shortcut qualification failed' }
+  if ($env:QA_DESTINATION -ceq 'drive') {
+    . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
+    Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
+  }
+  return
+}
 $planPath=Join-Path $RunRoot 'plan.json'; Assert-UnderRun $planPath
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 if ($plan.schemaVersion -ne 2 -or $plan.controllerSha -cne $env:GITHUB_SHA -or $plan.runRoot -cne $RunRoot -or $plan.destinationKind -cne $env:QA_DESTINATION -or $plan.installRoot -cne $destinations[$env:QA_DESTINATION] -or $plan.runId -cne $env:GITHUB_RUN_ID -or $plan.runAttempt -cne $env:GITHUB_RUN_ATTEMPT) { throw 'Owned plan marker mismatch' }
-foreach ($kind in @('default','custom','drive')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
+foreach ($kind in @('default','custom','drive','drive-c')) { if ($plan.destinations.$kind -cne $destinations[$kind]) { throw 'Derived destination mismatch' } }
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -237,18 +309,199 @@ public static class NearlyQaShortcut {
   public static bool Matches(string shortcut,string expected) {return TargetMatches(expected,ReadWide(shortcut));}
 }
 '@
-function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice) {
+function Get-ProductionWriteProbe([string]$File) {
+  if ($Action -cne 'production' -or $File -cnotin @($exe,$uninstaller)) { throw 'Exact production payload probe required' }
+  Assert-Regular $File
+  if ($null -eq ('NearlyQaWriteProbe' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NearlyQaWriteProbe {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+ public static int Read(string path) {
+  // OPEN_EXISTING + OPEN_REPARSE_POINT, all sharing enabled. Request write
+  // access to diagnose sharing/access denial; never create, truncate or write.
+  using(var handle=CreateFileW(path,0x40000000,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
+   return handle.IsInvalid?Marshal.GetLastWin32Error():0;
+  }
+ }
+}
+'@
+  }
+  return [NearlyQaWriteProbe]::Read($File)
+}
+function Invoke-Ui([string]$Mode,[string]$Name,[string]$Lang,[int]$StartChoice,[int]$DesktopChoice,[string]$ConsentKind='Auto',[string]$ConsentDecision='Yes') {
   if ($Name -cnotmatch '\A[a-z0-9-]{1,40}\z') { throw 'Fixed UI case identity required' }
   Assert-UnderRun $Setup
-  & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode
+  & (Join-Path $PSScriptRoot 'installer-qa-ui.ps1') -Setup $Setup -RunRoot $RunRoot -InstallRoot $install -Language $Lang -Start $StartChoice -Desktop $DesktopChoice -CaseName $Name -Mode $Mode -ConsentKind $ConsentKind -ConsentDecision $ConsentDecision
+}
+function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][string]$Mode) {
+  Assert-NoApp; Assert-Regular $uninstaller
+  Assert-Registration '1.9.0'
+  # Reuse only the reviewed, PID-bound window API class, never the installer UI
+  # script entrypoint. This guest already checked exact hosted SHA/run/root.
+  if (!('NearlyOwnedUi' -as [type])) {
+    $ui=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'installer-qa-ui.ps1'))
+    $match=[regex]::Match($ui,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+    if (!$match.Success) { throw 'Reviewed owned-window helper absent' }
+    Add-Type -TypeDefinition $match.Groups[1].Value
+  }
+  $copy=Join-Path $RunRoot ('uninstall-option-'+$Mode+'.exe')
+  if (Test-Path -LiteralPath $copy) { throw 'Fresh exact generated copy required' }
+  [IO.File]::Copy($uninstaller,$copy,$false)
+  if ((Get-FileHash -LiteralPath $copy).Hash -cne (Get-FileHash -LiteralPath $uninstaller).Hash) { throw 'Generated uninstaller copy mismatch' }
+  $p=Start-Process -FilePath $copy -ArgumentList ('_?='+$install) -PassThru -WindowStyle Hidden
+  if ([NearlyOwnedUi]::ProcessImage($p) -cne $copy) { throw 'Uninstaller process image changed' }
+  function Owned-Windows([IntPtr]$Parent) { return @([NearlyOwnedUi]::Windows($p.Id,$Parent)) }
+  function Owned-Button([IntPtr]$Parent,[int]$Id) {
+    $buttons=@(Owned-Windows $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::Parent($_,$p.Id) -eq $Parent })
+    if ($buttons.Count -ne 1) { throw 'Exact owned dialog button required' }
+    return $buttons[0]
+  }
+  function Click-Owned([IntPtr]$Parent,[int]$Id) {
+    # Show posts asynchronously. Presence alone is not input readiness; wait
+    # without sending anything, then retain Command's independent final guard.
+    Write-Host "Whole-folder UI: mode=$Mode command=$Id awaiting-ready"
+    Wait-Condition {
+      $buttons=@(Owned-Windows $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::Parent($_,$p.Id) -eq $Parent })
+      if ($buttons.Count -eq 0) { return $false }
+      if ($buttons.Count -ne 1) { throw 'Ambiguous owned dialog button' }
+      $button=$buttons[0]
+      return [NearlyOwnedUi]::IsWindowVisible($Parent) -and [NearlyOwnedUi]::IsWindowEnabled($Parent) -and [NearlyOwnedUi]::IsWindowVisible($button) -and [NearlyOwnedUi]::IsWindowEnabled($button)
+    }
+    $button=Owned-Button $Parent $Id
+    Write-Host "Whole-folder UI: mode=$Mode command=$Id ready=true"
+    [NearlyOwnedUi]::Command($Parent,$button,$p.Id,$Id)
+  }
+  $script:optionMain=[IntPtr]::Zero
+  Wait-Condition {
+    $windows=@(Owned-Windows ([IntPtr]::Zero) | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq '#32770' })
+    if ($windows.Count -eq 1) { $script:optionMain=$windows[0];return $true };return $false
+  }
+  $main=$script:optionMain
+  [NearlyOwnedUi]::Show($main,$p.Id)
+  Click-Owned $main 1
+  $script:optionCheck=[IntPtr]::Zero
+  Wait-Condition {
+    $checks=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Checkbox($_,$p.Id) })
+    if ($checks.Count -eq 1) { $script:optionCheck=$checks[0];return $true };return $false
+  }
+  $check=$script:optionCheck
+  if ([NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -ne 0) { throw 'Whole-folder option must default OFF' }
+  $labels=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Static' -and [NearlyOwnedUi]::Text($_,$p.Id).Contains($install) })
+  if ($labels.Count -ne 1 -or ![NearlyOwnedUi]::Text($check,$p.Id).Contains('ALL its contents')) { throw 'Actual path and all-contents warning required' }
+  $mainHash=(Get-FileHash -LiteralPath $exe).Hash
+  if ($Mode -cne 'Keep') {
+    [NearlyOwnedUi]::Click($check,$p.Id)
+    Wait-Condition { [NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -eq 1 }
+    Click-Owned $main 1
+    $script:optionPrompt=[IntPtr]::Zero
+    Wait-Condition {
+      $windows=@(Owned-Windows ([IntPtr]::Zero) | Where-Object { $_ -ne $main -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq '#32770' })
+      if ($windows.Count -eq 1) { $script:optionPrompt=$windows[0];return $true };return $false
+    }
+    $prompt=$script:optionPrompt
+    $texts=@(Owned-Windows $prompt | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Static' } | ForEach-Object { [NearlyOwnedUi]::Text($_,$p.Id) })
+    if (@($texts | Where-Object { $_.Contains($install) -and $_.Contains('EVERYTHING inside') }).Count -ne 1) { throw 'Exact whole-folder confirmation required' }
+    $no=Owned-Button $prompt 7
+    if (![NearlyOwnedUi]::DefaultButton($no,$p.Id)) { throw 'Deletion confirmation must default No' }
+    $answer=if ($Mode -ceq 'Remove') { 6 } else { 7 }
+    [NearlyOwnedUi]::ClickConsent($prompt,(Owned-Button $prompt $answer),$p.Id,$answer)
+    if ($Mode -ceq 'Decline') {
+      Wait-Condition { [NearlyOwnedUi]::IsWindowEnabled($main) }
+      Assert-Payload $ExpectedPayload '1.9.0';Assert-Settings $true
+      if ((Get-FileHash -LiteralPath $exe).Hash -cne $mainHash) { throw 'Declined confirmation changed payload' }
+      [NearlyOwnedUi]::Click($check,$p.Id)
+      Wait-Condition { [NearlyOwnedUi]::Send($check,$p.Id,240,0,0).ToInt32() -eq 0 }
+      Click-Owned $main 1
+    }
+  } else { Click-Owned $main 1 }
+  Wait-Condition {
+    if ($p.HasExited) { return $true }
+    $buttons=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($_) })
+    if ($buttons.Count -eq 1 -and [NearlyOwnedUi]::Text($buttons[0],$p.Id) -cin @('Close','&Close')) { Click-Owned $main 1 }
+    return $false
+  } 60
+  if ($p.ExitCode -ne 0) { throw "Generated uninstaller option failed: $($p.ExitCode)" }
+}
+function New-SharedEmptyDriveFixture {
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or (Test-Path -LiteralPath $install)) { throw 'Exact absent owned drive fixture required' }
+  # Only this app-specific leaf is created/protected. Parent/drive ACLs are read-only.
+  New-Item -ItemType Directory -Path $install | Out-Null
+  $acl=[Security.AccessControl.DirectorySecurity]::new()
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl.SetOwner($sid)
+  $acl.SetSecurityDescriptorSddlForm("O:$sid"+'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)')
+  Set-FixtureAccess $acl
+}
+function New-FixtureAccessRestore([Security.AccessControl.DirectorySecurity]$Original) {
+  # A fresh object marks only DACL information as modified. Reusing Get-Acl's
+  # full descriptor can request SACL/owner privileges the standard token lacks.
+  $access=[Security.AccessControl.AccessControlSections]::Access
+  $copy=[Security.AccessControl.DirectorySecurity]::new()
+  $copy.SetSecurityDescriptorSddlForm($Original.GetSecurityDescriptorSddlForm($access),$access)
+  return $copy
+}
+function Set-FixtureAccess([Security.AccessControl.DirectorySecurity]$Descriptor) {
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Exact empty generated drive fixture required' }
+  # Set-Acl's provider re-copies all sections. Persist only the DACL marked by
+  # the fresh descriptor; no owner, audit, token privilege or parent ACL change.
+  [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($install),(New-FixtureAccessRestore $Descriptor))
+}
+function Test-OwnedDriveWriteDenial {
+  # Only a disposable, exact guest fixture may receive this negative-test ACL.
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Exact empty generated drive fixture required' }
+  Assert-UnderRun $Setup
+  $original=Get-Acl -LiteralPath $install
+  $denied=Get-Acl -LiteralPath $install
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::CreateFiles,[Security.AccessControl.AccessControlType]::Deny)
+  $denied.AddAccessRule($rule)
+  try {
+    Write-Host "Fixture DACL API: PowerShell=$($PSVersionTable.PSVersion) .NET=$([Environment]::Version)"
+    Set-FixtureAccess $denied
+    $failed=$false
+    try { [IO.File]::WriteAllBytes((Join-Path $install 'write-denial-check.tmp'),[byte[]]@(1)) } catch [UnauthorizedAccessException] { $failed=$true }
+    if (!$failed) { throw 'Fixture did not deny actual file creation' }
+    $p=Start-Process -FilePath $Setup -ArgumentList @('/S',('/D='+$install)) -PassThru -WindowStyle Hidden
+    if (!$p.WaitForExit(120000)) { throw 'Write-denied setup timed out' }
+    if ($p.ExitCode -ne 5) { throw 'Write-denied setup did not report access refusal' }
+    foreach ($target in @($exe,$uninstaller,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Write refusal changed installed state' } }
+    if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Write refusal left unexpected files' }
+  } finally {
+    Set-FixtureAccess $original
+  }
+  if ((Get-Acl -LiteralPath $install).Sddl -cne $original.Sddl) { throw 'Generated fixture ACL was not restored' }
+}
+function Get-DirectoryIdentity([string]$Path) {
+  Assert-LocalPath $Path
+  if (!(Test-Path -LiteralPath $Path -PathType Container)) { throw 'Directory identity requires existing directory' }
+  if (!('NearlyQaDirectoryIdentity' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NearlyQaDirectoryIdentity {
+ [StructLayout(LayoutKind.Sequential,Pack=4)] struct Info {public uint Attr;public long Created;public long Accessed;public long Written;public uint Volume,HighSize,LowSize,Links,HighIndex,LowIndex;}
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string name,uint access,uint share,IntPtr security,uint mode,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
+ public static string Read(string name){using(var h=CreateFileW(name,0x80,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)){Info i;if(h.IsInvalid||!GetFileInformationByHandle(h,out i)||(i.Attr&0x410)!=0x10)throw new Exception("Directory identity failed");return i.Volume.ToString("x8")+":"+i.HighIndex.ToString("x8")+i.LowIndex.ToString("x8");}}
+}
+'@
+  }
+  return [NearlyQaDirectoryIdentity]::Read($Path)
 }
 switch ($Action) {
   'extract' {
     $zipPath=Join-Path $RunRoot 'signed.zip'; Assert-UnderRun $zipPath
-    if ((Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'e8baf6d70cdfe9278e8ad162d75c989a434226cec9da04b62b9a691895ec9526') { throw 'Pinned ZIP mismatch' }
+    if ((Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne '5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480') { throw 'Pinned ZIP mismatch' }
     $zip=[IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
-      $expected=@('Nearly_r2.0_x64-setup.exe','Nearly_r2.0_x64-setup.exe.sha256','Nearly_r2.0_x64-setup.exe.sig','signed-manifest.json')
+      $expected=@('Nearly_r3.1_x64-setup.exe','Nearly_r3.1_x64-setup.exe.sha256','Nearly_r3.1_x64-setup.exe.sig','signed-manifest.json')
       if ($zip.Entries.Count -ne 4) { throw 'Unexpected signed ZIP entries' }
       $seen=@{}
       foreach ($entry in $zip.Entries) { if ($entry.FullName -cnotin $expected -or $seen.ContainsKey($entry.FullName) -or $entry.Length -le 0 -or $entry.Length -gt 67108864 -or (($entry.ExternalAttributes -shr 16) -band 0xf000) -eq 0xa000) { throw 'Unsafe ZIP member' }; $seen[$entry.FullName]=$true }
@@ -261,9 +514,12 @@ switch ($Action) {
     Assert-UnderRun $Setup; Assert-NoApp
     foreach ($choice in @(@(0,0),@(0,1),@(1,0),@(1,1))) {
       Seed-Settings; Set-Choices $choice[0] $choice[1]
-      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '2.0.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=install"
+      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
       # Reinstall is a real ordinary NSIS upgrade of an owned installed payload.
-      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '2.0.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=reinstall"
+      Invoke-Bounded $Setup @('/S'); Assert-Payload $ExpectedPayload '3.1.0'; Assert-Settings $true; Assert-Shortcuts $choice[0] $choice[1]
+      Write-Host "Production regression: choices=$($choice[0])$($choice[1]) stage=uninstall"
       Uninstall-Owned $true
     }
     Remove-GeneratedSettings
@@ -286,13 +542,24 @@ switch ($Action) {
     if ($UiMode -eq 'Cancel') {
       foreach ($target in @($install,$exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled setup mutated installed state' } }
     } else {
+      Write-Host 'Candidate lifecycle: stage=first-install-verified'
       Seed-Settings
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       # Reinstall the now-owned candidate without changing adjacent settings or
       # the choices selected through the real UI.
       Invoke-Bounded $Setup @('/S')
+      Write-Host 'Candidate lifecycle: stage=registered-reinstall-completed'
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       Uninstall-Owned $true
+      Write-Host 'Candidate lifecycle: stage=first-uninstall-completed'
+      if ($env:QA_DESTINATION -cin @('default','custom','drive','drive-c')) {
+        # Actual unregistered reinstall with only known retained data at any root.
+        # Registration no longer carries a custom root. /D must be LAST.
+        Invoke-Bounded $Setup @('/S',('/D='+$install))
+        Write-Host 'Candidate lifecycle: stage=unregistered-reinstall-completed'
+        Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
+        Uninstall-Owned $true
+      }
       Remove-GeneratedSettings
     }
   }
@@ -300,18 +567,54 @@ switch ($Action) {
     Assert-NoApp
     foreach ($target in @($install,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Drive boundary is not fresh' } }
     if (Test-Path -LiteralPath $preferences) { Remove-Item -LiteralPath $preferences -Recurse }
-    Invoke-Ui 'Drive' 'drive-boundary' 'en' 1 0
-    if (Test-Path -LiteralPath $exe) {
-      Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
-      Seed-Settings; Uninstall-Owned $true
-      Remove-GeneratedSettings
-    } else {
-      foreach ($target in @($uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Rejected drive boundary changed installed state' } }
-      if (Test-Path -LiteralPath $install) {
-        Assert-LocalPath $install
-        if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Rejected drive boundary left unexpected files' }
-        [IO.Directory]::Delete($install,$false)
+    $parent=Split-Path -Parent $install
+    $parentAcl=(Get-Acl -LiteralPath $parent).Sddl
+    $prior=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | ForEach-Object Name)
+    New-SharedEmptyDriveFixture
+    $originalId=Get-DirectoryIdentity $install; $originalAcl=(Get-Acl -LiteralPath $install).Sddl
+    Invoke-Ui 'Cancel' 'drive-ordinary-cancel' 'ja' 1 0 'None' 'Yes'
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Cancel before Install changed original folder' }
+    foreach ($target in @($exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled consent changed installed state' } }
+    $marker=Join-Path $install 'owned-nonempty-fixture.txt'; $markerBytes=[Text.Encoding]::UTF8.GetBytes('generated unrelated content must survive')
+    [IO.File]::WriteAllBytes($marker,$markerBytes)
+    Invoke-Ui 'Reject' 'drive-nonempty-rejected' 'en' 1 0 'None' 'No'
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl -or [Convert]::ToBase64String([IO.File]::ReadAllBytes($marker)) -cne [Convert]::ToBase64String($markerBytes)) { throw 'Nonempty refusal damaged existing contents' }
+    if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 1) { throw 'Nonempty refusal changed directory entries' }
+    Remove-Item -LiteralPath $marker
+    Test-OwnedDriveWriteDenial
+    Invoke-Ui 'Drive' 'drive-ordinary-install' 'en' 1 0 'None' 'Yes'
+    Assert-Payload $ExpectedPayload '1.9.0'; Assert-Shortcuts 1 0
+    if ((Get-DirectoryIdentity $install) -cne $originalId -or (Get-Acl -LiteralPath $install).Sddl -cne $originalAcl) { throw 'Ordinary install replaced the folder or changed its ACL' }
+    $preserved=@(Get-ChildItem -LiteralPath $parent -Directory -Force -Filter '.Nearly-preserved-*' | Where-Object Name -CNotIn $prior)
+    if ($preserved.Count -ne 0) { throw 'Ordinary install unexpectedly preserved/replaced a directory' }
+    Seed-Settings; Uninstall-Owned $true; Remove-GeneratedSettings
+    if ((Get-Acl -LiteralPath $parent).Sddl -cne $parentAcl) { throw 'Uninstall changed parent permissions' }
+    Write-Output 'Ordinary drive install, cancellation, nonempty refusal, existing identity/ACL retention and unchanged parent ACL verified.'
+  }
+  'uninstall-options' {
+    Assert-UnderRun $Setup;Assert-NoApp
+    $outside=Join-Path $RunRoot 'whole-options-outside.bin'
+    [IO.File]::WriteAllText($outside,'generated outside sentinel')
+    $outsideHash=(Get-FileHash -LiteralPath $outside).Hash
+    foreach ($mode in @('Keep','Decline','Remove')) {
+      Prepare-EmptyUiRoot
+      Invoke-Bounded $Setup @('/S',('/D='+$install))
+      Seed-Settings;Assert-Payload $ExpectedPayload '1.9.0'
+      $marker=Join-Path $install 'generated-unknown-file.bin'
+      [IO.File]::WriteAllText($marker,'generated inside whole-folder scope')
+      $markerHash=(Get-FileHash -LiteralPath $marker).Hash
+      Invoke-UninstallOptionUi $mode
+      if ((Get-FileHash -LiteralPath $outside).Hash -cne $outsideHash) { throw 'Outside sentinel changed' }
+      if (Test-Path -LiteralPath $registration) { throw 'Successful uninstall retained registration' }
+      if ($mode -ceq 'Remove') {
+        if (Test-Path -LiteralPath $install) { throw 'Whole-folder option left its root' }
+      } else {
+        Assert-Settings $true
+        if ((Get-FileHash -LiteralPath $marker).Hash -cne $markerHash) { throw 'OFF removed unknown contents' }
+        Remove-Item -LiteralPath $marker
+        Remove-GeneratedSettings
       }
+      Write-Host "Whole-folder option verified: $mode"
     }
   }
   'launch' {

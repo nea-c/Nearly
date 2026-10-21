@@ -11,21 +11,69 @@ on:
         description: Type installer-qa followed by a space and the exact controller SHA
         type: string
         required: true
+      diagnosis_only:
+        description: Read only existing hosted fixed drive root metadata without installer preparation
+        type: boolean
+        default: false
+      diagnose_windows_2022:
+        description: Use the existing Windows 2022 image for read-only root diagnosis only
+        type: boolean
+        default: false
+      root_coverage_only:
+        description: Qualify only the explicit C-drive root child without changing any drive permissions
+        type: boolean
+        default: false
 permissions: {}
 concurrency:
   group: nearly-manual-installer-qa
   cancel-in-progress: false
 jobs:
+  root-diagnosis:
+    name: Read-only hosted drive root diagnosis
+    if: inputs.diagnosis_only && github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory')
+    runs-on: ${{ inputs.diagnose_windows_2022 && 'windows-2022' || 'windows-2025' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      QA_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      QA_CONFIRMATION: ${{ inputs.confirmation }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require exact manual confirmation before root metadata reads
+        run: |
+          node --input-type=module -e "import {validateContext} from './scripts/installer-qa.mjs'; validateContext(process.env);"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Read only bounded existing fixed drive roots
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-StrictMode -Version Latest
+          . ./scripts/installer-qa-root-inventory.ps1
+          $inventory=Get-NearlyHostedRootInventory
+          Write-Host (ConvertTo-Json -InputObject $inventory -Depth 8 -Compress)
+          if (!$inventory.complete) { throw 'Root inventory incomplete; no admission or qualification result' }
   guest:
-    name: Fresh guest / ${{ matrix.scenario }} / ${{ matrix.destination }}
-    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    name: Fresh guest / ${{ matrix.phase || 'candidate' }} / ${{ matrix.scenario }} / ${{ matrix.destination }}
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/private-install-directory') && !inputs.diagnosis_only
     runs-on: windows-2025
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
+        phase: [candidate]
         scenario: [success, health-failure]
-        destination: [default, custom]
+        destination: ${{ fromJSON(inputs.root_coverage_only && '["drive-c"]' || '["default","custom","drive"]') }}
+        include: ${{ fromJSON(inputs.root_coverage_only && '[]' || '[{"phase":"production","scenario":"success","destination":"default"}]') }}
     permissions:
       contents: read
       actions: read
@@ -34,6 +82,7 @@ jobs:
       QA_CONFIRMATION: ${{ inputs.confirmation }}
       QA_SCENARIO: ${{ matrix.scenario }}
       QA_DESTINATION: ${{ matrix.destination }}
+      QA_COMMAND: ${{ matrix.phase == 'production' && 'production' || 'run' }}
       RUSTUP_TOOLCHAIN: 1.97.1
     defaults:
       run:
@@ -53,10 +102,22 @@ jobs:
           node --input-type=module -e "import {validateContext,validateScenario} from './scripts/installer-qa.mjs'; validateContext(process.env); validateScenario(process.env.QA_SCENARIO);"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Safe orchestration, UI policy and evidence unit tests
-        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs
+        run: node --test tests/installer-qa.test.mjs tests/installer-ui.test.mjs tests/installer-evidence.test.mjs tests/installer-standard-user.test.mjs tests/installer-passive-observer.test.mjs tests/installer-failure-diagnostic.test.mjs tests/installer-drive-diagnosis.test.mjs
+      - name: Prove standard-user guest startup before dependency preparation
+        run: node scripts/installer-qa.mjs preflight
+      - name: Verify exact signing-plan and source-bound tool contracts without production signing
+        run: node --test tests/signed-release-contract.test.mjs tests/signed-tools.test.mjs
       - name: Prepare pinned cached NSIS tools without installing any runtime
         run: ./.github/scripts/prepare-windows.ps1 -SourceRoot .
+      - name: Compile exact NSIS template and verify payload archive contract
+        run: |
+          $env:NEARLY_NSIS_ROOT=Join-Path $env:LOCALAPPDATA 'tauri\NSIS'
+          node --test src-tauri/windows/*.test.mjs tests/build-installer.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove actual temporary plugin namespace admission before building
+        run: node scripts/installer-qa.mjs guard-probe
       - name: Prepare locked build dependencies in this fresh guest
+        if: matrix.phase != 'production'
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -64,10 +125,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 fetch --locked --manifest-path src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 test --locked --manifest-path tools/updater-signer/Cargo.toml --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Qualify actual destination and shortcut UI plus ephemeral QA update/restart/recovery
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/installer-qa.mjs run
+        run: node scripts/installer-qa.mjs $env:QA_COMMAND
       - name: Export only validated public screenshots and bounded result records
         id: evidence
         if: always() && steps.authorized.outcome == 'success'
@@ -76,7 +139,7 @@ jobs:
         if: always() && steps.evidence.outcome == 'success'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: nearly-installer-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scenario }}-${{ matrix.destination }}
+          name: nearly-installer-ui-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.scenario }}-${{ matrix.destination }}-${{ matrix.phase || 'candidate' }}
           path: ${{ runner.temp }}/nearly-installer-qa-${{ github.run_id }}-${{ github.run_attempt }}/public-evidence/
           overwrite: false
           if-no-files-found: error

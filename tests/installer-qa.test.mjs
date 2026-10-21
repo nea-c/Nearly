@@ -6,7 +6,124 @@ import {fileURLToPath} from 'node:url';
 import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
+test('disposable fixture ACL restore copies only DACL, without owner or audit privilege requests',{skip:process.platform!=='win32'},()=>{
+ const source=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
+ const script=String.raw`$ErrorActionPreference='Stop'
+$text=[IO.File]::ReadAllText($env:QA_TEST_SOURCE)
+$ast=[System.Management.Automation.Language.Parser]::ParseInput($text,[ref]$null,[ref]$null)
+$fn=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FixtureAccessRestore'},$true)
+if (!$fn) { throw 'DACL-only restore missing' }
+Invoke-Expression $fn.Extent.Text
+$original=[Security.AccessControl.DirectorySecurity]::new()
+$original.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;OICI;FA;;;SY)S:(ML;;NW;;;LW)')
+$copy=New-FixtureAccessRestore $original
+$access=[Security.AccessControl.AccessControlSections]::Access
+if ($copy.GetSecurityDescriptorSddlForm($access) -cne $original.GetSecurityDescriptorSddlForm($access)) { throw 'DACL changed' }
+$all=$copy.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+if ($all.Contains('O:') -or $all.Contains('G:') -or $all.Contains('S:')) { throw 'Restore copied non-DACL information' }
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,QA_TEST_SOURCE:source},encoding:'utf8',windowsHide:true,timeout:15000});
+ assert.equal(r.status,0,r.stderr||r.stdout);
+});
+test('fixture DACL application uses modified-section persistence instead of provider all-section copying',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const helper=source.match(/function Set-FixtureAccess\([\s\S]*?\n}/)[0];
+ assert.match(helper,/\$Action -cne 'drive'.*\$install -cne \$expectedDrive/);
+ assert.match(helper,/Get-ChildItem -LiteralPath \$install -Force\)\.Count -ne 0/);
+ assert.match(helper,/\[IO\.FileSystemAclExtensions\]::SetAccessControl\(\[IO\.DirectoryInfo\]::new\(\$install\),\(New-FixtureAccessRestore \$Descriptor\)\)/);
+ assert.doesNotMatch(source,/Set-Acl -LiteralPath \$install -AclObject/);
+});
+test('pinned release asset transport bounds bytes and never forwards authentication to object storage',async()=>{
+ assert.equal(typeof qa.readProductionAsset,'function');
+ const asset=qa.PRODUCTION_RELEASE.assets[2],bytes=await fs.readFile(new URL('./fixtures/installer-qa-r31.sig',import.meta.url));
+ const calls=[];
+ const transport=async(url,options)=>{
+  calls.push({url,headers:options.headers});
+  return calls.length===1?new Response(null,{status:302,headers:{location:'https://release-assets.githubusercontent.com/generated-fixture'}}):new Response(bytes,{status:200});
+ };
+ assert.deepEqual(await qa.readProductionAsset(asset,'generated-test-token',transport),bytes);
+ assert.equal(calls[0].headers.Authorization,'Bearer generated-test-token');
+ assert.equal(calls[1].headers?.Authorization,undefined);
+ assert.equal(calls[0].url,`https://api.github.com/repos/nea-c/Nearly/releases/assets/${asset.id}`);
+ for(const changed of [Buffer.concat([bytes,Buffer.from('x')]),Buffer.from('bad signature')])await assert.rejects(()=>qa.readProductionAsset(asset,'generated-test-token',async()=>new Response(changed)));
+ for(const url of ['http://release-assets.githubusercontent.com/x','https://localhost/x','https://user:pass@release-assets.githubusercontent.com/x'])await assert.rejects(()=>qa.readProductionAsset(asset,'generated-test-token',async()=>new Response(null,{status:302,headers:{location:url}})));
+});
+test('production uses pinned release transport and exact historical manifest before signature verification',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa.mjs',import.meta.url),'utf8');
+ const production=source.slice(source.indexOf('export async function production('),source.indexOf('export async function run('));
+ assert.match(production,/await downloadProductionRelease/);
+ assert.doesNotMatch(production,/downloadSigned|ps\('extract'/);
+ const bytes=await fs.readFile(new URL('./fixtures/installer-qa-r31-signed-manifest.json',import.meta.url));
+ assert.equal((await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'),qa.SOURCE.manifestHash);
+});
+test('historical production release requires exact original commit, IDs, names, sizes and all three asset hashes',()=>{
+ assert.equal(typeof qa.validateProductionRelease,'function');
+ const release={id:417869306,tag_name:'r3.1',draft:false,prerelease:false,assets:qa.PRODUCTION_RELEASE.assets.map(a=>({id:a.id,name:a.name,size:a.bytes,digest:'sha256:'+a.sha256,state:'uploaded',browser_download_url:`https://github.com/nea-c/Nearly/releases/download/r3.1/${a.name}`}))};
+ const commit={sha:qa.SOURCE.sourceCommit};
+ assert.equal(qa.validateProductionRelease(release,commit).length,3);
+ for(const mutate of [r=>r.id++,r=>r.tag_name='r3.0',r=>r.draft=true,r=>r.prerelease=true,r=>r.assets.pop(),r=>r.assets.push({...r.assets[0]}),r=>r.assets[0].id++,r=>r.assets[0].digest='sha256:'+'0'.repeat(64),r=>r.assets[1].size++,r=>r.assets[2].browser_download_url='https://untrusted.invalid/x']){
+  const changed=structuredClone(release);mutate(changed);assert.throws(()=>qa.validateProductionRelease(changed,commit));
+ }
+ assert.throws(()=>qa.validateProductionRelease(release,{sha:'0'.repeat(40)}));
+});
+test('uninstaller UI waits for asynchronous visibility and enabled controls before its guarded command',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const click=source.slice(source.indexOf('  function Click-Owned'),source.indexOf('  $script:optionMain'));
+ assert.match(click,/Wait-Condition/);
+ assert.match(click,/IsWindowVisible\(\$Parent\)/);
+ assert.match(click,/IsWindowEnabled\(\$button\)/);
+ assert.ok(click.indexOf('Wait-Condition')<click.indexOf('::Command('));
+});
+test('unregistered retained-data reinstall explicitly restores the selected destination as the final NSIS argument',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const branch=source.slice(source.indexOf('# Actual unregistered reinstall'),source.indexOf('Remove-GeneratedSettings',source.indexOf('# Actual unregistered reinstall')));
+ assert.match(branch,/Invoke-Bounded \$Setup @\('\/S',\('\/D='\+\$install\)\)/);
+ assert.match(branch,/Assert-Payload \$ExpectedPayload/);
+});
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:['C:','Users','runneradmin','AppData','Local'].join(String.fromCharCode(92)),QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
+test('dedicated private-directory branch runs only exact manually confirmed hosted guest',()=>{
+ const e={...env(),GITHUB_REF:'refs/heads/codex/private-install-directory'};
+ assert.equal(qa.validateContext(e,'win32').controllerSha,sha);
+ for(const ref of ['refs/heads/codex/other','refs/pull/1/merge','refs/heads/codex/private-install-directory-extra'])assert.throws(()=>qa.validateContext({...e,GITHUB_REF:ref},'win32'));
+ const p=qa.createPlan(qa.validateContext(e,'win32'),'drive');assert.equal(p.installRoot,p.destinations.drive);assert.equal(qa.validatePlan(p,qa.validateContext(e,'win32'),'drive'),true);
+});
+test('standard-user preflight fails closed before dependencies or guest mutations',async()=>{
+ assert.equal(typeof qa.preflight,'function');await assert.rejects(()=>qa.preflight({...env(),GITHUB_ACTIONS:'false'}));
+  assert.equal(typeof qa.guardProbe,'function');await assert.rejects(()=>qa.guardProbe({...env(),GITHUB_ACTIONS:'false'}));
+ const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
+ const early=workflow.indexOf('node scripts/installer-qa.mjs preflight');assert.ok(early>0);assert.ok(early<workflow.indexOf('Prepare pinned cached NSIS tools'));
+  const probe=workflow.indexOf('node scripts/installer-qa.mjs guard-probe');assert.ok(probe>workflow.indexOf('Prepare pinned cached NSIS tools'));assert.ok(probe<workflow.indexOf('Prepare locked build dependencies'));
+});
+test('shared drive fixture applies permissions only to its exact new app leaf; identity ABI is read-only',{skip:process.platform!=='win32'},async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const code=source.match(/function Get-DirectoryIdentity[\s\S]*?Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+ assert.match(code,/Pack=4/);assert.doesNotMatch(code,/SetSecurity|SetFile|Delete|MoveFile|CreateDirectory/);
+ const parseScript=`$ErrorActionPreference='Stop'\n$source=[IO.File]::ReadAllText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url))).toString('base64')}')))\n`+String.raw`
+$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+$fn=$ast.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-SharedEmptyDriveFixture'},$true)
+if(!$fn){throw 'Fixture function missing'}
+. ([scriptblock]::Create($fn.Extent.Text))
+$script:created=@();$script:protected=@();$script:exists=$false
+function Test-Path {param([string]$LiteralPath) return $script:exists}
+function New-Item {param($ItemType,$Path) $script:created+=@($Path)}
+function Set-FixtureAccess {param($Descriptor) $script:protected+=@($install);if($Descriptor.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Wrong fixture owner'}}
+$Action='drive';$destinations=@{drive='D:Nearly QA generated'};$install=$destinations.drive
+New-SharedEmptyDriveFixture
+if($script:created.Count -ne 1 -or $script:protected.Count -ne 1 -or $script:protected[0] -cne $install -or $script:created[0] -cne $install){throw 'Permission scope escaped app leaf'}
+foreach($invalid in @('action','target','exists')){
+ $Action='drive';$install=$destinations.drive;$script:exists=$false
+ switch($invalid){'action'{$Action='production'}'target'{$install='D:'}'exists'{$script:exists=$true}}
+ $rejected=$false;try{New-SharedEmptyDriveFixture}catch{$rejected=$true};if(!$rejected){throw 'Unsafe fixture target accepted'}
+}
+if($script:created.Count -ne 1 -or $script:protected.Count -ne 1){throw 'Rejected scope mutated fixture'}
+`+`\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(code).toString('base64')}')))\n`+String.raw`
+$type=[NearlyQaDirectoryIdentity].GetNestedType('Info',[Reflection.BindingFlags]::NonPublic)
+if([Runtime.InteropServices.Marshal]::SizeOf([Activator]::CreateInstance($type)) -ne 52){throw 'BY_HANDLE_FILE_INFORMATION ABI mismatch'}
+'Exact leaf ACL mock and read-only directory identity ABI passed'
+`;
+ // This D-leaf mock has its own explicit context, independent of the outer CI destination.
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(parseScript,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:60000,env:{...process.env,QA_DESTINATION:'drive'}});assert.equal(r.status,0,r.stderr||r.error?.message);
+});
 test('qualification wide shortcut reader preserves Unicode and ordinal case policy without accepting other paths',{skip:process.platform!=='win32'},async()=>{
   const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
   let csharp=source.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];assert.ok(csharp,'Wide reader missing');
@@ -164,17 +281,28 @@ test('plan fixes source provenance and refuses path overrides',()=>{
 
 test('destination selection derives exact guest-owned Unicode paths and rejects overrides',()=>{
   const c=qa.validateContext(env(),'win32');
-  for(const kind of ['default','custom']){
+  for(const kind of ['default','custom','drive']){
     const p=qa.createPlan(c,kind);
     assert.equal(p.schemaVersion,2);assert.equal(p.destinationKind,kind);
     assert.equal(p.installRoot,p.destinations[kind]);
     assert.equal(qa.validatePlan(p,c,kind),true);
     assert.throws(()=>qa.validatePlan({...p,destinations:{...p.destinations,custom:'D:\\foreign'}},c,kind));
-    assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations.drive},c,kind));
+    assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations[kind==='drive'?'default':'drive']},c,kind));
   }
   const p=qa.createPlan(c,'custom');
   assert.match(p.installRoot,/日本語 space/);assert.match(p.destinations.drive,/^D:\\/);
-  for(const kind of [undefined,'','drive','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
+  for(const kind of [undefined,'','CUSTOM','custom\n'])assert.throws(()=>qa.validateDestination(kind));
+});
+
+test('explicit C-root coverage preserves the D-root target and refuses cross-root plans',()=>{
+  const c=qa.validateContext(env(),'win32'),p=qa.createPlan(c,'drive-c');
+  assert.equal(p.installRoot,'C:\\Nearly QA 日本語 123-1');
+  assert.equal(p.destinations.drive,'D:\\Nearly QA 日本語 123-1');
+  assert.equal(p.destinationKind,'drive-c');assert.equal(qa.validatePlan(p,c,'drive-c'),true);
+  assert.throws(()=>qa.validatePlan({...p,installRoot:p.destinations.drive},c,'drive-c'));
+  assert.throws(()=>qa.validatePlan(p,c,'drive'));
+  for(const kind of ['drive-e','DRIVE-C','drive-c\n','C:'])assert.throws(()=>qa.validateDestination(kind));
+  assert.match(qa.formatSummary('health-failure','drive-c'),/drive-c/);
 });
 
 test('UI qualification covers every independent checkbox pair in both actual languages',()=>{
@@ -189,6 +317,7 @@ test('a guest selects exactly one explicit scenario and reports only that lifecy
   for(const scenario of [undefined,null,'','both','success,health-failure','SUCCESS','success\n',['success']])assert.throws(()=>qa.validateScenario(scenario));
   assert.match(qa.formatSummary('success'),/native update\/restart passed/);
   assert.doesNotMatch(qa.formatSummary('success'),/rollback passed/);
+  assert.doesNotMatch(qa.formatSummary('success'),/signed production setup\/uninstall/);
   assert.match(qa.formatSummary('health-failure'),/deliberate failed-health rollback passed/);
   assert.doesNotMatch(qa.formatSummary('health-failure'),/update\/restart passed/);
   assert.throws(()=>qa.formatSummary('both'));
@@ -205,9 +334,9 @@ test('sequential fixture builds reuse dependencies and retain distinct setup sna
 });
 test('historical artifact checks reject expiration and mismatched run/digest without network',()=>{
   assert.equal(typeof qa.validatePinnedArtifact,'function');
-  const artifact={id:12158897824,name:'nearly-signed-39185149137-1',expired:false,size_in_bytes:100,digest:'sha256:e8baf6d70cdfe9278e8ad162d75c989a434226cec9da04b62b9a691895ec9526',workflow_run:{id:39185149137,repository_id:123,head_repository_id:123,head_branch:'main',head_sha:'b56f01ddff9698ef316dfa775c1e8a441965674f'}};
+  const artifact={id:12230567816,name:'nearly-signed-39288652319-1',expired:false,size_in_bytes:100,digest:'sha256:5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480',workflow_run:{id:39288652319,repository_id:123,head_repository_id:123,head_branch:'main',head_sha:'0dd697f2d832ec9fd07e9278559e18819b65bd3a'}};
   assert.equal(qa.validatePinnedArtifact(artifact,123),true);
-  for(const change of [{expired:true},{digest:'sha256:'+'0'.repeat(64)},{id:12158897825},{workflow_run:{...artifact.workflow_run,head_sha:'0'.repeat(40)}}])assert.throws(()=>qa.validatePinnedArtifact({...artifact,...change},123));
+  for(const change of [{expired:true},{digest:'sha256:'+'0'.repeat(64)},{id:12158897824},{workflow_run:{...artifact.workflow_run,head_sha:'0'.repeat(40)}}])assert.throws(()=>qa.validatePinnedArtifact({...artifact,...change},123));
 });
 test('fixture key stays in memory and generated minisign proof verifies exact bytes',()=>{
   assert.equal(typeof qa.createFixtureSigner,'function');
@@ -351,9 +480,25 @@ test('workflow remains manual, read-only and uploads only validated public evide
   assert.doesNotMatch(text,/secrets\.|contents: write|actions: write|pull_request:|push:/);
   assert.match(text,/upload-artifact@[a-f0-9]{40}/);assert.match(text,/public-evidence/);
   assert.match(text,/installer-qa-evidence\.mjs/);
-  assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs run/);
+  assert.match(text,/github\.workflow_sha/);assert.match(text,/installer-qa\.mjs \$env:QA_COMMAND/);
+  assert.match(text,/QA_COMMAND: \$\{\{ matrix\.phase == 'production' && 'production' \|\| 'run' \}\}/);
   assert.match(text,/fail-fast: false/);assert.match(text,/scenario: \[success, health-failure\]/);
   assert.match(text,/QA_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
-  assert.match(text,/destination: \[default, custom\]/);
+  const destinations=/destination: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(text);
+  assert.ok(destinations);assert.deepEqual(JSON.parse(destinations[1]),['drive-c']);assert.deepEqual(JSON.parse(destinations[2]),['default','custom','drive']);
+  const included=/include: \$\{\{ fromJSON\(inputs\.root_coverage_only && '([^']+)' \|\| '([^']+)'\) \}\}/.exec(text);
+  assert.ok(included);assert.deepEqual(JSON.parse(included[1]),[]);assert.deepEqual(JSON.parse(included[2]),[{phase:'production',scenario:'success',destination:'default'}]);
+  assert.match(text,/root_coverage_only:[\s\S]*?type: boolean\s+default: false/);
   assert.match(text,/QA_DESTINATION: \$\{\{ matrix\.destination \}\}/);
+});
+
+test('production regression is independent and fails closed without blocking candidate qualification',async()=>{
+  assert.equal(typeof qa.production,'function');await assert.rejects(()=>qa.production({...env(),GITHUB_ACTIONS:'false'}));
+  const source=await fs.readFile(new URL('../scripts/installer-qa.mjs',import.meta.url),'utf8');
+  const candidate=source.slice(source.indexOf('export async function run('),source.indexOf('if(process.argv[1]'));
+  assert.doesNotMatch(candidate,/downloadSigned|historicalFailure|ps\('production'/);
+  const production=source.slice(source.indexOf('export async function production('),source.indexOf('export async function run('));
+  assert.match(production,/verifySignedBundle/);assert.match(production,/await ps\('production'/);assert.match(production,/passed:false/);assert.match(production,/throw error/);
+  const workflow=await fs.readFile(new URL('../.github/workflows/installer-qa-windows.yml',import.meta.url),'utf8');
+  assert.match(workflow,/phase: \[candidate\]/);assert.match(workflow,/"phase":"production"/);assert.match(workflow,/QA_COMMAND:/);assert.match(workflow,/if: matrix\.phase != 'production'/);
 });

@@ -1,5 +1,59 @@
 # Nearly Windows installer template
 
+## Ordinary-permissions candidate status
+
+The current candidate removes private-ACL admission and fresh-install
+preparation/consent helpers. It is **not yet qualified for installation or release**.
+The reviewed check/use race is addressed by holding exclusive live payload
+handles: non-destructive open, regular/single-link and expected identity check,
+then truncation, bounded copying and flush through that same handle. A missing
+target requires CREATE_NEW; collisions never fall back to overwriting. NSIS
+extracts embedded bytes and generates its uninstaller only in PLUGINSDIR.
+The registered uninstaller is deleted through its byte-proven DELETE handle;
+the main payload is also inspected and deleted through one held handle.
+Independent source review found the original race closed. Hosted native fixtures
+have exercised the real NSIS/System function bodies; whole lifecycle results
+remain conditional on the exact runs in `docs/windows-installer-qa.md`. Model
+tests alone are not native runtime evidence.
+
+Manual install is not an atomic two-file transaction: after one existing payload
+is written, a later I/O failure can leave that owned payload changed. Failure
+stops registration and automatic launch; newly CREATE_NEW'd payloads are removed
+through retained handles where possible. An unavailable cleanup operation leaves
+evidence rather than triggering path-based deletion. Existing update-journal
+recovery remains separate and unchanged. No rollback guarantee is claimed for
+ordinary setup or uninstallation interrupted between its two payload operations.
+
+The intended baseline is a non-elevated current-user installer. New final
+directories inherit normal Windows permissions; existing directory identity and
+ACLs stay unchanged. No private original-folder retreat, permission repair,
+SID exception or environment bypass is required. Windows access denial remains
+an error. Normal NSIS temporary/plugin extraction is retained; this does not
+claim protection against an already compromised user's temporary environment.
+
+Windows checks requested file access using the object's security descriptor;
+new objects normally inherit their parent's ACL. Requiring every ancestor to
+have a Nearly-specific list of private principals imposed a stronger, incompatible
+policy rather than testing actual write access. See Microsoft's
+[file security and access rules](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights)
+and NSIS's [RequestExecutionLevel](https://nsis.sourceforge.io/Docs/Chapter4.html#requestexecutionlevel).
+
+Arbitrary unsandboxed code with the same user's authority can ordinarily replace
+that user's applications or registration. This installer is not a security
+boundary against that code. Other users and restricted processes remain distinct
+trust boundaries: allowing an OS-writable shared destination increases local
+tamper exposure. It must not be described as private or made safe by blindly
+trusting extra SIDs. Namespace pins, single-link checks, exact owned registration,
+bounded owned-file operations and unrelated-data preservation are still required.
+Remote updates separately require signatures, hashes, version/architecture/protocol
+binding, authenticated journals and health/rollback evidence; those protections
+cannot restore trust after an attacker has already replaced the running app.
+
+`RegisteredInstallation` uses the same namespace/object admission for update and
+startup recovery. The old `install_prepare` CLI is compiled only for tests or the
+explicit installer-QA feature, and is not used by production setup. The removal
+of all-ancestor ACL admission does not change OS ACLs or tool sandbox restrictions.
+
 `installer.nsi` is a narrowly scoped per-user NSIS template. The application is
 self-contained; its only installed payloads are `Nearly.exe` and NSIS's generated
 `uninstall.exe`. Runtime installation/download, elevation, file associations,
@@ -35,10 +89,10 @@ A create-new, delete-on-close write probe must succeed before payload extraction
 There is no administrator mode or runtime bootstrapper.
 Existing target EXE/uninstaller files require a matching owned uninstall
 registration and exact installation location before any overwrite. A settings-only
-default folder containing only recognized Nearly data is a valid reinstall target.
-Fresh custom folders must be empty/absent with an existing parent. Local fixed-drive
-path syntax, the entire directory chain, read-only security descriptors and payload
-file types are checked. Reparse points, shared-write folders and uncertain states
+folder containing only recognized Nearly data is a valid reinstall target, at
+either the default or a custom root. Other fresh folders must be empty/absent
+with an existing parent. Local fixed-drive path syntax, the entire directory chain
+and payload file types are checked. Reparse points and uncertain namespace states
 are refused for installation/uninstallation. Pinned ancestor handles exclude delete
 sharing through mutation; no ACL is repaired or weakened. Existing default r3.0
 registration remains supported. This local candidate has not been published.
@@ -79,19 +133,31 @@ Microsoft separately. It never downloads or executes a runtime installer.
 
 The Add/Remove Programs entry points to the automatically generated
 `<registered-install-directory>\uninstall.exe`. The uninstaller validates its per-user
-registered location and owned registry marker, refuses a running app, removes only the known
-main EXE, its own uninstaller, target-matching shortcuts, and its own uninstall
-registration. Directory removal is **nonrecursive**. EXE-adjacent `settings.json`,
-backups, user files, and WebView data are never packaged over or deleted. Shortcut
-preferences remain for later reinstall. No delete-user-data checkbox exists.
+registered location and owned registry marker and refuses a running app. By default it
+removes only the known main EXE, its own uninstaller, target-matching shortcuts and
+uninstall registration. Default directory removal is **nonrecursive**; settings,
+backups, user files and WebView data remain. Shortcut preferences remain for reinstall.
+
+The interactive whole-folder checkbox defaults OFF. ON additionally requires a
+No-default confirmation with the actual registered path and an all-contents warning.
+It deletes that folder and its contents, including settings and unknown files inside.
+Silent uninstall has no purge switch. Protected roots/ancestors, registration and
+recorded volume/FileID checks, retained ancestor/root identities, regular single-link
+handles and bounded recursive traversal constrain deletion to the selected object.
+Reparse points, hardlinks and unknown states fail closed. Registration removal follows
+successful root deletion. Read-only/locked files, late additions or interruption can
+leave partial results; nonzero failure is reported without an atomic rollback promise.
+The real production function bodies are exercised by the gated disposable
+`whole-native.test.mjs` fixtures. See `docs/windows-installer-qa.md` for actual results.
 
 The uninstaller also compares the actual executing module against the existing
 registered `uninstall.exe`, using complete bounded reads from regular single-link
-files held against writes/deletion. This rejects stale/modified copies even with
+files held against content writes. The registered object also excludes deletion
+by other handles. This rejects stale/modified copies even with
 NSIS's `_?=` directory override. NSIS's normal temporary copy and an identical
 byte-for-byte copy remain equivalent; the check does not prove original launch
-path. The registered image handle is released immediately before intentional
-self-deletion, while directory guards remain held.
+path. FileDispositionInfo is applied to that same registered DELETE handle,
+which is then closed to complete deletion while directory guards remain held.
 
 ## Verification and scope
 
@@ -108,7 +174,7 @@ With `NEARLY_NSIS_ROOT` pointing to the existing compiler, set
 minimal `READONLY-ROOT-TEST.exe` unit harnesses. They contain no application
 payload, setup/uninstall section, registry writes, shortcuts or permission
 changes. They exercise actual System-plugin calls for path pins, synthetic
-in-memory ACLs and equal/different/missing uninstaller image reads. These unit
+existing payload metadata and equal/different/missing uninstaller image reads. These unit
 processes do not qualify the actual setup pages or an installation lifecycle.
 
 Tests interpret the actual NSIS ownership/shortcut decision functions using only

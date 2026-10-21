@@ -39,6 +39,7 @@ test('unsigned verifier and signing-plan bind final loose payload and immutable 
   const f=await unsignedFixture(t),options={manifestHash:f.manifestHash,artifactId:'41'};
   const result=await contract.verifyUnsignedBundle(f.bundle,f.r,options);assert.equal(result.manifest.payload.sha256,f.m.payload.sha256);
   const plan=await contract.createSigningPlan(f.bundle,path.join(f.dir,'plan.json'),f.r,options);
+  assert.equal(plan.manifest.archiveMember,'$PLUGINSDIR/Nearly.exe');
   assert.equal(plan.manifest.artifactId,'41');assert.equal(plan.manifest.payloadSha256,f.m.payload.sha256);assert.equal(plan.manifest.updaterProtocol,3);
   await assert.rejects(()=>contract.createSigningPlan(f.bundle,path.join(f.dir,'plan.json'),f.r,options));
   await fs.writeFile(path.join(f.bundle,'Nearly.exe'),Buffer.from('tampered'));

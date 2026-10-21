@@ -128,7 +128,8 @@ test("actual payload ownership decision blocks unknown EXE/uninstaller and misma
 });
 
 test("one visible page offers two independent upgrade-persistent choices", () => {
-  assert.equal((template.match(/\$\{NSD_CreateCheckbox\}/g) ?? []).length, 2);
+  const page=template.match(/Function NearlyShortcutPage\r?\n([\s\S]*?)FunctionEnd/)[1];
+  assert.equal((page.match(/\$\{NSD_CreateCheckbox\}/g) ?? []).length, 2);
   for (const [name, variable] of [["StartMenuShortcut", "NearlyStartMenu"], ["DesktopShortcut", "NearlyDesktop"]]) {
     assert.match(template, new RegExp(`ReadRegDWORD \\$${variable} HKCU "\\$\\{PREFSKEY\\}" "${name}"\\s+\\$\\{If\\} \\$\\{Errors\\}`));
     assert.match(template, new RegExp(`WriteRegDWORD HKCU "\\$\\{PREFSKEY\\}" "${name}" \\$${variable}`));
@@ -152,13 +153,13 @@ test("running checks block instead of terminating, before installer mutations", 
   assert.ok((guard.match(/SetErrorLevel 2\s+Abort/g) ?? []).length >= 3);
   const install = template.slice(template.indexOf("Section Install"), template.indexOf("Function un.onInit"));
   assert.ok(install.indexOf("!insertmacro NearlyRequireClosed") < install.indexOf("CreateDirectory"));
-  assert.ok(install.indexOf("CreateFileW") < install.indexOf('Call NearlyExtractApplication'));
+  assert.ok(install.indexOf("CreateFileW") < install.indexOf('Call NearlyWritePayloads'));
 });
 
-test("per-user selected private writable install, manual WebView prerequisite, no userdata removal", () => {
+test("per-user OS-writable install, manual WebView prerequisite, no userdata removal", () => {
   assert.match(template, /RequestExecutionLevel user/);
   assert.doesNotMatch(template, /RequestExecutionLevel (?:admin|highest)|WriteReg\w+ HKLM|DeleteReg\w+ HKLM/);
-  assert.doesNotMatch(template, /DeleteAppData|RmDir\s+\/(?:r|REBOOTOK)|Delete\s+[^\r\n]*\*|File\s+[^\r\n]*settings\.json/i);
+  assert.doesNotMatch(template, /^\s*(?:DeleteAppData|RmDir\s+\/(?:r|REBOOTOK)|Delete\s+[^\r\n]*\*|File\s+[^\r\n]*settings\.json)/im);
   assert.match(template, /Call NearlySetDefaultRoot/);
   const defaultCalculation=template.match(/Function NearlySetDefaultRoot\r?\n([\s\S]*?)FunctionEnd/)[1];
   assert.match(defaultCalculation,/kernel32::GetFullPathNameW\(w "\$LOCALAPPDATA\\\$\{PRODUCTNAME\}"/);
@@ -167,7 +168,8 @@ test("per-user selected private writable install, manual WebView prerequisite, n
   assert.match(template, /"\{\{install_webview2_mode\}\}" != ""/);
   assert.match(template, /Function NearlyRequireWebView/);
   assert.match(template, /WebView2 Runtime is required/);
-  assert.match(template, /WriteUninstaller "\$INSTDIR\\uninstall\.exe"/);
+  assert.match(template, /WriteUninstaller "\$PLUGINSDIR\\uninstall\.exe"/);
+  assert.doesNotMatch(template, /WriteUninstaller "\$INSTDIR\\uninstall\.exe"/);
   for (const line of template.split(/\r?\n/).filter(line => /^\s*Delete\s/.test(line))) {
     assert.ok(/"\$INSTDIR\\(?:\$\{MAINBINARYNAME\}\.exe|uninstall\.exe)"|"\$\{path\}"/.test(line), `Unexpected delete: ${line}`);
   }
@@ -220,8 +222,8 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   const listing=spawnSync(reader,['l','-slt','-bd','--',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
   assert.equal(listing.status,0,listing.stderr);
   const members=listing.stdout.split(/\r?\n/).filter(l=>l.startsWith('Path = ')).map(l=>l.slice(7)).filter(n=>n.replaceAll('\\','/').split('/').at(-1).toLowerCase()==='nearly.exe');
-  assert.deepEqual(members,['Nearly.exe'],'single exact member matches the signing-plan contract');
-  const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'Nearly.exe'],{windowsHide:true,timeout:30000});
+  assert.deepEqual(members,['$PLUGINSDIR\\Nearly.exe'],'single exact member matches the signing-plan contract');
+  const extracted=spawnSync(reader,['x','-so','-spd','-bd','-y','--',exe,'$PLUGINSDIR/Nearly.exe'],{windowsHide:true,timeout:30000});
   assert.equal(extracted.status,0);assert.ok(extracted.stdout.equals(fs.readFileSync(payload)));
 });
 

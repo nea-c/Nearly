@@ -93,6 +93,8 @@ Thumbs.db
 !/docs/startup-updates.md
 !/docs/actions-signing.md
 /scripts/*
+!/scripts/installer-qa-standard-user.ps1
+!/scripts/installer-qa-standard-user.cs
 !/scripts/build-windows.mjs
 !/scripts/sftp-fixture.mjs
 !/scripts/native-drag-launch-test.mjs
@@ -132,6 +134,9 @@ Thumbs.db
 !/scripts/native-explorer-download.ps1
 !/scripts/installer-qa.mjs
 !/scripts/installer-qa-guest.ps1
+!/scripts/installer-qa-passive-observer.ps1
+!/scripts/installer-qa-drive-diagnosis.ps1
+!/scripts/installer-qa-root-inventory.ps1
 !/docs/windows-installer-qa.md
 !/scripts/production-build-policy.mjs
 !/scripts/installer-qa-ui.ps1

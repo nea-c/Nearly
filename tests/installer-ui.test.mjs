@@ -8,6 +8,238 @@ const script=fileURLToPath(new URL('../scripts/installer-qa-ui.ps1',import.meta.
 // Bound cold PowerShell/C# startup on shared hosted Windows independently of
 // the actual installer's 30/120-second UI waits and all model assertions.
 const modelTimeoutMs=60_000;
+test('startup proves the exact kernel process image without reading an unstable module list',{skip:process.platform!=='win32'},()=>{
+ assert.equal((fs.readFileSync(script,'utf8').match(/\$ownedProcess=Start-Process/g)||[]).length,1,'The owned setup must launch exactly once');
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+Add-Type @'
+using System;
+public static class NearlyOwnedUi {
+ public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
+ public static string ProcessImage(ModelProcess p){return p.KernelImage();}
+}
+public sealed class ModelProcess {
+ public string Mode;readonly string image;public int Reads,Checks;
+ public ModelProcess(string mode,string image){Mode=mode;this.image=image;}
+ public bool HasExited {get{Checks++;if(Mode=="exit-query-error")throw new Exception("sensitive-path token");return Mode=="exited"||Mode=="exit-code-error";}}
+ public int ExitCode {get{if(Mode=="exit-code-error")throw new Exception("sensitive-path token");return 8;}}
+ public object MainModule {get{throw new Exception("unstable module list must never be read");}}
+ public string KernelImage(){Reads++;if(Mode=="query-error")throw new Exception("sensitive-path token");if(Mode=="native0")throw new System.ComponentModel.Win32Exception(0,"sensitive-path token");if(Mode=="native5")throw new System.ComponentModel.Win32Exception(5,"sensitive-path token");if(Mode=="native299")throw new System.ComponentModel.Win32Exception(299,"sensitive-path token");return Mode=="wrong"?"C:foreign-sensitive-path":Mode=="unavailable"?null:image;}
+}
+'@
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('__UI__',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiProcessObservation','Assert-Process','Wait-Ui')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+ if($fn.Count -eq 1){Invoke-Expression $fn[0].Extent.Text}elseif($name -cne 'Get-UiProcessObservation'){throw 'Identity guard missing'}
+}
+$Setup='C:generated-sensitive-path';$stage='language';$startupPhase='spawned';$main=[IntPtr]::Zero;$languageWindow=[IntPtr]::Zero
+function Fake([string]$Mode){
+ $script:ownedProcess=[ModelProcess]::new($Mode,$Setup)
+ $script:processFailureObservation=$null;$script:enumerations=0
+}
+Fake 'active'
+$ready=Wait-Ui {$script:enumerations++;return $true} 1
+if(!$ready -or $ownedProcess.Reads -ne 1 -or $script:enumerations -ne 1 -or $null -ne $script:processFailureObservation){throw 'Exact kernel image was not proved before UI enumeration'}
+foreach($case in @(@('unavailable','path-unavailable'),@('exited','exited'),@('wrong','image-mismatch'),@('query-error','query-failed'),@('native0','query-failed'),@('native5','query-failed'),@('native299','query-failed'),@('exit-query-error','query-failed'),@('exit-code-error','query-failed'),@('missing','missing-process'))){
+ Fake $case[0];if($case[0] -ceq 'missing'){$script:ownedProcess=$null}
+ $failure=$null;try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
+ if($null -eq $failure -or $script:enumerations -ne 0 -or $script:processFailureObservation.reason -cne $case[1]){throw ('Actual exit/wrong image/query error was retried or misclassified: '+$case[0]+' / '+$script:processFailureObservation.reason)}
+ if($case[0] -cne 'missing' -and $ownedProcess.Checks -ne 1){throw 'Process query failure or exit was retried'}
+ if($case[0] -ceq 'exited' -and (!$script:processFailureObservation.hasExited -or $script:processFailureObservation.exitCode -ne 8)){throw 'Actual early exit code lost'}
+ $expectedError=switch -CaseSensitive($case[0]){'native0'{0}'native5'{5}'native299'{299}default{$null}}
+ if($script:processFailureObservation.nativeError -ne $expectedError -or $script:processFailureObservation.startupPhase -cne 'spawned'){throw 'Native error or startup phase evidence lost'}
+ $json=ConvertTo-Json $script:processFailureObservation -Compress
+ if($json -match 'sensitive|token|Exception|[A-Za-z]:|"(?:image|path|errorText)":'){throw 'Private process data leaked'}
+}
+Fake 'active';Assert-Process;$ownedProcess.Mode='unavailable';$failure=$null
+try{Wait-Ui {$script:enumerations++;return $true} 1}catch{$failure=$_.Exception}
+if($null -eq $failure -or $ownedProcess.Reads -ne 2 -or $script:enumerations -ne 0 -or $script:processFailureObservation.reason -cne 'path-unavailable'){throw 'Identity loss after proof was retried'}
+$languageWindow=[IntPtr]1;$main=[IntPtr]2;Fake 'exited';$r=Get-UiProcessObservation $ownedProcess $Setup 'untrusted private-stage' $true $true
+if($r.stage -cne 'unknown' -or !$r.languageWindowObserved -or !$r.mainWindowObserved -or $r.exitCode -ne 8){throw 'Failure stage/window evidence was not bounded'}
+$r=Get-UiProcessObservation $ownedProcess $Setup 'language' $true $false 'language-selected'
+if($r.stage -cne 'language' -or $r.startupPhase -cne 'language-selected' -or !$r.languageWindowObserved -or $r.mainWindowObserved){throw 'Selected-language failure phase lost'}
+'Initial identity and bounded failure contract passed'
+`.replaceAll('__UI__',script.replaceAll("'","''"));
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Initial identity and bounded failure contract passed/);
+});
+test('kernel image query uses the existing process safe handle and reads only this test process',{skip:process.platform!=='win32'},()=>{
+ const text=fs.readFileSync(script,'utf8');
+ const native=text.match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+ assert.match(native,/QueryFullProcessImageNameW\(process\.SafeHandle,0,image,ref size\)/);
+ assert.doesNotMatch(native,/OpenProcess|GetProcessById|EnumProcessModules|GetModuleFileName/);
+ const source=`$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n${native}\n'@\n$process=[Diagnostics.Process]::GetCurrentProcess()\ntry { if([NearlyOwnedUi]::ProcessImage($process) -ine [Environment]::ProcessPath){throw 'Own kernel image differs from runtime executable'} } finally { $process.Dispose() }\n'Own process kernel image ABI passed'`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Own process kernel image ABI passed/);
+});
+
+test('explicit drive-c selects only C while the original drive and negative cases remain D',{skip:process.platform!=='win32'},()=>{
+ const guest=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
+ for(const path of [script,guest]){
+  const text=fs.readFileSync(path,'utf8');
+  const original=text.match(/^  drive\s*=\s*("D:[^\r\n]+")/m)?.[1];
+  const explicit=text.match(/^  'drive-c'\s*=\s*("C:[^\r\n]+")/m)?.[1];
+  assert.ok(original&&explicit,'Both explicitly generated drive targets required');
+  assert.equal(explicit,original.replace('"D:','"C:'));
+  assert.ok(explicit.includes(String.fromCharCode(0x65e5,0x672c,0x8a9e)),'Japanese generated path must be preserved');
+ }
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+foreach($entry in @(@('__UI__',@('Resolve-UiDestinationKind')),@('__GUEST__',@('Resolve-GuestInstallRoot','Get-PreflightFileTargets')))){
+ $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($entry[0],[ref]$tokens,[ref]$errors)
+ if($errors.Count){throw 'QA script parse error'}
+ foreach($name in $entry[1]){
+  $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+  if($fn.Count -ne 1){throw 'Explicit destination selector missing'};Invoke-Expression $fn[0].Extent.Text
+ }
+}
+$slash=[char]92
+$destinations=@{default=('C:'+$slash+'local'+$slash+'Nearly');custom=('C:'+$slash+'local'+$slash+'custom');drive=('D:'+$slash+'Nearly QA generated');'drive-c'=('C:'+$slash+'Nearly QA generated')}
+foreach($kind in @('default','custom','drive','drive-c')){
+ $plan=[pscustomobject]@{destinationKind=$kind;installRoot=$destinations[$kind];destinations=[pscustomobject]$destinations}
+ if((Resolve-GuestInstallRoot 'ui' $kind $destinations) -cne $destinations[$kind]){throw 'Ordinary selected destination changed'}
+ if((Resolve-GuestInstallRoot 'production' $kind $destinations) -cne $destinations.default){throw 'Production default changed'}
+ $driveKind=if($kind -ceq 'drive-c'){'drive-c'}else{'drive'}
+ if((Resolve-GuestInstallRoot 'drive' $kind $destinations) -cne $destinations[$driveKind]){throw 'Drive selection silently changed roots'}
+ foreach($mode in @('Install','Cancel','Reject','Drive')){
+  if((Resolve-UiDestinationKind $plan $destinations $destinations[$driveKind] $mode) -cne $driveKind){throw 'Selected drive UI/evidence kind mismatch'}
+  $other=if($driveKind -ceq 'drive-c'){'drive'}else{'drive-c'}
+  $rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $destinations[$other] $mode}catch{$rejected=$true}
+  if(!$rejected){throw 'Unselected drive root accepted'}
+ }
+ if((Resolve-UiDestinationKind $plan $destinations $plan.installRoot 'Install') -cne $kind){throw 'Normal UI evidence kind changed'}
+ $rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $plan.installRoot.ToUpperInvariant() 'Install'}catch{$rejected=$true}
+ if(!$rejected){throw 'Nonexact target spelling accepted'}
+}
+foreach($bad in @('Drive-c','drive-d','other','')){$rejected=$false;try{Resolve-GuestInstallRoot 'drive' $bad $destinations}catch{$rejected=$true};if(!$rejected){throw 'Unknown destination fell back'}}
+$plan=[pscustomobject]@{destinationKind='drive-c';installRoot=$destinations['drive-c'];destinations=[pscustomobject]$destinations}
+$plan.destinations.'drive-c'=$destinations.drive
+$rejected=$false;try{Resolve-UiDestinationKind $plan $destinations $destinations['drive-c'] 'Drive'}catch{$rejected=$true}
+if(!$rejected){throw 'Tampered destination table accepted'}
+$targets=@(Get-PreflightFileTargets ('C:'+$slash+'run') $destinations ('C:'+$slash+'start') ('C:'+$slash+'desktop'))
+if($targets.Count -ne 7 -or $targets -cnotcontains $destinations['drive-c'] -or $targets -cnotcontains $destinations.drive){throw 'Both explicit drives not preflighted'}
+# Execute only the fixture's selection/refusal statements, before any creation,
+# identity/token read or ACL construction. All existence checks are mocked.
+$ast=[Management.Automation.Language.Parser]::ParseFile('__GUEST__',[ref]$null,[ref]$null)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'New-SharedEmptyDriveFixture'},$true)[0]
+$guard=$fn.Body.EndBlock.Statements | Select-Object -First 2
+function Test-Path {param($LiteralPath)return $script:exists}
+foreach($kind in @('drive','drive-c')){
+ $env:QA_DESTINATION=$kind;$Action='drive';$install=$destinations[$kind];$script:exists=$false
+ foreach($statement in $guard){Invoke-Expression $statement.Extent.Text}
+ foreach($bad in @('wrong-root','wrong-action','exists')){
+  $Action='drive';$install=$destinations[$kind];$script:exists=$false
+  switch($bad){'wrong-root'{$install=$destinations[$(if($kind -ceq 'drive-c'){'drive'}else{'drive-c'})]}'wrong-action'{$Action='ui'}'exists'{$script:exists=$true}}
+  $rejected=$false;try{foreach($statement in $guard){Invoke-Expression $statement.Extent.Text}}catch{$rejected=$true}
+  if(!$rejected){throw 'Fixture refusal guard changed'}
+ }
+}
+'Explicit C/D destination contract passed'
+`.replaceAll('__UI__',script.replaceAll("'","''")).replaceAll('__GUEST__',guest.replaceAll("'","''"));
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Explicit C\/D destination contract passed/);
+});
+test('read-only text failures re-enumerate only generic failure or timeout within the existing wait deadline',{skip:process.platform!=='win32'},()=>{
+ let csharp=fs.readFileSync(script,'utf8').match(/Add-Type -TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/)?.[1];
+ assert.ok(csharp,'owned interop source missing');
+ csharp=csharp.replace('public delegate bool EnumProc',`public static int ModelError=0, ModelLastError=999, ModelFailures=0, ModelReads=0, ModelInputs=0; public static uint ModelFailMessage=14;
+  public delegate bool EnumProc`);
+ csharp=csharp.replace(/\[DllImport\("user32\.dll"[^\]]*\)\]\s*static extern uint GetWindowThreadProcessId\([^;]*\);/,'static uint GetWindowThreadProcessId(IntPtr h,out uint pid){pid=h==(IntPtr)1?7u:9u;return 1;}');
+ csharp=csharp.replace(/\[DllImport\("kernel32\.dll"[^\]]*\)\]\s*static extern void SetLastError\([^;]*\);/,'static void SetLastError(uint error){ModelLastError=(int)error;}');
+ csharp=csharp.replace(/\[DllImport\("user32\.dll"[^\]]*\)\]\s*static extern IntPtr SendMessageTimeout\([^;]*\);/,`static IntPtr SendMessageTimeout(IntPtr h,uint msg,IntPtr w,IntPtr l,uint flags,uint timeout,out IntPtr result){
+    if(h!=(IntPtr)1||flags!=2||timeout!=2000)throw new Exception("Unexpected message contract");
+    if(msg==13||msg==14)ModelReads++;else ModelInputs++;
+    result=IntPtr.Zero;
+    if(msg==ModelFailMessage&&ModelFailures-->0){if(ModelError!=0)ModelLastError=ModelError;return IntPtr.Zero;}
+    if(msg==14)result=(IntPtr)3;
+    if(msg==13){Marshal.Copy(new char[]{'Y','e','s','\\0'},0,l,4);result=(IntPtr)3;}
+    return (IntPtr)1;
+  }`);
+ csharp=csharp.replaceAll('Marshal.GetLastWin32Error()','ModelLastError');
+ csharp=csharp.replace(/\[DllImport\([^\]]+\)\]\s*((?:public )?static) extern ([^\n;]+);/g,'$1 $2 {throw new Exception("Unmodeled native call");}');
+ assert.doesNotMatch(csharp,/DllImport|\bextern\b/,'every native API must be replaced before model execution');
+ const source=`$ErrorActionPreference='Stop'\nSet-StrictMode -Version Latest\nAdd-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(csharp).toString('base64')}')))\n`+String.raw`
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Wait-Ui'},$true)
+Invoke-Expression $fn[0].Extent.Text
+$script:identityChecks=0;$script:enumerations=0
+function Assert-Process {$script:identityChecks++}
+function Controls {$script:enumerations++;return [IntPtr]1}
+foreach($message in @(14,13)){
+ foreach($errorCode in @(0,1460)){
+  [NearlyOwnedUi]::ModelFailMessage=$message;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=1;[NearlyOwnedUi]::ModelInputs=0
+  $script:identityChecks=0;$script:enumerations=0
+  $result=Wait-Ui {foreach($control in @(Controls)){if([NearlyOwnedUi]::Text($control,7) -ceq 'Yes'){return $true}}} 2
+  if(!$result -or $script:enumerations -ne 2 -or $script:identityChecks -ne 2 -or [NearlyOwnedUi]::ModelInputs -ne 0){throw 'Read failure was not re-enumerated without input'}
+ }
+}
+foreach($errorCode in @(5,87,1234)){
+ [NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=50;$script:enumerations=0
+ $failure=$null;try{Wait-Ui {foreach($control in @(Controls)){[NearlyOwnedUi]::Text($control,7)}} 2}catch{$failure=$_.Exception.GetBaseException()}
+ if($null -eq $failure -or $failure.GetType().Name -cne 'ControlMessageFailureException' -or $failure.NativeError -ne $errorCode -or $script:enumerations -ne 1){throw 'Nontransient read failure was retried or lost its code'}
+}
+foreach($errorCode in @(0,1460,5)){
+ [NearlyOwnedUi]::ModelFailMessage=12;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=50;[NearlyOwnedUi]::ModelInputs=0
+ $failure=$null;try{Wait-Ui {[NearlyOwnedUi]::SetText([IntPtr]1,7,'target');return $true} 2}catch{$failure=$_.Exception.GetBaseException()}
+ if($null -eq $failure -or $failure.GetType().Name -cne 'ControlMessageFailureException' -or $failure.NativeError -ne $errorCode -or [NearlyOwnedUi]::ModelInputs -ne 1){throw 'Input failure was wrapped or retried'}
+}
+foreach($errorCode in @(0,1460)){
+ [NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=$errorCode;[NearlyOwnedUi]::ModelFailures=100000;$script:enumerations=0
+ $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null
+ try{Wait-Ui {foreach($control in @(Controls)){[NearlyOwnedUi]::Text($control,7)}} 1}catch{$failure=$_.Exception}
+ if($null -eq $failure -or $failure.Message -cne 'Bounded owned installer UI wait timed out' -or $clock.ElapsedMilliseconds -gt 2500 -or $script:enumerations -lt 2 -or $script:enumerations -gt 8){throw 'Persistent transient read escaped the original deadline'}
+}
+# With no native error set, reset must prevent stale error999 being reported.
+[NearlyOwnedUi]::ModelLastError=999;[NearlyOwnedUi]::ModelFailMessage=14;[NearlyOwnedUi]::ModelError=0;[NearlyOwnedUi]::ModelFailures=1
+$failure=$null;try{[NearlyOwnedUi]::Text([IntPtr]1,7)}catch{$failure=$_.Exception.GetBaseException()}
+if($failure.GetType().Name -cne 'ReadUnavailableException' -or $failure.NativeError -ne 0){throw 'Generic failure misclassified as timeout or stale error'}
+$before=[NearlyOwnedUi]::ModelReads;$failure=$null
+try{[NearlyOwnedUi]::Text([IntPtr]2,7)}catch{$failure=$_.Exception.GetBaseException()}
+if($failure.GetType().Name -cne 'WindowChangedException' -or [NearlyOwnedUi]::ModelReads -ne $before){throw 'Foreign control reached native read'}
+'Read-only transient message policy passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Read-only transient message policy passed/);
+});
+test('directory selection skips an exact existing target and verifies every requested edit',{skip:process.platform!=='win32'},()=>{
+ assert.match(fs.readFileSync(script,'utf8'),/Set-VerifiedDirectorySelection \$edit\r?\n  Screenshot 'directory'/);
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+class NearlyOwnedUi {
+ static [string]$Current='D:\Owned\Nearly'
+ static [int]$Writes=0
+ static [int]$Reads=0
+ static [bool]$Refuse=$false
+ static [bool]$ForbidWrite=$false
+ static [string] Text([IntPtr]$h,[int]$pidValue){if($h -ne 19 -or $pidValue -ne 7){throw 'Foreign directory queried'};[NearlyOwnedUi]::Reads++;return [NearlyOwnedUi]::Current}
+ static [void] SetText([IntPtr]$h,[int]$pidValue,[string]$value){if($h -ne 19 -or $pidValue -ne 7 -or $value -cne 'D:\Owned\Nearly'){throw 'Foreign directory edit'};if([NearlyOwnedUi]::ForbidWrite){throw 'Redundant exact-target edit'};[NearlyOwnedUi]::Writes++;if(![NearlyOwnedUi]::Refuse){[NearlyOwnedUi]::Current=$value}}
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Set-VerifiedDirectorySelection'},$true)
+if($fn.Count -ne 1){throw 'Directory selection implementation missing'}
+Invoke-Expression $fn[0].Extent.Text
+$ownedProcess=[pscustomobject]@{Id=7};$InstallRoot='D:\Owned\Nearly'
+[NearlyOwnedUi]::ForbidWrite=$true
+Set-VerifiedDirectorySelection ([IntPtr]19)
+if([NearlyOwnedUi]::Writes -ne 0 -or [NearlyOwnedUi]::Reads -ne 2){throw 'Exact target must skip writing and verify readback'}
+[NearlyOwnedUi]::ForbidWrite=$false
+foreach($initial in @('D:\Other\Nearly','d:\Owned\Nearly','D:\Owned\NEARLY','D:\Owned\.\Nearly')){
+ [NearlyOwnedUi]::Current=$initial;[NearlyOwnedUi]::Writes=0;[NearlyOwnedUi]::Reads=0
+ Set-VerifiedDirectorySelection ([IntPtr]19)
+ if([NearlyOwnedUi]::Writes -ne 1 -or [NearlyOwnedUi]::Reads -ne 2 -or [NearlyOwnedUi]::Current -cne $InstallRoot){throw 'Mismatch must write the exact target once and verify'}
+}
+[NearlyOwnedUi]::Current='D:\Other\Nearly';[NearlyOwnedUi]::Refuse=$true
+$rejected=$false;try{Set-VerifiedDirectorySelection ([IntPtr]19)}catch{$rejected=$true}
+if(!$rejected){throw 'Failed target readback accepted'}
+'Verified directory selection passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Verified directory selection passed/);
+});
 test('known rejection dialogs select the actual owned OK control and await dismissal without guessing ID',{skip:process.platform!=='win32'},()=>{
  const source=String.raw`
 $ErrorActionPreference='Stop'
@@ -16,9 +248,11 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static string Mode="ok";public static int Id=2,Inputs=0,Queries=0;public static bool Gone=false;
  public static string Class(IntPtr h,int pid){if(pid!=7)throw new Exception("Foreign PID");if(Gone&&h==(IntPtr)1)throw new Exception("Destroyed modal queried");if(Mode=="race"&&Queries++==0)throw new WindowChangedException();return h==(IntPtr)10?"#32770":h==(IntPtr)1?(Mode=="dialog"?"Edit":"#32770"):h==(IntPtr)2?"Static":"Button";}
- public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
+ public static string Text(IntPtr h,int pid){return h==(IntPtr)2?(Mode=="message"?"untrusted path secret":Mode=="existing"?"known existing files":"known rejection"):Mode=="caption"?"Delete":Mode=="amp"?"&OK":"OK";}
  public static IntPtr Parent(IntPtr h,int pid){return Mode=="parent"?(IntPtr)9:(IntPtr)1;}
  public static int GetDlgCtrlID(IntPtr h){return Id;}
  public static bool IsWindowVisible(IntPtr h){return Mode!="hidden";}
@@ -39,13 +273,18 @@ function Assert-Process {}
 function Controls([IntPtr]$Parent){if($Parent -eq [IntPtr]::Zero){if(![NearlyOwnedUi]::Gone){return [IntPtr]1};$script:postQueries++;if($script:postQueries -eq 1){return [IntPtr]1};return};if([NearlyOwnedUi]::Mode -eq 'duplicate'){return @([IntPtr]2,[IntPtr]3,[IntPtr]4)};return @([IntPtr]2,[IntPtr]3)}
 function Failure-ControlSnapshot {return @(@{kind='button';id=2;enabled=$true})}
 function Write-UiObservation {}
-$ownedProcess=[pscustomobject]@{Id=7};$captions=@{Reject='known rejection'};$main=[IntPtr]10;$NavigationMode='Command'
+$ownedProcess=[pscustomobject]@{Id=7};$captions=@{Reject='known rejection';ExistingFiles='known existing files'};$main=[IntPtr]10;$NavigationMode='Command'
 foreach($mode in @('caption','message','dialog','duplicate','hidden','parent')){
  [NearlyOwnedUi]::Mode=$mode
  if($null -ne (Get-RejectionButton ([IntPtr]1))){throw ('Unsafe modal accepted: '+$mode)}
 }
 [NearlyOwnedUi]::Mode='ok';[NearlyOwnedUi]::Id=6
 if($null -ne (Get-RejectionButton ([IntPtr]1))){throw 'Foreign button ID accepted'}
+[NearlyOwnedUi]::Id=2
+foreach($case in @(@('ok',5),@('existing',7))){
+ [NearlyOwnedUi]::Mode=$case[0]
+ if((Get-RejectionButton ([IntPtr]1)).exitCode -ne $case[1]){throw 'Product rejection exit code lost'}
+}
 foreach($mode in @('ok','amp','race')){
  [NearlyOwnedUi]::Mode=$mode;[NearlyOwnedUi]::Id=2;[NearlyOwnedUi]::Gone=$false;$script:postQueries=0
  Dismiss-Rejection ([IntPtr]1)
@@ -72,6 +311,7 @@ Cancel-Setup
 $ownedProcess.ExitCode=5;$rejected=$false;try{Cancel-Setup}catch{$rejected=$true}
 if(!$rejected){throw 'Ordinary cancellation wrongly accepted refusal code'}
 Cancel-Setup -ExpectedExitCode 5
+$ownedProcess.ExitCode=7;Cancel-Setup -ExpectedExitCode 7
 $ownedProcess.ExitCode=0;$rejected=$false;try{Cancel-Setup -ExpectedExitCode 5}catch{$rejected=$true}
 if(!$rejected){throw 'Refusal must not accept success exit'}
 'Distinct cancellation outcomes passed'
@@ -173,7 +413,7 @@ $rejected=$false;try{[NearlyOwnedUi]::Command([IntPtr]1,[IntPtr]2,7,1)}catch{$re
 if(!$rejected){throw 'Queue failure ignored'}
 'Owned navigation command model passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Owned navigation command model passed/);
 });
 test('failure inventory emits only bounded IDs and known control kinds, never window text',{skip:process.platform!=='win32'},()=>{
@@ -184,6 +424,8 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static string Class(IntPtr h,int pid){if(h==(IntPtr)3)throw new WindowChangedException();return h==(IntPtr)2?"Button":"sensitive arbitrary class";}
  public static int GetDlgCtrlID(IntPtr h){return h==(IntPtr)2?1001:int.MaxValue;}
  public static bool IsWindowEnabled(IntPtr h){return true;}
@@ -240,6 +482,8 @@ Add-Type @'
 using System;
 public static class NearlyOwnedUi {
  public sealed class WindowChangedException:Exception{}
+ public sealed class ReadUnavailableException:Exception{}
+ public sealed class StartupPendingException:Exception{}
  public static int Queries=0;
  public static string Class(IntPtr h,int pid){Queries++;if(Queries==1)throw new WindowChangedException();return "Button";}
 }
@@ -294,7 +538,7 @@ try{[NearlyOwnedUi]::Show([IntPtr]1,7)}catch{$rejected=$true}
 if(!$rejected){throw 'Native visibility failure was ignored'}
 'Owned visibility API contract passed'
 `;
-  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([Console]::In.ReadToEnd()))'],{input:source,encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
   assert.equal(r.status,0,r.stderr||r.error?.message);
   assert.match(r.stdout,/Owned visibility API contract passed/);
 });
@@ -347,6 +591,7 @@ function Must-Reject([scriptblock]$Action,[string]$Label='selection') { $rejecte
 $sha='a'*40
 $context=@{GITHUB_ACTIONS='true';RUNNER_OS='Windows';RUNNER_ENVIRONMENT='github-hosted';GITHUB_REPOSITORY='nea-c/Nearly';GITHUB_EVENT_NAME='workflow_dispatch';GITHUB_REF='refs/heads/main';GITHUB_SHA=$sha;GITHUB_WORKFLOW_SHA=$sha;QA_CONTROLLER_SHA=$sha;QA_CONFIRMATION="installer-qa $sha";GITHUB_RUN_ID='123';GITHUB_RUN_ATTEMPT='1';RUNNER_TEMP='C:\qa-temp';LOCALAPPDATA='C:\qa-user\AppData\Local'}
 $root=Assert-UiContext $context
+$branch=$context.Clone();$branch.GITHUB_REF='refs/heads/codex/private-install-directory';if((Assert-UiContext $branch) -cne $root){throw 'Reviewed QA branch rejected'}
 if($root -cne 'C:\qa-temp\nearly-installer-qa-123-1') { throw 'Incorrect owned root' }
 foreach($key in @($context.Keys)) { $copy=$context.Clone(); $copy.Remove($key); Must-Reject { Assert-UiContext $copy } $key }
 foreach($pair in @(@('RUNNER_ENVIRONMENT','self-hosted'),@('GITHUB_EVENT_NAME','push'),@('GITHUB_REF','refs/heads/other'),@('QA_CONFIRMATION',("installer-qa $sha"+[char]10)),@('GITHUB_WORKFLOW_SHA',('b'*40)),@('GITHUB_RUN_ID','01'),@('RUNNER_TEMP','C:\qa-temp\..\other'),@('SYNCFILES_CONFIG_DIR',''))) { $copy=$context.Clone();$copy[$pair[0]]=$pair[1];Must-Reject {Assert-UiContext $copy} $pair[0] }
@@ -400,4 +645,102 @@ Invoke-Expression $fn[0].Extent.Text
     assert.ok(expected,`${lang} ${id} caption missing`);
     assert.equal(actual[lang][key],expected,`${lang} ${id} selector differs`);
   }
+});
+
+test('protection consent matches exact localized target and sibling scope, including new-folder and empty-folder plans',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiCaptions','Get-ProtectionSpec')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+ if($fn.Count -ne 1){throw 'Protection helper missing'};Invoke-Expression $fn[0].Extent.Text
+}
+$target='D:\Nearly QA generated';$saved='D:\.Nearly-preserved-'+('a'*32)
+foreach($lang in @('en','ja')){
+ $c=Get-UiCaptions $lang
+ $new=$c.ProtectNew.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$target)
+ $empty=$c.ProtectExisting.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$target).Replace('$NearlyPreservedRoot',$saved)
+ if((Get-ProtectionSpec $new $target $lang).kind -cne 'New'){throw 'New plan not matched'}
+ if((Get-ProtectionSpec $empty $target $lang).kind -cne 'Existing'){throw 'Existing plan not matched'}
+ $badCases=@();$badCases+=$new.Replace($target,'D:\Foreign');$badCases+=($new+'!');$badCases+=$empty.Replace($saved,('C:\.Nearly-preserved-'+('a'*32)));$badCases+=$empty.Replace($saved,'D:\.Nearly-preserved-invalid')
+ foreach($bad in $badCases){if($null -ne (Get-ProtectionSpec $bad $target $lang)){throw 'Wrong target or scope accepted'}}
+}
+'Exact consent plan model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Exact consent plan model passed/);
+});
+
+test('consent selector and transition policy reject wrong ownership scope, default Yes and re-prompt',{skip:process.platform!=='win32'},()=>{
+ const source=String.raw`
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+class NearlyOwnedUi {
+ static [string]$Mode='ok'
+ static [string]$Message=''
+ static [string]$ModalCaption='Nearly Setup'
+ static [string]$MainCaption='Nearly Setup '
+ static [int]$Inputs=0
+ static [int]$LastChoice=0
+ static [bool]$Gone=$false
+ static [void] Command([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){if($parent -ne 1 -or $button -ne $id -or $pidValue -ne 7 -or $id -notin @(6,7)){throw 'Unexpected consent input'};[NearlyOwnedUi]::Inputs++;[NearlyOwnedUi]::LastChoice=$id;[NearlyOwnedUi]::Gone=$true}
+ static [void] ClickConsent([IntPtr]$parent,[IntPtr]$button,[int]$pidValue,[int]$id){[NearlyOwnedUi]::Command($parent,$button,$pidValue,$id)}
+ static [string] Class([IntPtr]$h,[int]$pidValue){if($pidValue -ne 7){throw 'Foreign PID'};if($h -eq 1 -or $h -eq 10){return '#32770'};if($h -eq 2){return 'Static'};return 'Button'}
+ static [string] Text([IntPtr]$h,[int]$pidValue){if($h -eq 2){if([NearlyOwnedUi]::Mode -eq 'message'){return 'arbitrary sensitive text'};return [NearlyOwnedUi]::Message};if($h -eq 10){return [NearlyOwnedUi]::MainCaption};if($h -eq 1){if([NearlyOwnedUi]::Mode -eq 'caption'){return 'Foreign'};return [NearlyOwnedUi]::ModalCaption};if([NearlyOwnedUi]::Mode -eq 'button'){return 'Delete'};if($h -eq 6){return '&Yes'};return '&No'}
+ static [int] GetDlgCtrlID([IntPtr]$h){return [int]$h}
+ static [IntPtr] Parent([IntPtr]$h,[int]$pidValue){if([NearlyOwnedUi]::Mode -eq 'parent'){return [IntPtr]9};return [IntPtr]1}
+ static [bool] IsWindowVisible([IntPtr]$h){return [NearlyOwnedUi]::Mode -ne 'hidden'}
+ static [bool] IsWindowEnabled([IntPtr]$h){return [NearlyOwnedUi]::Mode -ne 'disabled'}
+ static [bool] DefaultButton([IntPtr]$h,[int]$pidValue){if([NearlyOwnedUi]::Mode -eq 'default'){return $h -eq 6};return $h -eq 7}
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('${script.replaceAll("'","''")}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-UiCaptions','Get-ProtectionSpec','Get-ProtectionDialog','Assert-ConsentTransition','Answer-Protection','Wait-Ui')){
+ $fn=$ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $fn[0].Extent.Text
+}
+function Controls([IntPtr]$Parent) {if($Parent -eq [IntPtr]::Zero){if(![NearlyOwnedUi]::Gone){return [IntPtr]1};return};if([NearlyOwnedUi]::Mode -eq 'duplicate'){return @([IntPtr]2,[IntPtr]2,[IntPtr]6,[IntPtr]7)};return @([IntPtr]2,[IntPtr]6,[IntPtr]7)}
+$ownedProcess=[pscustomobject]@{Id=7};$main=[IntPtr]10;$InstallRoot='D:\Nearly QA generated';$Language='en'
+$c=Get-UiCaptions 'en';[NearlyOwnedUi]::Message=$c.ProtectNew.Replace('$\r$\n',([char]13).ToString()+[char]10).Replace('$INSTDIR',$InstallRoot)
+if((Get-ProtectionDialog ([IntPtr]1)).kind -cne 'New'){throw 'Known protection dialog not recognized'}
+foreach($lang in @('en','ja')){
+ $Language=$lang;$labels=Get-UiCaptions $lang
+ foreach($kind in @('New','Existing')){
+  [NearlyOwnedUi]::Message=$labels.('Protect'+$kind).Replace('$\r$\n',(([char]13).ToString()+[char]10)).Replace('$INSTDIR',$InstallRoot).Replace('$NearlyPreservedRoot',('D:\.Nearly-preserved-'+('a'*32)))
+  if((Get-ProtectionDialog ([IntPtr]1)).kind -cne $kind){throw 'Actual directory-caption consent not recognized'}
+  foreach($bad in @('Foreign','Nearly Setup!','Nearly Setup ',('Nearly Setup'+[char]10),'Nearly Setup  ')){
+   [NearlyOwnedUi]::ModalCaption=$bad
+   if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw 'Near or foreign modal caption accepted'}
+  }
+  [NearlyOwnedUi]::ModalCaption='Nearly Setup'
+ }
+}
+$Language='en';[NearlyOwnedUi]::Message=$c.ProtectNew.Replace('$\r$\n',(([char]13).ToString()+[char]10)).Replace('$INSTDIR',$InstallRoot)
+foreach($bad in @('Nearly Setup','Nearly Setup  ',('Nearly Setup '+[char]10),'Foreign ')){
+ [NearlyOwnedUi]::MainCaption=$bad
+ if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw 'Unexpected main caption accepted'}
+}
+[NearlyOwnedUi]::MainCaption='Nearly Setup '
+foreach($mode in @('message','caption','button','parent','hidden','disabled','duplicate')){[NearlyOwnedUi]::Mode=$mode;if($null -ne (Get-ProtectionDialog ([IntPtr]1))){throw ('Unsafe consent accepted: '+$mode)}}
+[NearlyOwnedUi]::Mode='default';$rejected=$false;try{Get-ProtectionDialog ([IntPtr]1)}catch{$rejected=$true};if(!$rejected){throw 'Default Yes accepted'}
+Assert-ConsentTransition 'Existing' 'Existing' 'No' $false
+Assert-ConsentTransition 'New' 'Auto' 'Yes' $false
+Assert-ConsentTransition 'None' 'Auto' 'Yes' $true
+foreach($case in @(@('None','New','Yes',$false),@('New','None','Yes',$false),@('Existing','New','Yes',$false),@('None','Auto','No',$false),@('New','Auto','Yes',$true))){$rejected=$false;try{Assert-ConsentTransition $case[0] $case[1] $case[2] $case[3]}catch{$rejected=$true};if(!$rejected){throw 'Unexpected consent transition accepted'}}
+[NearlyOwnedUi]::Mode='ok'
+function Assert-Process {}
+function Screenshot {}
+$script:mutationChecks=0
+function Assert-NoInstallMutation {$script:mutationChecks++}
+$events=[Collections.Generic.List[object]]::new();$NavigationMode='Command'
+foreach($decision in @('No','Yes')){
+ [NearlyOwnedUi]::Gone=$false;$dialog=Get-ProtectionDialog ([IntPtr]1)
+ Answer-Protection $dialog $decision
+ if([NearlyOwnedUi]::LastChoice -ne $(if($decision -eq 'Yes'){6}else{7})){throw 'Wrong explicit consent choice'}
+ $NavigationMode='Click'
+}
+if([NearlyOwnedUi]::Inputs -ne 2 -or $mutationChecks -ne 4 -or $events.Count -ne 2){throw 'Consent decisions or pre-Install checks missing'}
+'Consent selector model passed'
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,timeout:modelTimeoutMs});
+ assert.equal(r.status,0,r.stderr||r.error?.message);assert.match(r.stdout,/Consent selector model passed/);assert.doesNotMatch(r.stdout,/arbitrary sensitive text/);
 });
