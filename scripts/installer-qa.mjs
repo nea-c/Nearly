@@ -16,6 +16,19 @@ const hash=b=>createHash('sha256').update(b).digest('hex');
 const exact=(r,v)=>typeof v==='string'&&r.exec(v)?.[0]===v;
 const fail=m=>{throw Error(m);};
 export const SOURCE=Object.freeze({sourceCommit:'0dd697f2d832ec9fd07e9278559e18819b65bd3a',artifactId:'12230567816',sourceRunId:'39288652319',sourceRunAttempt:'1',zipSha256:'5533c87fa789c3907165f899a0d03962a0b3ed9af228b3d484b7d746b7df0480',installerSha256:'fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc',manifestHash:'75796ed00c47a2d1b93d734a471cf81b0a52d30c87940381ca7b2b35dd713bcc'});
+export const PRODUCTION_RELEASE=Object.freeze({id:417869306,tag:'r3.1',assets:Object.freeze([
+ Object.freeze({id:657779184,name:'Nearly_r3.1_x64-setup.exe',bytes:5896024,sha256:SOURCE.installerSha256}),
+ Object.freeze({id:657779209,name:'Nearly_r3.1_x64-setup.exe.sha256',bytes:92,sha256:'16ccd21421c70440f229a3da70b0e934626ecaf90836061a396e8bdda2079199'}),
+ Object.freeze({id:657779229,name:'Nearly_r3.1_x64-setup.exe.sig',bytes:528,sha256:'43473c441f9a7e4b34f6115d466c5e56c4681dbc5280616d4e1e58ed2642ff76'}),
+])});
+export function validateProductionRelease(release,commit){
+ if(release?.id!==PRODUCTION_RELEASE.id||release.tag_name!==PRODUCTION_RELEASE.tag||release.draft!==false||release.prerelease!==false||commit?.sha!==SOURCE.sourceCommit||!Array.isArray(release.assets)||release.assets.length!==3)fail('Historical release identity mismatch; no alternate source');
+ for(const expected of PRODUCTION_RELEASE.assets){
+  const found=release.assets.filter(a=>a.name===expected.name);
+  if(found.length!==1||found[0].id!==expected.id||found[0].size!==expected.bytes||found[0].digest!=='sha256:'+expected.sha256||found[0].state!=='uploaded'||found[0].browser_download_url!==`https://github.com/nea-c/Nearly/releases/download/r3.1/${expected.name}`)fail('Historical release asset mismatch; no alternate source');
+ }
+ return PRODUCTION_RELEASE.assets;
+}
 function canonicalWindows(value){
   if(typeof value!=='string'||!exact(/[A-Za-z]:\\[^\x00-\x1f<>"|?*]+/,value)||value.slice(2).includes(':')||value.includes('/')||value.split('\\').some(x=>x==='.'||x==='..'||/[. ]$/.test(x))||path.win32.normalize(value)!==value)fail('Canonical local Windows path required');
   return value;
@@ -257,21 +270,34 @@ async function execute(command,args,{cwd=root,env=process.env,timeoutMs=600000,c
 const sourceRequest={repository:'nea-c/Nearly',commit:SOURCE.sourceCommit,tag:'r3.1',version:'3.1.0',workflowCommit:SOURCE.sourceCommit,runId:SOURCE.sourceRunId,runAttempt:SOURCE.sourceRunAttempt,mode:'release'};
 export function validatePinnedArtifact(artifact,repositoryId){return validateArtifact(artifact,sourceRequest,{id:SOURCE.artifactId,role:'signed',digest:SOURCE.zipSha256,repositoryId});}
 async function api(suffix,token){const response=await fetch(`https://api.github.com/repos/nea-c/Nearly${suffix}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(30000),redirect:'error'});if(!response.ok){const error=Error(`Pinned GitHub source unavailable (HTTP ${response.status}; no fallback)`);if([404,410].includes(response.status))error.code='PINNED_SOURCE_UNAVAILABLE';throw error;}return response.json();}
-async function downloadSigned(p,token){
-  if(!token)fail('Read-only GitHub artifact access required');
-  const [repo,artifact,run]=await Promise.all([api('',token),api(`/actions/artifacts/${SOURCE.artifactId}`,token),api(`/actions/runs/${SOURCE.sourceRunId}/attempts/${SOURCE.sourceRunAttempt}`,token)]);
-  validatePinnedArtifact(artifact,repo.id);
-  if(run.id!==Number(SOURCE.sourceRunId)||run.run_attempt!==1||run.head_sha!==SOURCE.sourceCommit||run.event!=='workflow_dispatch'||run.status!=='completed'||run.conclusion!=='success'||run.path!=='.github/workflows/release-signed-windows.yml')fail('Historical signed workflow source mismatch');
-  const redirect=await fetch(`https://api.github.com/repos/nea-c/Nearly/actions/artifacts/${SOURCE.artifactId}/zip`,{headers:{Authorization:`Bearer ${token}`},redirect:'manual',signal:AbortSignal.timeout(30000)});
-  if(redirect.status!==302)fail('Pinned signed ZIP unavailable; no fallback');
-  const location=new URL(redirect.headers.get('location'));
-  if(location.protocol!=='https:'||location.username||location.password)fail('Unsafe artifact redirect');
-  // Never forward the API token to artifact object storage.
-  const response=await fetch(location,{redirect:'error',signal:AbortSignal.timeout(120000)});
-  if(!response.ok||Number(response.headers.get('content-length'))>512*1024*1024)fail('Artifact download unavailable/oversized');
-  const chunks=[];let size=0;for await(const chunk of response.body){size+=chunk.length;if(size>512*1024*1024)fail('Artifact download oversized');chunks.push(chunk);}
-  const zip=Buffer.concat(chunks);if(hash(zip)!==SOURCE.zipSha256)fail('Pinned signed ZIP checksum mismatch');
-  await fs.writeFile(path.join(p.runRoot,'signed.zip'),zip,{flag:'wx'});
+export async function readProductionAsset(asset,token,transport=fetch){
+  if(!token||!PRODUCTION_RELEASE.assets.some(a=>a.id===asset?.id&&a.name===asset.name&&a.bytes===asset.bytes&&a.sha256===asset.sha256))fail('Exact historical asset and read-only authentication required');
+  let response=await transport(`https://api.github.com/repos/nea-c/Nearly/releases/assets/${asset.id}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/octet-stream','X-GitHub-Api-Version':'2022-11-28'},redirect:'manual',signal:AbortSignal.timeout(60000)});
+  if(response.status===302){
+    let location;try{location=new URL(response.headers.get('location'));}catch{fail('Historical asset redirect invalid');}
+    if(location.protocol!=='https:'||location.username||location.password||location.hostname!=='release-assets.githubusercontent.com')fail('Historical asset redirect refused');
+    // GitHub's API token never reaches the release object storage host.
+    response=await transport(location.href,{redirect:'error',signal:AbortSignal.timeout(120000)});
+  }
+  if(response.status!==200||!response.body)fail('Historical release asset unavailable; no alternate source');
+  const length=response.headers.get('content-length');
+  if(length!==null&&Number(length)!==asset.bytes)fail('Historical asset length mismatch');
+  const chunks=[];let size=0;
+  for await(const chunk of response.body){size+=chunk.length;if(size>asset.bytes)fail('Historical asset exceeds exact bound');chunks.push(chunk);}
+  const bytes=Buffer.concat(chunks);
+  if(size!==asset.bytes||hash(bytes)!==asset.sha256)fail('Historical asset bytes mismatch');
+  return bytes;
+}
+async function downloadProductionRelease(p,token){
+  // The original signed manifest was pinned before the Actions ZIP expired.
+  // Retain its exact bytes and all existing signature/provenance validation.
+  const manifest=await regular(path.join(root,'tests/fixtures/installer-qa-r31-signed-manifest.json'),131072);
+  if(hash(manifest)!==SOURCE.manifestHash)fail('Historical manifest pin mismatch');
+  const [release,commit]=await Promise.all([api(`/releases/${PRODUCTION_RELEASE.id}`,token),api('/commits/r3.1',token)]);
+  const assets=validateProductionRelease(release,commit),signed=path.join(p.runRoot,'signed');
+  await fs.mkdir(signed);
+  for(const asset of assets)await fs.writeFile(path.join(signed,asset.name),await readProductionAsset(asset,token),{flag:'wx'});
+  await fs.writeFile(path.join(signed,'signed-manifest.json'),manifest,{flag:'wx'});
 }
 function cleanChildEnv(e){const result={...e};for(const key of Object.keys(result))if(/^(?:GH_TOKEN|GITHUB_TOKEN|TAURI_(?:SIGNING_|PRIVATE_KEY|WINDOWS_CERTIFICATE)|NEARLY_QA_)/.test(key))delete result[key];return result;}
 export function fixtureBuildPaths(p,version){
@@ -343,7 +369,7 @@ export async function production(e=process.env){
   const cases=[];
   try{
     if(await execute('git',['rev-parse','HEAD'],{capture:true,env:baseEnv})!==c.controllerSha)fail('Checkout differs from reviewed controller');
-    await loadTrustedPublicKey(root);await downloadSigned(p,e.GH_TOKEN);await ps('extract');
+    await loadTrustedPublicKey(root);await downloadProductionRelease(p,e.GH_TOKEN);
     const signed=path.join(p.runRoot,'signed'),manifest=JSON.parse(await regular(path.join(signed,'signed-manifest.json'),131072));
     const checked=await verifySignedBundle(signed,sourceRequest,{manifestHash:SOURCE.manifestHash,unsignedArtifactId:manifest.unsignedArtifactId,unsignedManifestHash:manifest.unsignedManifestHash,toolArtifactId:manifest.toolArtifactId,toolManifestHash:manifest.toolManifestHash});
     if(checked.assets[0].sha256!==SOURCE.installerSha256)fail('Pinned production installer mismatch');

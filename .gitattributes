@@ -5,3 +5,5 @@ src/version.ts text eol=lf
 tests/fixtures/reviewed-public-template.txt text eol=lf
 
 tests/fixtures/reviewed-public-installer-qa.txt text eol=lf
+tests/fixtures/installer-qa-r31-signed-manifest.json text eol=lf
+tests/fixtures/installer-qa-r31.sig -text

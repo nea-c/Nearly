@@ -358,7 +358,18 @@ function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][strin
     return $buttons[0]
   }
   function Click-Owned([IntPtr]$Parent,[int]$Id) {
+    # Show posts asynchronously. Presence alone is not input readiness; wait
+    # without sending anything, then retain Command's independent final guard.
+    Write-Host "Whole-folder UI: mode=$Mode command=$Id awaiting-ready"
+    Wait-Condition {
+      $buttons=@(Owned-Windows $Parent | Where-Object { [NearlyOwnedUi]::GetDlgCtrlID($_) -eq $Id -and [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::Parent($_,$p.Id) -eq $Parent })
+      if ($buttons.Count -eq 0) { return $false }
+      if ($buttons.Count -ne 1) { throw 'Ambiguous owned dialog button' }
+      $button=$buttons[0]
+      return [NearlyOwnedUi]::IsWindowVisible($Parent) -and [NearlyOwnedUi]::IsWindowEnabled($Parent) -and [NearlyOwnedUi]::IsWindowVisible($button) -and [NearlyOwnedUi]::IsWindowEnabled($button)
+    }
     $button=Owned-Button $Parent $Id
+    Write-Host "Whole-folder UI: mode=$Mode command=$Id ready=true"
     [NearlyOwnedUi]::Command($Parent,$button,$p.Id,$Id)
   }
   $script:optionMain=[IntPtr]::Zero
@@ -423,6 +434,14 @@ function New-SharedEmptyDriveFixture {
   $acl.SetSecurityDescriptorSddlForm("O:$sid"+'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)')
   Set-Acl -LiteralPath $install -AclObject $acl
 }
+function New-FixtureAccessRestore([Security.AccessControl.DirectorySecurity]$Original) {
+  # A fresh object marks only DACL information as modified. Reusing Get-Acl's
+  # full descriptor can request SACL/owner privileges the standard token lacks.
+  $access=[Security.AccessControl.AccessControlSections]::Access
+  $copy=[Security.AccessControl.DirectorySecurity]::new()
+  $copy.SetSecurityDescriptorSddlForm($Original.GetSecurityDescriptorSddlForm($access),$access)
+  return $copy
+}
 function Test-OwnedDriveWriteDenial {
   # Only a disposable, exact guest fixture may receive this negative-test ACL.
   $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
@@ -444,7 +463,7 @@ function Test-OwnedDriveWriteDenial {
     foreach ($target in @($exe,$uninstaller,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Write refusal changed installed state' } }
     if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Write refusal left unexpected files' }
   } finally {
-    Set-Acl -LiteralPath $install -AclObject $original
+    Set-Acl -LiteralPath $install -AclObject (New-FixtureAccessRestore $original)
   }
   if ((Get-Acl -LiteralPath $install).Sddl -cne $original.Sddl) { throw 'Generated fixture ACL was not restored' }
 }

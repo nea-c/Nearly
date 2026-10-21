@@ -6,6 +6,66 @@ import {fileURLToPath} from 'node:url';
 import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
+test('disposable fixture ACL restore copies only DACL, without owner or audit privilege requests',{skip:process.platform!=='win32'},()=>{
+ const source=fileURLToPath(new URL('../scripts/installer-qa-guest.ps1',import.meta.url));
+ const script=String.raw`$ErrorActionPreference='Stop'
+$text=[IO.File]::ReadAllText($env:QA_TEST_SOURCE)
+$ast=[System.Management.Automation.Language.Parser]::ParseInput($text,[ref]$null,[ref]$null)
+$fn=$ast.Find({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FixtureAccessRestore'},$true)
+if (!$fn) { throw 'DACL-only restore missing' }
+Invoke-Expression $fn.Extent.Text
+$original=[Security.AccessControl.DirectorySecurity]::new()
+$original.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;OICI;FA;;;SY)S:(ML;;NW;;;LW)')
+$copy=New-FixtureAccessRestore $original
+$access=[Security.AccessControl.AccessControlSections]::Access
+if ($copy.GetSecurityDescriptorSddlForm($access) -cne $original.GetSecurityDescriptorSddlForm($access)) { throw 'DACL changed' }
+$all=$copy.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+if ($all.Contains('O:') -or $all.Contains('G:') -or $all.Contains('S:')) { throw 'Restore copied non-DACL information' }
+`;
+ const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,QA_TEST_SOURCE:source},encoding:'utf8',windowsHide:true,timeout:15000});
+ assert.equal(r.status,0,r.stderr||r.stdout);
+});
+test('pinned release asset transport bounds bytes and never forwards authentication to object storage',async()=>{
+ assert.equal(typeof qa.readProductionAsset,'function');
+ const asset=qa.PRODUCTION_RELEASE.assets[2],bytes=await fs.readFile(new URL('./fixtures/installer-qa-r31.sig',import.meta.url));
+ const calls=[];
+ const transport=async(url,options)=>{
+  calls.push({url,headers:options.headers});
+  return calls.length===1?new Response(null,{status:302,headers:{location:'https://release-assets.githubusercontent.com/generated-fixture'}}):new Response(bytes,{status:200});
+ };
+ assert.deepEqual(await qa.readProductionAsset(asset,'generated-test-token',transport),bytes);
+ assert.equal(calls[0].headers.Authorization,'Bearer generated-test-token');
+ assert.equal(calls[1].headers?.Authorization,undefined);
+ assert.equal(calls[0].url,`https://api.github.com/repos/nea-c/Nearly/releases/assets/${asset.id}`);
+ for(const changed of [Buffer.concat([bytes,Buffer.from('x')]),Buffer.from('bad signature')])await assert.rejects(()=>qa.readProductionAsset(asset,'generated-test-token',async()=>new Response(changed)));
+ for(const url of ['http://release-assets.githubusercontent.com/x','https://localhost/x','https://user:pass@release-assets.githubusercontent.com/x'])await assert.rejects(()=>qa.readProductionAsset(asset,'generated-test-token',async()=>new Response(null,{status:302,headers:{location:url}})));
+});
+test('production uses pinned release transport and exact historical manifest before signature verification',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa.mjs',import.meta.url),'utf8');
+ const production=source.slice(source.indexOf('export async function production('),source.indexOf('export async function run('));
+ assert.match(production,/await downloadProductionRelease/);
+ assert.doesNotMatch(production,/downloadSigned|ps\('extract'/);
+ const bytes=await fs.readFile(new URL('./fixtures/installer-qa-r31-signed-manifest.json',import.meta.url));
+ assert.equal((await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'),qa.SOURCE.manifestHash);
+});
+test('historical production release requires exact original commit, IDs, names, sizes and all three asset hashes',()=>{
+ assert.equal(typeof qa.validateProductionRelease,'function');
+ const release={id:417869306,tag_name:'r3.1',draft:false,prerelease:false,assets:qa.PRODUCTION_RELEASE.assets.map(a=>({id:a.id,name:a.name,size:a.bytes,digest:'sha256:'+a.sha256,state:'uploaded',browser_download_url:`https://github.com/nea-c/Nearly/releases/download/r3.1/${a.name}`}))};
+ const commit={sha:qa.SOURCE.sourceCommit};
+ assert.equal(qa.validateProductionRelease(release,commit).length,3);
+ for(const mutate of [r=>r.id++,r=>r.tag_name='r3.0',r=>r.draft=true,r=>r.prerelease=true,r=>r.assets.pop(),r=>r.assets.push({...r.assets[0]}),r=>r.assets[0].id++,r=>r.assets[0].digest='sha256:'+'0'.repeat(64),r=>r.assets[1].size++,r=>r.assets[2].browser_download_url='https://untrusted.invalid/x']){
+  const changed=structuredClone(release);mutate(changed);assert.throws(()=>qa.validateProductionRelease(changed,commit));
+ }
+ assert.throws(()=>qa.validateProductionRelease(release,{sha:'0'.repeat(40)}));
+});
+test('uninstaller UI waits for asynchronous visibility and enabled controls before its guarded command',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const click=source.slice(source.indexOf('  function Click-Owned'),source.indexOf('  $script:optionMain'));
+ assert.match(click,/Wait-Condition/);
+ assert.match(click,/IsWindowVisible\(\$Parent\)/);
+ assert.match(click,/IsWindowEnabled\(\$button\)/);
+ assert.ok(click.indexOf('Wait-Condition')<click.indexOf('::Command('));
+});
 test('unregistered retained-data reinstall explicitly restores the selected destination as the final NSIS argument',async()=>{
  const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
  const branch=source.slice(source.indexOf('# Actual unregistered reinstall'),source.indexOf('Remove-GeneratedSettings',source.indexOf('# Actual unregistered reinstall')));
