@@ -58,6 +58,9 @@ export function auditGitObjects(raw) {
         '372ed73f659ddb72390135f391141461771c4065026bffe908b3453fb29cd428': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
         '50b699e9f008e42bc7fa90acc9dd4d399835a7266f005347c1f93b4db05a2fbf': [['c:', 'users', 'runneradmin', 'appdata', 'local'].join('/')],
         e4ba4a3e32f236b5037afc0951bc01301eeb7f986b4764f026f7c82b9c04b92e: [['c:', 'users', 'fixture', 'appdata', 'local', 'nearly'].join('/')],
+        // Immutable public protected-area test; Fixture/Fixture2 are synthetic.
+        // Only this exact source blob is exempted, never app/installer bytes.
+        bf895b4812deede57739a46d698ebb56c4c8cfa308674740ffd4cd37cd832c81: [['c:', 'users', 'fixture'].join('/')],
         '78272bd40b8a783c0ab94e4bcb400fd947ba306a7575f2bbbbccb7478f40447f': [['c:', 'users', 'public', 'desktop', 'app.lnk'].join('/')],
       };
       auditBytes(body, [], examples[sha256(body)] || []); count++;
