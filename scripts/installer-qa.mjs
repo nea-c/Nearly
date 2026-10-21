@@ -310,18 +310,107 @@ export function copyFixturePath(relative){
   // dist/build directories, which must remain intact in each source copy.
   return !['.git','build','dist','.test-build','.superpowers','.agents','.codex','.aws','.ssh','test-results','playwright-report'].includes(parts[0])&&!(parts[0]==='src-tauri'&&parts[1]==='target');
 }
-export function instrumentCandidatePolicyDiagnostics(template){
+const failureFunctions=['nearlyioinspect','nearlyioopendestination','nearlyiocopy','nearlyiodelete','nearlyopencopysource'];
+const failureApis=['GetFileType','GetFileInformationByHandle','CreateFileW','SetFilePointerEx','SetEndOfFile','ReadFile','WriteFile','FlushFileBuffers','SetFileInformationByHandle'];
+const shortcutStages=['shortcut-create','shortcut-query','shortcut-load','shortcut-getpath','shortcut-delete-error'];
+const failureStages=new Set(['registration','shortcuts','extract','uninstaller-generate',...shortcutStages,...failureFunctions,...failureFunctions.flatMap(f=>failureApis.map(a=>`${f}-${a.toLowerCase()}`))]);
+export function decodeCandidateFailureTrace(bytes){
+  if(!Buffer.isBuffer(bytes)||bytes.length>8192)fail('Bounded candidate failure trace required');
+  const lines=bytes.toString('utf8').trim().split(/\r?\n/);if(lines.length!==1)fail('Single original failure record required');
+  let row;try{row=JSON.parse(lines[0]);}catch{fail('Candidate failure trace invalid');}
+  if(!row||Object.keys(row).sort().join(',')!=='code,result,stage'||!failureStages.has(row.stage)||!Number.isInteger(row.result)||row.result< -2147483648||row.result>4294967295||!Number.isInteger(row.code)||row.code<0||row.code>4294967295)fail('Candidate failure trace fields refused');
+  return row;
+}
+export function decodeCandidateShortcutTrace(bytes){
+  if(!Buffer.isBuffer(bytes)||bytes.length>8192)fail('Bounded shortcut observations required');
+  const lines=bytes.toString('utf8').trim().split(/\r?\n/);if(lines.length>64)fail('Shortcut observation count exceeded');
+  return lines.map(line=>{const row=decodeCandidateFailureTrace(Buffer.from(line));if(!shortcutStages.includes(row.stage))fail('Shortcut observation stage refused');return row;});
+}
+export function instrumentCandidatePolicyDiagnostics(template,tracePath){
   // Standard NSIS has no private-leaf helper protocol to instrument. Qualify
   // the exact product template without adding failure-only modal behavior.
   if(typeof template!=='string'||template.length>262144||!template.includes('Function NearlyDirectoryLeave')||!template.includes('RequestExecutionLevel user')||/NEARLY_QA_POLICY_|NearlyEnsurePolicyHelper|--nearly-install-(?:check|prepare)/.test(template))fail('Unexpected standard installer template');
-  return template;
+  if(tracePath===undefined)return template;
+  canonicalWindows(tracePath);
+  if(!exact(/[A-Za-z]:\\[^\r\n]+\\nearly-installer-qa-[1-9][0-9]*-[1-9][0-9]*\\candidate-failure\.jsonl/,tracePath))fail('Fixed generated QA trace path required');
+  let text=template.replaceAll('\r\n','\n');
+  const block=body=>`; NEARLY_QA_TRACE_BEGIN\n${body}\n; NEARLY_QA_TRACE_END\n`;
+  const stage=name=>block(`  StrCpy $NearlyQaFailureStage "${name}"\n  StrCpy $NearlyQaFailureCode 0\n  StrCpy $NearlyQaFailureResult 0`);
+  const instrumentBody=(_match,head,body,tail)=>{
+    const name=head.trim().slice('Function '.length).replace('${prefix}','').toLowerCase();
+    if(!failureFunctions.includes(name))return head+body+tail;
+    body=body.replace(/^( +)System::Call 'kernel32::([A-Za-z]+)\(([^\n]*)\) ([ip])\.r0'\n/gm,(line,indent,api)=>{
+      if(!failureApis.includes(api))return line;
+      return stage(`${name}-${api.toLowerCase()}`)+line.slice(0,-2)+" ?e'\n"+`; NEARLY_QA_CAPTURE_BEGIN\n${indent}Pop $NearlyQaFailureCode\n${indent}StrCpy $NearlyQaFailureResult $0\n; NEARLY_QA_CAPTURE_END\n`;
+    });
+    return head+stage(name)+body+tail;
+  };
+  text=text.replace(/(Function [^\n]+\n)([\s\S]*?)(FunctionEnd)/g,instrumentBody);
+  const fixed=tracePath.replaceAll('$',()=> '$$');
+  const shortcutFile=fixed.replace(/candidate-failure\.jsonl$/,'candidate-shortcuts.jsonl');
+  const writer=String.raw`Function ${'${prefix}'}NearlyQaRecordFailure
+  Push $R8
+  Push $R9
+  Push $R7
+  StrCpy $R9 0
+  IfErrors 0 +2
+    StrCpy $R9 1
+  ClearErrors
+${shortcutStages.map(name=>`  StrCmp $NearlyQaFailureStage "${name}" nearly_qa_trace_shortcut`).join('\n')}
+  IfFileExists "${fixed}" nearly_qa_trace_done
+  FileOpen $R8 "${fixed}" w
+  IfErrors nearly_qa_trace_done
+  Goto nearly_qa_trace_write
+  nearly_qa_trace_shortcut:
+  FileOpen $R8 "${shortcutFile}" a
+  IfErrors nearly_qa_trace_done
+  FileSeek $R8 0 END $R7
+  IfErrors nearly_qa_trace_close
+  IntCmp $R7 2048 nearly_qa_trace_close nearly_qa_trace_write nearly_qa_trace_close
+  nearly_qa_trace_write:
+  FileWrite $R8 '{"stage":"$NearlyQaFailureStage","result":$NearlyQaFailureResult,"code":$NearlyQaFailureCode}$\r$\n'
+  nearly_qa_trace_close:
+  FileClose $R8
+  nearly_qa_trace_done:
+  ClearErrors
+  StrCmp $R9 1 0 +2
+    SetErrors
+  Pop $R7
+  Pop $R9
+  Pop $R8
+FunctionEnd`;
+  text=text.replace('!macro NearlyIoFunctions prefix\n',()=>block('Var NearlyQaFailureStage\nVar NearlyQaFailureCode\nVar NearlyQaFailureResult')+'!macro NearlyIoFunctions prefix\n'+block(writer));
+  text=text.replace('Function ${prefix}NearlyIoFail\n','Function ${prefix}NearlyIoFail\n'+block('  Call ${prefix}NearlyQaRecordFailure'));
+  text=text.replace('  Call NearlyExtractApplication\n',stage('extract')+'  Call NearlyExtractApplication\n');
+  text=text.replace('  WriteUninstaller "$PLUGINSDIR\\uninstall.exe"\n',stage('uninstaller-generate')+'  WriteUninstaller "$PLUGINSDIR\\uninstall.exe"\n');
+  const callWriter=String.raw`  !ifdef __UNINSTALL__
+    Call un.NearlyQaRecordFailure
+  !else
+    Call NearlyQaRecordFailure
+  !endif`;
+  text=text.replace(/(!macro NearlyIsShortcutTarget shortcut\n)([\s\S]*?)(!macroend)/,(_match,head,body,tail)=>{
+    body=body.replace('  StrCpy $3 0\n','  StrCpy $3 0\n'+stage('shortcut-create'));
+    body=body.replace('    ${IUnknown::QueryInterface}',stage('shortcut-query')+'    ${IUnknown::QueryInterface}');
+    for(const [api,name]of [['IPersistFile::Load','shortcut-load'],['IShellLink::GetPath','shortcut-getpath']]){
+      body=body.replace(new RegExp('^( +\\$\\{'+api+'\\}[^\\n]+\\n)','m'),line=>line+stage(name)+block('  StrCpy $NearlyQaFailureResult $3'));
+    }
+    body=body.replace('  Push $3\n',block('  ${If} $3 != 1\n'+callWriter+'\n  ${EndIf}')+'  Push $3\n');
+    return head+body+tail;
+  });
+  text=text.replace('        Delete "${path}"\n',block('        StrCpy $NearlyQaFailureCode 0\n        IfErrors 0 +2\n          StrCpy $NearlyQaFailureCode 1')+'        Delete "${path}"\n'+block('        ${If} ${Errors}\n          StrCpy $NearlyQaFailureStage "shortcut-delete-error"\n          StrCpy $NearlyQaFailureResult 1\n'+callWriter+'\n        ${EndIf}'));
+  for(const [name,message,indent]of [['registration','per-user registration','    '],['shortcuts','shortcut preferences','      ']]){
+    const anchor=`${indent}SetErrorLevel 6\n${indent}Abort "Setup could not finish ${message}.`;
+    if(!text.includes(anchor))fail('Candidate terminal failure branch changed');
+    text=text.replace(anchor,stage(name)+block('    Call NearlyQaRecordFailure')+anchor);
+  }
+  return text;
 }
 
 async function buildFixture(p,version,signer,token,baseEnv){
   const paths=fixtureBuildPaths(p,version),dir=paths.sourceDir;
   await fs.cp(root,dir,{recursive:true,errorOnExist:true,force:false,filter:src=>copyFixturePath(path.relative(root,src))});
   const template=path.join(dir,'src-tauri/windows/installer.nsi');
-  await fs.writeFile(template,instrumentCandidatePolicyDiagnostics(await fs.readFile(template,'utf8')));
+  await fs.writeFile(template,instrumentCandidatePolicyDiagnostics(await fs.readFile(template,'utf8'),path.win32.join(p.runRoot,'candidate-failure.jsonl')));
   await fs.writeFile(path.join(dir,'version.json'),JSON.stringify({version})+'\n');
   const env={...baseEnv,NEARLY_QA_BUILD_TOKEN:token,NEARLY_QA_CONTROLLER_SHA:p.controllerSha,NEARLY_QA_PUBLIC_KEY:signer.publicRaw.toString('base64'),CARGO_TARGET_DIR:paths.targetDir};
   await execute(process.execPath,['scripts/sync-version.mjs'],{cwd:dir,env});
@@ -430,6 +519,13 @@ export async function run(e=process.env){
     if(e.GITHUB_STEP_SUMMARY)await fs.appendFile(e.GITHUB_STEP_SUMMARY,formatSummary(scenario,destination));
     await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:true,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
   }catch(error){
+    try{
+      const record=decodeCandidateFailureTrace(await regular(path.join(p.runRoot,'candidate-failure.jsonl'),8192));
+      console.log('Original candidate installer failure: '+JSON.stringify(record));
+    }catch{console.log('Original candidate installer failure trace absent or invalid; original failure retained.');}
+    try{
+      for(const record of decodeCandidateShortcutTrace(await regular(path.join(p.runRoot,'candidate-shortcuts.jsonl'),8192)))console.log('Candidate shortcut observation: '+JSON.stringify(record));
+    }catch{console.log('Candidate shortcut observations absent or invalid; original failure retained.');}
     for(const record of await collectQaTraces(p.runRoot))console.log('QA trace: '+JSON.stringify(record));
     await fs.writeFile(path.join(p.runRoot,'qa-summary.json'),canonical({schemaVersion:2,controllerSha:c.controllerSha,scenario,destinationKind:destination,passed:false,cases:results.map(({case:caseName,passed})=>({case:caseName,passed}))}),{flag:'wx'});
     await fs.writeFile(path.join(p.runRoot,'results.json'),canonical({schemaVersion:2,scenario,destination,passed:false,cases:results,error:String(error.message).slice(0,2048)}),{flag:'wx'});throw error;

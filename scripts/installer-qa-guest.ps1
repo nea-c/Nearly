@@ -256,6 +256,8 @@ if ($Action -eq 'guard-probe') {
   if ($LASTEXITCODE -ne 0) { throw 'Generated same-handle payload qualification failed' }
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\whole-native.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated whole-tree deletion qualification failed' }
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\qa-diagnostics-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated diagnostic and shortcut qualification failed' }
   if ($env:QA_DESTINATION -ceq 'drive') {
     . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
     Write-Host ('Read-only selected drive root: '+(ConvertTo-Json -InputObject (Get-NearlyDriveRootDiagnosis) -Depth 6 -Compress))
@@ -432,7 +434,7 @@ function New-SharedEmptyDriveFixture {
   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
   $acl.SetOwner($sid)
   $acl.SetSecurityDescriptorSddlForm("O:$sid"+'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)')
-  Set-Acl -LiteralPath $install -AclObject $acl
+  Set-FixtureAccess $acl
 }
 function New-FixtureAccessRestore([Security.AccessControl.DirectorySecurity]$Original) {
   # A fresh object marks only DACL information as modified. Reusing Get-Acl's
@@ -441,6 +443,13 @@ function New-FixtureAccessRestore([Security.AccessControl.DirectorySecurity]$Ori
   $copy=[Security.AccessControl.DirectorySecurity]::new()
   $copy.SetSecurityDescriptorSddlForm($Original.GetSecurityDescriptorSddlForm($access),$access)
   return $copy
+}
+function Set-FixtureAccess([Security.AccessControl.DirectorySecurity]$Descriptor) {
+  $expectedDrive=if ($env:QA_DESTINATION -ceq 'drive-c') { $destinations['drive-c'] } else { $destinations.drive }
+  if ($Action -cne 'drive' -or $install -cne $expectedDrive -or @(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Exact empty generated drive fixture required' }
+  # Set-Acl's provider re-copies all sections. Persist only the DACL marked by
+  # the fresh descriptor; no owner, audit, token privilege or parent ACL change.
+  [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($install),(New-FixtureAccessRestore $Descriptor))
 }
 function Test-OwnedDriveWriteDenial {
   # Only a disposable, exact guest fixture may receive this negative-test ACL.
@@ -453,7 +462,8 @@ function Test-OwnedDriveWriteDenial {
   $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::CreateFiles,[Security.AccessControl.AccessControlType]::Deny)
   $denied.AddAccessRule($rule)
   try {
-    Set-Acl -LiteralPath $install -AclObject $denied
+    Write-Host "Fixture DACL API: PowerShell=$($PSVersionTable.PSVersion) .NET=$([Environment]::Version)"
+    Set-FixtureAccess $denied
     $failed=$false
     try { [IO.File]::WriteAllBytes((Join-Path $install 'write-denial-check.tmp'),[byte[]]@(1)) } catch [UnauthorizedAccessException] { $failed=$true }
     if (!$failed) { throw 'Fixture did not deny actual file creation' }
@@ -463,7 +473,7 @@ function Test-OwnedDriveWriteDenial {
     foreach ($target in @($exe,$uninstaller,$registration,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Write refusal changed installed state' } }
     if (@(Get-ChildItem -LiteralPath $install -Force).Count -ne 0) { throw 'Write refusal left unexpected files' }
   } finally {
-    Set-Acl -LiteralPath $install -AclObject (New-FixtureAccessRestore $original)
+    Set-FixtureAccess $original
   }
   if ((Get-Acl -LiteralPath $install).Sddl -cne $original.Sddl) { throw 'Generated fixture ACL was not restored' }
 }

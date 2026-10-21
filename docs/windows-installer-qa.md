@@ -1,6 +1,48 @@
 # Isolated Windows installer qualification
 
-## Unqualified ordinary-permissions candidate
+## Current ordinary-permissions and whole-folder candidate
+
+Product source `e736ed4c6813718a9517e6b59a29dc52a2bf6866` adds the explicit
+OFF-by-default whole-folder uninstall option. QA-only controller
+`b880ce4e2d1110844cdd279f9af3b50dd5719b2a` ran in
+[39539697101](https://github.com/nea-c/Nearly/actions/runs/39539697101).
+The two custom-destination scenarios and default health-failure recovery passed,
+including actual Keep/Decline/Remove UI and signed ephemeral update/recovery.
+The default-success case retained an owned shortcut after uninstall. Drive-success
+stopped restoring the generated negative-test DACL; drive-health-failure stopped
+with exit 6 during registered reinstall. These failures are unresolved; the whole
+candidate is not qualified for real-PC installation or release.
+
+Historical production r3.1 regression passed separately in the same run, using
+the exact original payload from public Release 417869306 at commit
+`0dd697f2d832ec9fd07e9278559e18819b65bd3a`. Installer SHA256 is
+`fc65ec21d586227172f2d8f99ce055e2b2c394db675c59444f47129cae5551dc`.
+Asset IDs, sizes, digests, original manifest hash and public signature are checked
+before execution. This replaces only the expired Actions ZIP transport; it does
+not substitute another build or create a new production signature. Four silent
+shortcut-choice combinations passed install, reinstall, uninstall and generated
+settings preservation. Its 320-byte evidence artifact is summary JSON, not UI
+screenshots or evidence for the new whole-folder feature.
+
+All seven guests passed orchestration/UI policy 79/79 and signing contracts 11/11.
+NSIS compile/static checks passed 60/65 with five gated skips, followed by actual
+Temp, nine-case payload I/O and eight-case whole-tree fixtures separately without
+skips. Whole-tree cases include links, read-only/locked files, root replacement,
+late additions and interruption, retaining outside sentinels.
+
+Follow-up QA changes retain product guards and API access flags, record bounded
+fixed-stage/numeric observations at the original failure, and persist only a
+generated fixture's DACL through .NET rather than the PowerShell provider's
+all-section copy. The new native diagnostic/shortcut fixtures run only in an
+exactly authorized hosted controller. Local tests do not count their skips as
+passes. No ordinary-PC installer is executed; existing data and ACLs remain intact.
+
+The real non-QA unsigned candidate also compiled in a separate output directory.
+That build is not evidence of successful installation. Japanese whole-option
+runtime UI, a physical E drive, arbitrary power loss and long-duration behavior
+remain unqualified. Earlier historical runs below qualify only their exact sources.
+
+## Earlier local constraints and prepared coverage (historical)
 
 The current local changes replace private-all-ancestor ACL admission with normal
 non-elevated OS access. They have **not** passed hosted lifecycle qualification.

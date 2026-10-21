@@ -11,8 +11,10 @@ target requires CREATE_NEW; collisions never fall back to overwriting. NSIS
 extracts embedded bytes and generates its uninstaller only in PLUGINSDIR.
 The registered uninstaller is deleted through its byte-proven DELETE handle;
 the main payload is also inspected and deleted through one held handle.
-Independent source review found the original race closed; real NSIS/System ABI
-qualification is still pending. Model tests are not native runtime evidence.
+Independent source review found the original race closed. Hosted native fixtures
+have exercised the real NSIS/System function bodies; whole lifecycle results
+remain conditional on the exact runs in `docs/windows-installer-qa.md`. Model
+tests alone are not native runtime evidence.
 
 Manual install is not an atomic two-file transaction: after one existing payload
 is written, a later I/O failure can leave that owned payload changed. Failure
@@ -131,11 +133,22 @@ Microsoft separately. It never downloads or executes a runtime installer.
 
 The Add/Remove Programs entry points to the automatically generated
 `<registered-install-directory>\uninstall.exe`. The uninstaller validates its per-user
-registered location and owned registry marker, refuses a running app, removes only the known
-main EXE, its own uninstaller, target-matching shortcuts, and its own uninstall
-registration. Directory removal is **nonrecursive**. EXE-adjacent `settings.json`,
-backups, user files, and WebView data are never packaged over or deleted. Shortcut
-preferences remain for later reinstall. No delete-user-data checkbox exists.
+registered location and owned registry marker and refuses a running app. By default it
+removes only the known main EXE, its own uninstaller, target-matching shortcuts and
+uninstall registration. Default directory removal is **nonrecursive**; settings,
+backups, user files and WebView data remain. Shortcut preferences remain for reinstall.
+
+The interactive whole-folder checkbox defaults OFF. ON additionally requires a
+No-default confirmation with the actual registered path and an all-contents warning.
+It deletes that folder and its contents, including settings and unknown files inside.
+Silent uninstall has no purge switch. Protected roots/ancestors, registration and
+recorded volume/FileID checks, retained ancestor/root identities, regular single-link
+handles and bounded recursive traversal constrain deletion to the selected object.
+Reparse points, hardlinks and unknown states fail closed. Registration removal follows
+successful root deletion. Read-only/locked files, late additions or interruption can
+leave partial results; nonzero failure is reported without an atomic rollback promise.
+The real production function bodies are exercised by the gated disposable
+`whole-native.test.mjs` fixtures. See `docs/windows-installer-qa.md` for actual results.
 
 The uninstaller also compares the actual executing module against the existing
 registered `uninstall.exe`, using complete bounded reads from regular single-link

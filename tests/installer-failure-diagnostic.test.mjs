@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import fs from 'node:fs/promises';
-import {instrumentCandidatePolicyDiagnostics} from '../scripts/installer-qa.mjs';
+import {instrumentCandidatePolicyDiagnostics,decodeCandidateFailureTrace} from '../scripts/installer-qa.mjs';
 
 test('candidate QA uses the exact standard installer without private-helper instrumentation',async()=>{
  const original=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
@@ -17,6 +17,38 @@ test('ordinary nonempty refusal remains the product refusal without extra QA mod
  assert.doesNotMatch(observed,/NEARLY_QA_POLICY_|--nearly-install-(?:check|prepare)/);
  const body=observed.match(/Function NearlyRequireFreshContents\r?\n([\s\S]*?)FunctionEnd/)[1];
  assert.match(body,/SetErrorLevel 7\s+IfSilent \+2\s+MessageBox MB_ICONSTOP\|MB_OK "\$\(NearlyExistingFiles\)"\s+Abort "\$\(NearlyExistingFiles\)"/);
+});
+
+test('candidate failure tracing preserves original decisions and API access flags without rerunning setup',async()=>{
+ const original=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
+ const target=String.raw`D:\a\_temp\nearly-installer-qa-123-1\candidate-failure.jsonl`;
+ const observed=instrumentCandidatePolicyDiagnostics(original,target);
+ assert.notEqual(observed,original);
+ assert.match(observed,/Function \$\{prefix\}NearlyQaRecordFailure/);
+ assert.match(observed,/FileOpen \$R8 "D:\\a\\_temp\\nearly-installer-qa-123-1\\candidate-failure\.jsonl" w/);
+ assert.match(observed,/IfFileExists .* nearly_qa_trace_done/);
+ assert.match(observed,/IfErrors 0 \+2\n    StrCpy \$R9 1\n  ClearErrors/);
+ assert.match(observed,/nearly_qa_trace_done:\n  ClearErrors\n  StrCmp \$R9 1 0 \+2\n    SetErrors/);
+ assert.ok(instrumentCandidatePolicyDiagnostics(original,target.replace('D:\\a\\','D:\\$TEMP\\')).includes('FileOpen $R8 "D:\\$$TEMP\\'));
+ const repeated=target.replace('D:\\a\\','D:\\candidate-failure.jsonl\\');
+ assert.ok(instrumentCandidatePolicyDiagnostics(original,repeated).includes(`FileOpen $R8 "${repeated.replace(/candidate-failure\.jsonl$/,'candidate-shortcuts.jsonl')}" a`));
+ for(const stage of ['registration','shortcuts','extract','uninstaller-generate'])assert.ok(observed.includes(`"${stage}"`));
+ // Remove inserted diagnostics and undo only the explicit last-error capture.
+ // The remaining original instructions, including handles/flags/guards/abort,
+ // must be byte-identical after newline normalization.
+ const restored=observed.replace(/; NEARLY_QA_TRACE_BEGIN\n[\s\S]*?; NEARLY_QA_TRACE_END\n/g,'')
+  .replace(/ \?e'\n; NEARLY_QA_CAPTURE_BEGIN\n[\s\S]*?; NEARLY_QA_CAPTURE_END\n/g,"'\n");
+ assert.equal(restored,original.replaceAll('\r\n','\n'));
+ for(const bad of ['D:\\outside.jsonl',target.replace('123-1','0-1'),target.replace('candidate-failure','other'),target+'\n'])assert.throws(()=>instrumentCandidatePolicyDiagnostics(original,bad));
+});
+
+test('candidate trace decoding emits only a fixed stage and bounded numeric observations',()=>{
+ const row={stage:'nearlyioopendestination-createfilew',result:-1,code:32};
+ const encode=value=>Buffer.from(JSON.stringify(value)+'\r\n');
+ assert.deepEqual(decodeCandidateFailureTrace(encode(row)),row);
+ for(const bad of [{...row,stage:'private-user'}, {...row,path:'D:\\private'}, {...row,code:-1}, {...row,code:4294967296}, {...row,result:'secret'}])assert.throws(()=>decodeCandidateFailureTrace(encode(bad)));
+ assert.throws(()=>decodeCandidateFailureTrace(Buffer.alloc(8193)));
+ assert.throws(()=>decodeCandidateFailureTrace(Buffer.concat([encode(row),encode(row)])));
 });
 
 test('candidate UI diagnostic classifier emits only anchored fixed stage or bounded exit code',{skip:process.platform!=='win32'},()=>{

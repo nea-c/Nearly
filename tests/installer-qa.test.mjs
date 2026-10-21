@@ -25,6 +25,14 @@ if ($all.Contains('O:') -or $all.Contains('G:') -or $all.Contains('S:')) { throw
  const r=spawnSync('pwsh',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,QA_TEST_SOURCE:source},encoding:'utf8',windowsHide:true,timeout:15000});
  assert.equal(r.status,0,r.stderr||r.stdout);
 });
+test('fixture DACL application uses modified-section persistence instead of provider all-section copying',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const helper=source.match(/function Set-FixtureAccess\([\s\S]*?\n}/)[0];
+ assert.match(helper,/\$Action -cne 'drive'.*\$install -cne \$expectedDrive/);
+ assert.match(helper,/Get-ChildItem -LiteralPath \$install -Force\)\.Count -ne 0/);
+ assert.match(helper,/\[IO\.FileSystemAclExtensions\]::SetAccessControl\(\[IO\.DirectoryInfo\]::new\(\$install\),\(New-FixtureAccessRestore \$Descriptor\)\)/);
+ assert.doesNotMatch(source,/Set-Acl -LiteralPath \$install -AclObject/);
+});
 test('pinned release asset transport bounds bytes and never forwards authentication to object storage',async()=>{
  assert.equal(typeof qa.readProductionAsset,'function');
  const asset=qa.PRODUCTION_RELEASE.assets[2],bytes=await fs.readFile(new URL('./fixtures/installer-qa-r31.sig',import.meta.url));
@@ -98,7 +106,7 @@ if(!$fn){throw 'Fixture function missing'}
 $script:created=@();$script:protected=@();$script:exists=$false
 function Test-Path {param([string]$LiteralPath) return $script:exists}
 function New-Item {param($ItemType,$Path) $script:created+=@($Path)}
-function Set-Acl {param($LiteralPath,$AclObject) $script:protected+=@($LiteralPath);if($AclObject.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Wrong fixture owner'}}
+function Set-FixtureAccess {param($Descriptor) $script:protected+=@($install);if($Descriptor.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Wrong fixture owner'}}
 $Action='drive';$destinations=@{drive='D:Nearly QA generated'};$install=$destinations.drive
 New-SharedEmptyDriveFixture
 if($script:created.Count -ne 1 -or $script:protected.Count -ne 1 -or $script:protected[0] -cne $install -or $script:created[0] -cne $install){throw 'Permission scope escaped app leaf'}
