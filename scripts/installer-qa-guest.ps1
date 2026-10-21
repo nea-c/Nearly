@@ -433,16 +433,21 @@ switch ($Action) {
     if ($UiMode -eq 'Cancel') {
       foreach ($target in @($install,$exe,$uninstaller,$registration,$preferences,$startShortcut,$desktopShortcut)) { if (Test-Path -LiteralPath $target) { throw 'Cancelled setup mutated installed state' } }
     } else {
+      Write-Host 'Candidate lifecycle: stage=first-install-verified'
       Seed-Settings
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       # Reinstall the now-owned candidate without changing adjacent settings or
       # the choices selected through the real UI.
       Invoke-Bounded $Setup @('/S')
+      Write-Host 'Candidate lifecycle: stage=registered-reinstall-completed'
       Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
       Uninstall-Owned $true
+      Write-Host 'Candidate lifecycle: stage=first-uninstall-completed'
       if ($env:QA_DESTINATION -cin @('default','custom','drive','drive-c')) {
         # Actual unregistered reinstall with only known retained data at any root.
-        Invoke-Bounded $Setup @('/S')
+        # Registration no longer carries a custom root. /D must be LAST.
+        Invoke-Bounded $Setup @('/S',('/D='+$install))
+        Write-Host 'Candidate lifecycle: stage=unregistered-reinstall-completed'
         Assert-Payload $ExpectedPayload '1.9.0'; Assert-Settings $true; Assert-Shortcuts $Start $Desktop
         Uninstall-Owned $true
       }

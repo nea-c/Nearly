@@ -6,6 +6,12 @@ import {fileURLToPath} from 'node:url';
 import {unpackSettings} from '../scripts/storage-fixture.mjs';
 const qa = await import('../scripts/installer-qa.mjs').catch(() => ({}));
 const sha='a'.repeat(40);
+test('unregistered retained-data reinstall explicitly restores the selected destination as the final NSIS argument',async()=>{
+ const source=await fs.readFile(new URL('../scripts/installer-qa-guest.ps1',import.meta.url),'utf8');
+ const branch=source.slice(source.indexOf('# Actual unregistered reinstall'),source.indexOf('Remove-GeneratedSettings',source.indexOf('# Actual unregistered reinstall')));
+ assert.match(branch,/Invoke-Bounded \$Setup @\('\/S',\('\/D='\+\$install\)\)/);
+ assert.match(branch,/Assert-Payload \$ExpectedPayload/);
+});
 const env=()=>({GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted',RUNNER_TEMP:'D:\\a\\_temp',LOCALAPPDATA:['C:','Users','runneradmin','AppData','Local'].join(String.fromCharCode(92)),QA_CONTROLLER_SHA:sha,QA_CONFIRMATION:`installer-qa ${sha}`});
 test('dedicated private-directory branch runs only exact manually confirmed hosted guest',()=>{
  const e={...env(),GITHUB_REF:'refs/heads/codex/private-install-directory'};
