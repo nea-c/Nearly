@@ -5,9 +5,10 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {instrumentCandidatePolicyDiagnostics} from '../../scripts/installer-qa.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
-const source=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8').replaceAll('\r\n','\n');
+const productSource=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8').replaceAll('\r\n','\n');
 const enabled=process.platform==='win32'&&process.env.NEARLY_UNINSTALL_COMPLETION_FIXTURE==='1';
 const q=s=>s.replaceAll('$',()=> '$$');
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -17,24 +18,32 @@ const hash=b=>createHash('sha256').update(b).digest('hex');
 test('generated NSIS UI reaches its real progress maximum only on success and reports owned shortcut deletion failures',{skip:!enabled},()=>{
   const parent=path.join(root,'test-results');fs.mkdirSync(parent,{recursive:true});
   const run=fs.mkdtempSync(path.join(parent,'uninstall-completion-'));
+  const traced=process.env.NEARLY_COMPLETION_TRACE_FIXTURE==='1';
+  const traceRoot=path.join(run,'nearly-installer-qa-123-1');if(traced)fs.mkdirSync(traceRoot);
+  const source=traced?instrumentCandidatePolicyDiagnostics(productSource,path.join(traceRoot,'candidate-failure.jsonl')):productSource;
+  const writer=traced?source.match(/Function \$\{prefix\}NearlyQaRecordFailure\n[\s\S]*?FunctionEnd/)[0].replaceAll('${prefix}',''):'';
   const nsis=process.env.NEARLY_NSIS_ROOT??path.join(process.env.LOCALAPPDATA,'tauri','NSIS');
   const completion=source.slice(source.indexOf('  nearly_uninstall_success:\n'),source.indexOf('\nSectionEnd',source.indexOf('  nearly_uninstall_success:\n'))).replaceAll('un.Nearly','Nearly');
   assert.ok(completion.includes('SetErrorLevel 0'));
   const classify=source.match(/!macro NearlyIsShortcutTarget shortcut\n[\s\S]*?!macroend/)[0];
-  const apply=source.match(/!macro NearlyApplyShortcut path enabled\n[\s\S]*?!macroend/)[0];
   const start=source.indexOf('  nearly_uninstall_remove_registration:\n');
   const finish=source.indexOf('  DeleteRegKey HKCU "${UNINSTKEY}"',start);
   const shortcutSection=source.slice(start,finish).replaceAll('$SMPROGRAMS','$FixtureMenu').replaceAll('$DESKTOP','$FixtureDesktop');
   assert.ok(shortcutSection.includes('NearlyApplyShortcut'));
   const cases=[];
-  for(const name of ['progress-success','owned-shortcuts','owned-shortcuts-missing-target','missing-shortcuts','foreign-shortcuts','locked-start','locked-desktop','payload-failure','whole-failure']){
+  for(const name of ['progress-success','owned-shortcuts','owned-shortcuts-missing-target','missing-shortcuts','foreign-shortcuts','locked-start','locked-desktop','payload-failure','whole-failure','incoming-error']){
+    // Inject before instrumentation so its pre-Delete snapshot must preserve true.
+    // Delete itself succeeds; NSIS must retain the pre-existing error flag.
+    const raw=name==='incoming-error'?productSource.replace('        Delete "${path}"\n','        SetErrors\n        Delete "${path}"\n'):productSource;
+    const caseSource=traced?instrumentCandidatePolicyDiagnostics(raw,path.join(traceRoot,'candidate-failure.jsonl')):raw;
+    const apply=caseSource.match(/!macro NearlyApplyShortcut path enabled\n[\s\S]*?!macroend/)[0];
     const dir=path.join(run,name);fs.mkdirSync(dir);
     const app=path.join(dir,'app'),menu=path.join(dir,'menu'),desktop=path.join(dir,'desktop');
     for(const p of [app,menu,path.join(menu,'Nearly'),desktop])fs.mkdirSync(p,{recursive:true});
     const sentinel=path.join(dir,'outside-sentinel.bin');fs.writeFileSync(sentinel,'Generated external sentinel, must remain.');
     fs.writeFileSync(path.join(app,'Nearly.exe'),'Generated non-executable target, never launch.');
     const exe=path.join(dir,'ONLY-GENERATED-COMPLETION-FIXTURE.exe');
-    const shortcut=name.includes('shortcuts')||name.startsWith('locked-');
+    const shortcut=name.includes('shortcuts')||name.startsWith('locked-')||name==='incoming-error';
     const create=name!=='missing-shortcuts'&&shortcut;
     const target=name==='foreign-shortcuts'?sentinel:path.join(app,'Nearly.exe');
     const lock=name==='locked-start'?path.join(menu,'Nearly','Nearly.lnk'):name==='locked-desktop'?path.join(desktop,'Nearly.lnk'):null;
@@ -59,6 +68,8 @@ LangString NearlyShortcutRemovalError 1033 "Generated owned shortcut deletion fa
 Var LockHandle
 Var FixtureMenu
 Var FixtureDesktop
+${traced?'Var NearlyQaFailureStage\nVar NearlyQaFailureCode\nVar NearlyQaFailureResult':''}
+${writer}
 ${classify}
 ${apply}
 Function .onInit
@@ -82,7 +93,7 @@ SectionEnd
     const file=path.join(dir,'fixture.nsi');fs.writeFileSync(file,script);
     const compile=spawnSync(path.join(nsis,'Bin','makensis.exe'),['/V2','/INPUTCHARSET','UTF8',file],{encoding:'utf8',windowsHide:true,env:{...process.env,NSISDIR:nsis},timeout:30000});
     assert.equal(compile.status,0,compile.stdout+compile.stderr);
-    cases.push({name,exe,dir,expectedFailure:name.startsWith('locked-')||name.endsWith('-failure')});
+    cases.push({name,exe,dir,expectedFailure:name.startsWith('locked-')||name.endsWith('-failure')||name==='incoming-error'});
   }
   const inventory=path.join(run,'cases.json');fs.writeFileSync(inventory,JSON.stringify(cases));
   const observer=path.join(run,'ONLY-GENERATED-UI-OBSERVER.exe');
@@ -104,7 +115,8 @@ SectionEnd
     if(c.name==='foreign-shortcuts'||c.name==='locked-start')assert.equal(hash(fs.readFileSync(path.join(c.dir,'menu/Nearly/Nearly.lnk'))),hash(fs.readFileSync(path.join(c.dir,'menu-before.lnk'))));
     if(c.name==='foreign-shortcuts'||c.name==='locked-desktop')assert.equal(hash(fs.readFileSync(path.join(c.dir,'desktop/Nearly.lnk'))),hash(fs.readFileSync(path.join(c.dir,'desktop-before.lnk'))));
     if(['owned-shortcuts','owned-shortcuts-missing-target','missing-shortcuts'].includes(c.name))for(const link of ['desktop/Nearly.lnk','menu/Nearly/Nearly.lnk'])assert.equal(fs.existsSync(path.join(c.dir,link)),false);
+    if(c.name==='incoming-error')assert.equal(fs.existsSync(path.join(c.dir,'menu/Nearly/Nearly.lnk')),false,'Delete succeeds while the incoming error flag remains set');
   }
-  console.log(JSON.stringify({run,observed}));
+  console.log(JSON.stringify({run,variant:traced?'traced':'product',observed}));
   assert.deepEqual(failures,[],'Successful completion must reach range maximum; failures must remain aborted/nonzero before maximum');
 });

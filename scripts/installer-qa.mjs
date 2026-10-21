@@ -400,7 +400,9 @@ FunctionEnd`;
     body=body.replace('  Push $3\n',block('  ${If} $3 != 1\n'+callWriter+'\n  ${EndIf}')+'  Push $3\n');
     return head+body+tail;
   });
-  text=text.replace('        Delete "${path}"\n',block('        StrCpy $NearlyQaFailureCode 0\n        IfErrors 0 +2\n          StrCpy $NearlyQaFailureCode 1')+'        Delete "${path}"\n'+block('        ${If} ${Errors}\n          StrCpy $NearlyQaFailureStage "shortcut-delete-error"\n          StrCpy $NearlyQaFailureResult 1\n'+callWriter+'\n        ${EndIf}'));
+  // IfErrors (including LogicLib ${Errors}) clears the flag it reads. Restore
+  // it before Delete and before the writer so tracing cannot hide a failure.
+  text=text.replace('        Delete "${path}"\n',block('        StrCpy $NearlyQaFailureCode 0\n        IfErrors 0 +2\n          StrCpy $NearlyQaFailureCode 1\n        StrCmp $NearlyQaFailureCode 1 0 +2\n          SetErrors')+'        Delete "${path}"\n'+block('        ${If} ${Errors}\n          SetErrors\n          StrCpy $NearlyQaFailureStage "shortcut-delete-error"\n          StrCpy $NearlyQaFailureResult 1\n'+callWriter+'\n        ${EndIf}'));
   for(const [name,message,indent]of [['registration','per-user registration','    '],['shortcuts','shortcut preferences','      ']]){
     const anchor=`${indent}SetErrorLevel 6\n${indent}Abort "Setup could not finish ${message}.`;
     if(!text.includes(anchor))fail('Candidate terminal failure branch changed');
