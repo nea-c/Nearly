@@ -1033,6 +1033,8 @@ UninstPage custom un.NearlyRemovePage un.NearlyRemovePageLeave
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "Japanese"
 !insertmacro MUI_RESERVEFILE_LANGDLL
+LangString NearlyShortcutRemovalError ${LANG_ENGLISH} "An owned Nearly shortcut could not be removed. Removal is incomplete; the installation registration was kept."
+LangString NearlyShortcutRemovalError ${LANG_JAPANESE} "Nearly のショートカットを削除できませんでした。削除は完了していません。インストール登録は保持されています。"
 LangString NearlyShortcutTitle ${LANG_ENGLISH} "Shortcuts"
 LangString NearlyRemoveTitle ${LANG_ENGLISH} "Remove Nearly"
 LangString NearlyRemoveTitle ${LANG_JAPANESE} "Nearly の削除"
@@ -2109,8 +2111,12 @@ Section Uninstall
   ; Complete the disposition on the exact byte-proven registered object.
   Call un.NearlyImageCleanup
   nearly_uninstall_remove_registration:
+  ClearErrors
   !insertmacro NearlyApplyShortcut "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk" 0
+  IfErrors nearly_uninstall_shortcut_bad
+  ClearErrors
   !insertmacro NearlyApplyShortcut "$DESKTOP\${PRODUCTNAME}.lnk" 0
+  IfErrors nearly_uninstall_shortcut_bad
   RMDir "$SMPROGRAMS\${PRODUCTNAME}"
   ClearErrors
   DeleteRegKey HKCU "${UNINSTKEY}"
@@ -2122,7 +2128,11 @@ Section Uninstall
   RMDir "$INSTDIR"
   nearly_uninstall_success:
   SetErrorLevel 0
-  Return
+  ; Let NSIS account for the full section only on the successful path.
+  Goto nearly_uninstall_done
+  nearly_uninstall_shortcut_bad:
+  SetErrorLevel 9
+  Abort "$(NearlyShortcutRemovalError)"
   nearly_uninstall_whole_bad:
   Call un.NearlyWholeFail
   nearly_uninstall_registration_bad:
@@ -2132,4 +2142,5 @@ Section Uninstall
   Abort
   nearly_uninstall_io_bad:
   Call un.NearlyIoFail
+  nearly_uninstall_done:
 SectionEnd
