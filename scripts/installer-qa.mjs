@@ -339,9 +339,12 @@ export function instrumentCandidatePolicyDiagnostics(template,tracePath){
   const instrumentBody=(_match,head,body,tail)=>{
     const name=head.trim().slice('Function '.length).replace('${prefix}','').toLowerCase();
     if(!failureFunctions.includes(name))return head+body+tail;
-    body=body.replace(/^( +)System::Call 'kernel32::([A-Za-z]+)\(([^\n]*)\) ([ip])\.r0'\n/gm,(line,indent,api)=>{
+    body=body.replace(/^( +)System::Call 'kernel32::([A-Za-z]+)\(([^\n]*)\) ([ip])\.r0( \?e)?'\n/gm,(line,indent,api,_args,_type,nativeError)=>{
       if(!failureApis.includes(api))return line;
-      return stage(`${name}-${api.toLowerCase()}`)+line.slice(0,-2)+" ?e'\n"+`; NEARLY_QA_CAPTURE_BEGIN\n${indent}Pop $NearlyQaFailureCode\n${indent}StrCpy $NearlyQaFailureResult $0\n; NEARLY_QA_CAPTURE_END\n`;
+      const marker=nativeError?'NEARLY_QA_NATIVE_CAPTURE':'NEARLY_QA_CAPTURE';
+      // Native ?e already owns one stack result. Observe then restore it for
+      // the product's original Pop; diagnostics never consume its error value.
+      return stage(`${name}-${api.toLowerCase()}`)+(nativeError?line:line.slice(0,-2)+" ?e'\n")+`; ${marker}_BEGIN\n${indent}Pop $NearlyQaFailureCode\n${indent}StrCpy $NearlyQaFailureResult $0\n`+(nativeError?`${indent}Push $NearlyQaFailureCode\n`:'')+`; ${marker}_END\n`;
     });
     return head+stage(name)+body+tail;
   };

@@ -145,3 +145,4 @@ Thumbs.db
 !/scripts/installer-ui-probe-guest.ps1
 !/scripts/installer-probe-codes.mjs
 !/scripts/uninstall-completion-fixture.cs
+!/scripts/payload-sharing-fixture.cs

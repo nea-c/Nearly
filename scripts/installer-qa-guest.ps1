@@ -254,6 +254,10 @@ if ($Action -eq 'guard-probe') {
   if ($LASTEXITCODE -ne 0) { throw 'Read-only temporary namespace qualification failed' }
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\payload-native.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated same-handle payload qualification failed' }
+  $env:NEARLY_PAYLOAD_SHARING_FIXTURE='1'
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\payload-sharing-native.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Generated bounded payload sharing qualification failed' }
+  Remove-Item Env:\NEARLY_PAYLOAD_SHARING_FIXTURE
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\whole-native.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated whole-tree deletion qualification failed' }
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\qa-diagnostics-native.test.mjs')

@@ -37,9 +37,18 @@ test('candidate failure tracing preserves original decisions and API access flag
  // The remaining original instructions, including handles/flags/guards/abort,
  // must be byte-identical after newline normalization.
  const restored=observed.replace(/; NEARLY_QA_TRACE_BEGIN\n[\s\S]*?; NEARLY_QA_TRACE_END\n/g,'')
+  .replace(/; NEARLY_QA_NATIVE_CAPTURE_BEGIN\n[\s\S]*?; NEARLY_QA_NATIVE_CAPTURE_END\n/g,'')
   .replace(/ \?e'\n; NEARLY_QA_CAPTURE_BEGIN\n[\s\S]*?; NEARLY_QA_CAPTURE_END\n/g,"'\n");
  assert.equal(restored,original.replaceAll('\r\n','\n'));
  for(const bad of ['D:\\outside.jsonl',target.replace('123-1','0-1'),target.replace('candidate-failure','other'),target+'\n'])assert.throws(()=>instrumentCandidatePolicyDiagnostics(original,bad));
+});
+
+test('candidate tracing restores native last-error stack values before the product consumes them',async()=>{
+ const original=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
+ const observed=instrumentCandidatePolicyDiagnostics(original,String.raw`D:\a\_temp\nearly-installer-qa-123-1\candidate-failure.jsonl`);
+ const open=observed.match(/Function \$\{prefix\}NearlyIoOpenDestination\n[\s\S]*?FunctionEnd/)[0];
+ assert.match(open,/"nearlyioopendestination-createfilew"/);
+ assert.match(open,/CreateFileW\([^\n]+p\.r0 \?e'\n; NEARLY_QA_NATIVE_CAPTURE_BEGIN\n\s+Pop \$NearlyQaFailureCode\n\s+StrCpy \$NearlyQaFailureResult \$0\n\s+Push \$NearlyQaFailureCode\n; NEARLY_QA_NATIVE_CAPTURE_END\n\s+Pop \$NearlyIoOpenError/);
 });
 
 test('candidate trace decoding emits only a fixed stage and bounded numeric observations',()=>{
