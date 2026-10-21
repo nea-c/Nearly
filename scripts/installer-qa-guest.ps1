@@ -421,7 +421,7 @@ function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][strin
       Click-Owned $main 1
     }
   } else { Click-Owned $main 1 }
-  $completion=@{observed=$false}
+  $completion=@{observed=$false;lastProgress='unobserved'}
   Wait-Condition {
     if ($p.HasExited) { return $true }
     $buttons=@(Owned-Windows $main | Where-Object { [NearlyOwnedUi]::Class($_,$p.Id) -ceq 'Button' -and [NearlyOwnedUi]::GetDlgCtrlID($_) -eq 1 -and [NearlyOwnedUi]::IsWindowEnabled($_) })
@@ -430,7 +430,16 @@ function Invoke-UninstallOptionUi([ValidateSet('Keep','Decline','Remove')][strin
       if ($bars.Count -ne 1) { throw 'Exact owned uninstall progress control required' }
       $position=[NearlyOwnedUi]::Send($bars[0],$p.Id,1032,0,0).ToInt32()
       $maximum=[NearlyOwnedUi]::Send($bars[0],$p.Id,1031,0,0).ToInt32()
-      if ($maximum -le 0 -or $position -ne $maximum) { throw 'Successful uninstall did not reach its progress maximum' }
+      $sample="$position/$maximum"
+      if ($sample -cne $completion.lastProgress) {
+        Write-Host "Uninstall completion sample: mode=$Mode value=$sample"
+        $completion.lastProgress=$sample
+      }
+      if ($maximum -le 0) { throw "Invalid uninstall progress range: mode=$Mode value=$sample" }
+      # A posted navigation command and an enabled Close label alone do not
+      # prove the worker has finished. Keep observing the real progress value;
+      # never close or mark success while it remains below its actual maximum.
+      if ($position -ne $maximum) { return $false }
       $completion.observed=$true
       Write-Host "Uninstall completion progress: mode=$Mode value=$position/$maximum"
       Click-Owned $main 1
