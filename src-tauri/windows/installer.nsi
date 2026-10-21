@@ -123,6 +123,8 @@ Var NearlyIoRemaining
 Var NearlyIoChunk
 Var NearlyIoExpected
 Var NearlyIoDisposition
+Var NearlyIoOpenRetries
+Var NearlyIoOpenError
 Var NearlyImageDeleteMode
 Var NearlyImageAccess
 Var NearlyImageShare
@@ -531,13 +533,25 @@ FunctionEnd
 Function ${prefix}NearlyIoOpenDestination
   StrCpy $NearlyIoDestNew 0
   StrCpy $NearlyIoDisposition 3
-  StrCmp $NearlyIoExpected "" 0 nearly_io_open
+  StrCmp $NearlyIoExpected "" 0 nearly_io_open_prepare
   StrCpy $NearlyIoDisposition 1
+  nearly_io_open_prepare:
+  StrCpy $NearlyIoOpenRetries 20
   nearly_io_open:
   ; GENERIC_WRITE|READ_ATTRIBUTES|DELETE, share NONE, OPEN_REPARSE_POINT.
   ; CREATE_NEW collisions and OPEN_EXISTING misses always fail, never fallback.
-  System::Call 'kernel32::CreateFileW(w "$NearlyPayload", i 0x40010080, i 0, p 0, i $NearlyIoDisposition, i 0x00200000, p 0) p.r0'
-  StrCmp $0 -1 nearly_io_open_bad
+  System::Call 'kernel32::CreateFileW(w "$NearlyPayload", i 0x40010080, i 0, p 0, i $NearlyIoDisposition, i 0x00200000, p 0) p.r0 ?e'
+  Pop $NearlyIoOpenError
+  StrCmp $0 -1 0 nearly_io_open_acquired
+  ; A short-lived reader may deny this exclusive open. Retry only sharing
+  ; violations, with the same flags/disposition/expected identity and guards.
+  ; At most 20 waits (2000ms); all other failures remain immediate refusals.
+  StrCmp $NearlyIoOpenError 32 0 nearly_io_open_bad
+  IntCmp $NearlyIoOpenRetries 0 nearly_io_open_bad nearly_io_open_bad
+  IntOp $NearlyIoOpenRetries $NearlyIoOpenRetries - 1
+  Sleep 100
+  Goto nearly_io_open
+  nearly_io_open_acquired:
   StrCpy $NearlyIoDest $0
   StrCmp $NearlyIoDisposition 1 0 +2
     StrCpy $NearlyIoDestNew 1

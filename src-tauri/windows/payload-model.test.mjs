@@ -2,11 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const text=fs.readFileSync(new URL('./installer.nsi',import.meta.url),'utf8');
-function model(entry,{bytes=70001,fault='',expected='7:0:42',exists=true,attrs=0,links=1,identity=42}={}){
+function model(entry,{bytes=70001,fault='',expected='7:0:42',exists=true,attrs=0,links=1,identity=42,openErrors=[],identityAfterRetry,successLastError=0}={}){
  const vars={NearlyIoSource:11,NearlyIoWriteHandle:22,NearlyIoSize:bytes,NearlyIoExpected:expected,NearlyPayload:'owned-destination'};
  const original=Buffer.alloc(bytes,0x5a),dest={data:Buffer.from('unchanged'),attrs,links,identity};
  const files=new Map([[11,{data:original,attrs:0,links:1,identity:10}],[22,dest]]),words=new Map(),events=[];
- let next=1000,stack=[],read=0,written=0,failed=false;
+ let next=1000,stack=[],read=0,written=0,failed=false,openCalls=0;
  const exp=s=>String(s??'').replace(/^("|')(.*)\1$/,'$2').replace(/\$(\w+)/g,(_,n)=>String(vars[n]??''));
  const set=(n,v)=>vars[n]=v;
  const win=raw=>{
@@ -16,7 +16,7 @@ function model(entry,{bytes=70001,fault='',expected='7:0:42',exists=true,attrs=0
    const ptr=Number(exp(raw.slice(1,raw.indexOf('('))));
    const outputs=[...raw.matchAll(/\.r(\d+)/g)].map(x=>x[1]);outputs.forEach((n,i)=>set(n,words.get(ptr+4*i)??0));return;
   }
-  if(raw.includes('CreateFileW')){set('0',exists&&Number(vars.NearlyIoDisposition)===1||!exists&&Number(vars.NearlyIoDisposition)===3?-1:22);return;}
+  if(raw.includes('CreateFileW')){const code=openErrors[openCalls++]??(exists&&Number(vars.NearlyIoDisposition)===1?80:!exists&&Number(vars.NearlyIoDisposition)===3?2:0);set('0',code?-1:22);if(raw.includes('?e'))stack.push(code||successLastError);if(!code&&openCalls>1&&identityAfterRetry!==undefined)dest.identity=identityAfterRetry;return;}
   if(raw.includes('GetFileType')){set('0',1);return;}
   if(raw.includes('GetFileInformationByHandle')){
    const f=files.get(arg('NearlyIoWriteHandle')),p=arg('NearlyIoInfo');
@@ -54,6 +54,7 @@ function model(entry,{bytes=70001,fault='',expected='7:0:42',exists=true,attrs=0
     case 'System::Call':win(a.join(' ').slice(1,-1));pc++;break;
     case 'Call':{const called=a[0].replace('${prefix}','');if(called==='NearlyIoFail'){failed=true;throw new Error('expected-io-refusal');}run(called);pc++;break;}
     case 'Return':return;
+    case 'Sleep':events.push('Sleep '+exp(a[0]));pc++;break;
     default:assert.fail('Unsupported NSIS instruction '+line);
    }
   }
@@ -79,4 +80,16 @@ test('destination admission rejects changed identity, late hardlink/reparse and 
   assert.equal(r.events.filter(e=>e.includes('CreateFileW')).length,1,'no open fallback after a collision');
  }
  for(const opts of [{},{expected:'',exists:false}])assert.equal(model('NearlyIoOpenDestination',opts).failed,false);
+});
+
+test('destination open retries only transient sharing denial and still validates the acquired identity',()=>{
+ const r=model('NearlyIoOpenDestination',{openErrors:[32,32,0]});assert.equal(r.failed,false);assert.equal(r.events.filter(e=>e.includes('CreateFileW')).length,3);assert.equal(r.events.filter(e=>e==='Sleep 100').length,2);assert.equal(r.dest.data.toString(),'unchanged');
+ const changed=model('NearlyIoOpenDestination',{openErrors:[32,0],identityAfterRetry:99});assert.equal(changed.failed,true);assert.equal(changed.dest.data.toString(),'unchanged');
+ const fresh=model('NearlyIoOpenDestination',{expected:'',exists:false,openErrors:[32,0]});assert.equal(fresh.failed,false);assert.equal(Number(fresh.vars.NearlyIoDestNew),1);assert.ok(fresh.events.filter(e=>e.includes('CreateFileW')).every(e=>e.includes('i $NearlyIoDisposition')));
+ const stale=model('NearlyIoOpenDestination',{successLastError:32});assert.equal(stale.failed,false);assert.equal(stale.events.filter(e=>e.includes('CreateFileW')).length,1);assert.equal(stale.events.filter(e=>e.startsWith('Sleep ')).length,0);
+});
+
+test('destination retry budget preserves permanent locks and does not retry access, missing or collision failures',()=>{
+ const locked=model('NearlyIoOpenDestination',{openErrors:Array(100).fill(32)});assert.equal(locked.failed,true);assert.equal(locked.events.filter(e=>e.includes('CreateFileW')).length,21);assert.equal(locked.events.filter(e=>e==='Sleep 100').length,20);assert.equal(locked.dest.data.toString(),'unchanged');
+ for(const code of [5,2,80,183,33]){const r=model('NearlyIoOpenDestination',{openErrors:[code,0]});assert.equal(r.failed,true);assert.equal(r.events.filter(e=>e.includes('CreateFileW')).length,1);assert.equal(r.events.filter(e=>e.startsWith('Sleep ')).length,0);assert.equal(r.dest.data.toString(),'unchanged');}
 });
