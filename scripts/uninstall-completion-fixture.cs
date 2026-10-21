@@ -26,7 +26,7 @@ public static class CompletionFixtureUi {
       if(args.Length!=1)throw new Exception("Exact generated inventory required");
       var inventory=Path.GetFullPath(args[0]);var root=Path.GetDirectoryName(inventory);
       if(Path.GetFileName(inventory)!="cases.json"||!Path.GetFileName(root).StartsWith("uninstall-completion-")||Path.GetFileName(Path.GetDirectoryName(root))!="test-results"||new FileInfo(inventory).Length>65536)throw new Exception("Generated fixture root required");
-      var json=new JavaScriptSerializer();var cases=json.Deserialize<Dictionary<string,object>[]>(File.ReadAllText(inventory));if(cases.Length!=9)throw new Exception("Exact nine cases required");
+      var json=new JavaScriptSerializer();var cases=json.Deserialize<Dictionary<string,object>[]>(File.ReadAllText(inventory));if(cases.Length!=10)throw new Exception("Exact ten cases required");
       var observations=new List<Dictionary<string,object>>();
       foreach(var item in cases){
         var exe=Path.GetFullPath((string)item["exe"]);if(!exe.StartsWith(root+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||Path.GetFileName(exe)!="ONLY-GENERATED-COMPLETION-FIXTURE.exe")throw new Exception("Only generated fixture may run");

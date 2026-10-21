@@ -265,6 +265,10 @@ if ($Action -eq 'guard-probe') {
   $env:NEARLY_UNINSTALL_COMPLETION_FIXTURE='1'
   & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\uninstall-completion.test.mjs')
   if ($LASTEXITCODE -ne 0) { throw 'Generated uninstall completion and deletion failure qualification failed' }
+  $env:NEARLY_COMPLETION_TRACE_FIXTURE='1'
+  & node --test (Join-Path $PSScriptRoot '..\src-tauri\windows\uninstall-completion.test.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'Traced uninstall completion must preserve product error flags' }
+  Remove-Item Env:\NEARLY_COMPLETION_TRACE_FIXTURE
   Remove-Item Env:\NEARLY_UNINSTALL_COMPLETION_FIXTURE
   if ($env:QA_DESTINATION -ceq 'drive') {
     . (Join-Path $PSScriptRoot 'installer-qa-drive-diagnosis.ps1')
