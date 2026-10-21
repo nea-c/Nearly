@@ -9,6 +9,19 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const sha='a'.repeat(40),base='f93745aa6030f0c2b0a54d490cda0cdb143c2e6e';
 const env={GITHUB_REPOSITORY:'nea-c/Nearly',GITHUB_EVENT_NAME:'push',GITHUB_REF:'refs/heads/codex/r33-candidate',GITHUB_WORKFLOW_REF:'nea-c/Nearly/.github/workflows/candidate-windows.yml@refs/heads/codex/r33-candidate',GITHUB_SHA:sha,GITHUB_WORKFLOW_SHA:sha,CANDIDATE_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',RELEASE_MODE:'validate',RELEASE_TAG:'r3.3',RELEASE_CONFIRM:''};
 
+test('admission audits source without requesting hosted output publication; host commands keep outputs',()=>{
+  assert.equal(typeof candidate.candidateCommand,'function');
+  assert.deepEqual(candidate.candidateCommand(['admission','source']),{command:'admission',source:'source',writeOutputs:false});
+  assert.deepEqual(candidate.candidateCommand(['context']),{command:'context',writeOutputs:false});
+  assert.deepEqual(candidate.candidateCommand(['preflight','source']),{command:'preflight',source:'source',writeOutputs:true});
+  assert.deepEqual(candidate.candidateCommand(['package','source','output']),{command:'package',source:'source',output:'output',writeOutputs:true});
+});
+
+test('candidate commands reject signing, release, empty paths and unexpected arguments',()=>{
+  assert.equal(typeof candidate.candidateCommand,'function');
+  for(const args of [[],['sign','source'],['release','source'],['publish','source'],['context','source'],['admission'],['admission',''],['admission','source','output'],['preflight'],['preflight','source','output'],['package','source'],['package','source',''],['package','source','output','extra']])assert.throws(()=>candidate.candidateCommand(args),JSON.stringify(args));
+});
+
 test('candidate binds source and controller to the exact branch push or manual dispatch, unsigned r3.3 only',()=>{
   assert.equal(typeof candidate.candidateRequest,'function');
   for(const event of ['push','workflow_dispatch'])assert.deepEqual(candidate.candidateRequest({...env,GITHUB_EVENT_NAME:event},'3.3.0'),{repository:'nea-c/Nearly',commit:sha,tag:'r3.3',version:'3.3.0',mode:'validate',workflowCommit:sha,runId:'123',runAttempt:'1'});

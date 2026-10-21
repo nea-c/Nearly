@@ -13,6 +13,14 @@ const oid=value=>exact(/[a-f0-9]{40}/,value);
 const identity=value=>exact(/[1-9][0-9]*/,value)&&Number.isSafeInteger(Number(value));
 const git=(root,args,options={})=>execFileSync('git',['-C',root,...args],{maxBuffer:128*1024*1024,windowsHide:true,...options});
 
+export function candidateCommand(args){
+  const [command,source,output]=args;
+  if(command==='context'&&args.length===1)return {command,writeOutputs:false};
+  if(['admission','preflight'].includes(command)&&args.length===2&&typeof source==='string'&&source)return {command,source,writeOutputs:command==='preflight'};
+  if(command==='package'&&args.length===3&&typeof source==='string'&&source&&typeof output==='string'&&output)return {command,source,output,writeOutputs:true};
+  throw Error('Only candidate context, read-only admission, preflight and unsigned package commands are supported');
+}
+
 export function candidateRequest(env,version){
   if(env.GITHUB_REPOSITORY!=='nea-c/Nearly'||!['push','workflow_dispatch'].includes(env.GITHUB_EVENT_NAME)||env.GITHUB_REF!==candidateRef||env.GITHUB_WORKFLOW_REF!==`nea-c/Nearly/.github/workflows/candidate-windows.yml@${candidateRef}`||!oid(env.CANDIDATE_SHA)||env.GITHUB_SHA!==env.CANDIDATE_SHA||env.GITHUB_WORKFLOW_SHA!==env.CANDIDATE_SHA||![env.GITHUB_RUN_ID,env.GITHUB_RUN_ATTEMPT].every(identity))throw Error('Exact official candidate branch, workflow, source SHA and run identity required');
   if(env.RELEASE_COMMIT!==undefined&&env.RELEASE_COMMIT!==env.CANDIDATE_SHA)throw Error('Candidate release commit must match its exact source SHA');
@@ -40,11 +48,10 @@ export async function auditCandidateSource(root,request,runGit=git){
 }
 
 export async function main(args,env=process.env){
+  const {command,source,output,writeOutputs}=candidateCommand(args);
   const request=candidateRequest(env,JSON.parse(await fs.readFile(path.join(control,'version.json'),'utf8')).version);
   if(git(control,['rev-parse','HEAD']).toString().trim()!==request.workflowCommit||git(control,['status','--porcelain','--untracked-files=all']).length)throw Error('Candidate controller changed');
-  const [command,source,output]=args;
-  if(command==='context'&&args.length===1){console.log(JSON.stringify(request));return;}
-  if(!['preflight','package'].includes(command)||!source||args.length!==(command==='package'?3:2))throw Error('Only candidate context, preflight and unsigned package commands are supported');
+  if(command==='context'){console.log(JSON.stringify(request));return;}
   const sourceRoot=path.resolve(source),tree=await auditCandidateSource(sourceRoot,request);
   const outputs={'source-commit':request.commit,'source-tree':tree};
   if(command==='package'){
@@ -54,6 +61,6 @@ export async function main(args,env=process.env){
     const manifest=JSON.parse(await fs.readFile(path.join(path.resolve(output),'unsigned-manifest.json'),'utf8'));
     console.log(JSON.stringify({sourceCommit:request.commit,sourceTree:tree,controllerCommit:request.workflowCommit,manifestSha256:result.manifestHash,installerSha256:manifest.assets[0].sha256,payloadSha256:manifest.payload.sha256,mode:'validate'}));
   }
-  if(env.GITHUB_OUTPUT)await fs.appendFile(env.GITHUB_OUTPUT,Object.entries(outputs).map(([key,value])=>`${key}=${value}\n`).join(''));
+  if(writeOutputs&&env.GITHUB_OUTPUT)await fs.appendFile(env.GITHUB_OUTPUT,Object.entries(outputs).map(([key,value])=>`${key}=${value}\n`).join(''));
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main(process.argv.slice(2)).catch(error=>{console.error(error.message);process.exitCode=1;});

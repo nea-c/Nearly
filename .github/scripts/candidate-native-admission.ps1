@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 # Candidate-only context. The production entrypoint retains its main/manual guard.
 if($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') { throw 'Exact hosted candidate validation environment required' }
-& node (Join-Path $PSScriptRoot 'candidate-build.mjs') preflight (Join-Path $env:GITHUB_WORKSPACE 'source')
+& node (Join-Path $PSScriptRoot 'candidate-build.mjs') admission (Join-Path $env:GITHUB_WORKSPACE 'source')
 if($LASTEXITCODE -ne 0) { throw 'Exact candidate controller and source required' }
 function Assert-AdmissionResult {
   param([string]$TestName,[int]$ExitCode,[string]$Output)

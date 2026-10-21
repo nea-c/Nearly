@@ -45,7 +45,7 @@ test('candidate adapter preserves release handle pins, token launcher and exact-
   +'if((Get-Location).ProviderPath -cne $root) { throw \'Exact reviewed candidate source required\' }\n'
   +release.slice(contextEnd).replace("(Join-Path $PSScriptRoot 'installer-qa-standard-user.cs')","(Join-Path $root 'scripts/installer-qa-standard-user.cs')");
  assert.equal(adapter.slice(adapter.indexOf('function Assert-AdmissionResult')).replaceAll('\r\n','\n'),expected.replaceAll('\r\n','\n'));
- assert.match(adapter,/candidate-build\.mjs'\) preflight.*GITHUB_WORKSPACE 'source'/);
+ assert.match(adapter,/candidate-build\.mjs'\) admission.*GITHUB_WORKSPACE 'source'/);
  assert.ok(adapter.indexOf('candidate-build.mjs')<adapter.indexOf('Add-Type'));
  assert.doesNotMatch(adapter,/Assert-ReleaseNativeContext|Set-Acl|RunAs|LogonUser|Remove-Item|SetEnvironmentVariable\('GITHUB_/i);
  assert.match(release,/GITHUB_REF','refs\/heads\/main'/);

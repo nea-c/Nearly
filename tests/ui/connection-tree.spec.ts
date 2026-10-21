@@ -72,6 +72,30 @@ async function group(page, name) {
   await expect(page.locator("#connection-node-form")).toHaveCount(0);
   return (await data(page)).connectionTree.nodes.find(n => n.kind === "group" && n.name === name).id;
 }
+async function pressSettledChevron(page, id, key) {
+  // Saving refreshes the old view, then schedules its committed replacement.
+  // aria-expanded on the old view alone is not readiness for another keypress.
+  // Wait for the same connected control across frames, as rowDrag does above.
+  await page.evaluate(id => new Promise<void>((resolve,reject) => {
+    const deadline=performance.now()+5000;
+    let previous:Element|null=null,stable=0;
+    const frame=()=>{
+      const node=document.querySelector(`[data-connection-toggle="${CSS.escape(id)}"]`);
+      const bounds=node?.getBoundingClientRect();
+      if(node?.isConnected&&bounds&&bounds.width>0&&bounds.height>0){
+        stable=node===previous?stable+1:0;previous=node;
+        if(stable>=2){resolve();return;}
+      }else{previous=null;stable=0;}
+      if(performance.now()>=deadline){reject(Error('Committed chevron did not stabilize'));return;}
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }),id);
+  const control=page.locator(`[data-connection-toggle="${id}"]`);
+  await control.focus();
+  await expect(control).toBeFocused();
+  await control.press(key);
+}
 async function move(page, id, parent = "", before = "") {
   if (parent) await rowDrag(page,id,parent,.5);
   else if (before) await rowDrag(page,id,before,.1);
@@ -295,9 +319,10 @@ test('only the focused chevron expands groups and inside-drop retains collapsed 
   await rowDrag(page,'a',id,.5);
   await expect.poll(async()=>(await data(page)).connectionTree.nodes.find(n=>n.id==='a').parentId).toBe(id);
   await expect(row).toHaveAttribute('aria-expanded','false');
-  await toggle.press('Space');
+  await pressSettledChevron(page,id,'Space');
   await expect(row).toHaveAttribute('aria-expanded','true');
-  await toggle.press('Enter');
+  await expect.poll(async()=>(await data(page)).connectionTree.nodes.find(n=>n.id===id).expanded).toBe(true);
+  await pressSettledChevron(page,id,'Enter');
   await expect(row).toHaveAttribute('aria-expanded','false');
   await page.reload();
   await expect(row).toHaveAttribute('aria-expanded','false');
