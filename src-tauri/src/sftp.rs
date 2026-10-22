@@ -1191,7 +1191,7 @@ pub fn upload_recorded(
         if stamp.mtime != local.modified().ok().and_then(protocol_seconds).ok_or("Local source mtime unavailable")? { return Err("Remote timestamp changed after upload; deletion ownership was not recorded".into()); }
         stamp.parent=Some(directory_guard(&s.raw,parent).await?);
         Ok(stamp)
-    })?;
+    }).map_err(|reason| format!("Upload committed; {reason}"))?;
     Ok((bytes, stamp))
 }
 pub fn delete_uploaded_file(

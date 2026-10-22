@@ -132,7 +132,18 @@ export interface Entry {
   owner?: string;
   hidden?: boolean;
 }
+export interface SyncFailure {
+  relativePath: string | null;
+  operation: string;
+  reason: string;
+  commitState: "not_committed" | "committed" | "unknown";
+  pending: number;
+  requiresRescan: true;
+}
 export interface Status {
+  stopComplete?: boolean;
+  failure?: SyncFailure | null;
+  statusError?: string;
   remoteChanges?: import("./auto-refresh.js").RemoteChanges;
   status: "running" | "failed" | "stopped" | "stopping";
   pending?: number;

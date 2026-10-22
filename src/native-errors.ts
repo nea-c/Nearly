@@ -47,6 +47,14 @@ export function localizeNativeError(
   message: string,
   language: Language,
 ): string {
+  const committedPrefixes={ja:'アップロードは反映済みです。',en:'Upload committed; '};
+  for(const prefix of Object.values(committedPrefixes)){
+    if(message.startsWith(prefix)&&message.length>prefix.length&&message.length<=65536){
+      const inner=message.slice(prefix.length);
+      if(!Object.values(committedPrefixes).some(value=>inner.includes(value)))
+        return committedPrefixes[language]+localizeNativeError(inner,language);
+    }
+  }
   for (const suffix of Object.values(uploadPartialSuffix)) {
     if(message.endsWith(suffix) && message.length > suffix.length && message.length <= 65536) {
       const inner=message.slice(0,-suffix.length);

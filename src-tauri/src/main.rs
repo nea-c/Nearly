@@ -6,6 +6,9 @@ mod browse_transport;
 mod connection_tree;
 mod drives;
 mod engine;
+mod initial_scan;
+#[cfg(test)]
+mod sync_runtime_tests;
 mod local_watch;
 mod taskbar_status;
 #[cfg(windows)]

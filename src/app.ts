@@ -3,6 +3,7 @@ import { popupBarrier } from './popup-barrier.js';
 import { bindFileDrop } from "./file-drop.js";
 import {retainedSyncsInWorkspaceOrder} from "./workspace-order.js";
 import {sessionResumeContext,syncActionLabel,resumeActionLabel,currentSyncHelp,resumeSyncHelp} from './sync-actions.js';
+import {failureDetails,failureLabels,stopAfterStatusFailure} from './sync-failure.js';
 import { initializeStartupUpdate } from "./startup-update.js";
 import { initializeUpdateRestart } from "./update-recovery.js";
 import { syncPathSummary } from "./sync-path-summary.js";
@@ -2949,13 +2950,15 @@ function paintPolledStatus() {
   }
   const retry = document.querySelector<HTMLButtonElement>("#retry");
   if (retry) retry.disabled = t?.status !== "failed" || retrying.has(t.id);
+  const failurePanel=document.querySelector<HTMLElement>('#sync-failure-details');
+  if(failurePanel){const contents=syncFailureMarkup(t);if(failurePanel.innerHTML!==contents)failurePanel.innerHTML=contents;}
   const logs = document.querySelector<HTMLElement>(".log-drawer .logs");
   if (logs) {
     const contents =
       (t?.logs ?? [])
         .slice(-100)
         .reverse()
-        .map((line) => html`<li>${esc(line)}</li>`)
+        .map((line) => html`<li>${esc(tError(line))}</li>`)
         .join("") || html`<li>まだログはありません</li>`;
     if (logs.innerHTML !== contents) {
       const top = logs.scrollTop;
@@ -2963,6 +2966,12 @@ function paintPolledStatus() {
       logs.scrollTop = top;
     }
   }
+}
+function syncFailureMarkup(t?: SyncTab) {
+  const labels=failureLabels(t?.stopComplete===true||t?.status==='stopped');
+  const failure=t?.failure?failureDetails(t.failure):undefined;
+  if(!failure&&!t?.statusError)return '';
+  return html`<div class="sync-failure" role="alert"><strong>${esc(labels.title)}</strong>${failure?html`<dl><dt>${esc(labels.path)}</dt><dd>${esc(failure.path??'—')}</dd><dt>${esc(labels.operation)}</dt><dd>${esc(failure.operation)}</dd><dt>${esc(labels.reason)}</dt><dd>${esc(failure.reason)}</dd><dt>${esc(labels.pending)}</dt><dd>${failure.pending}</dd></dl><p>${esc(failure.commit)}</p>`:''}${t?.statusError?html`<p>${esc(labels.status)}: ${esc(tError(t.statusError))}</p>`:''}<p>${esc(labels.help)}</p></div>`;
 }
 function logDrawer(t?: SyncTab) {
   return html`<section
@@ -2978,16 +2987,17 @@ function logDrawer(t?: SyncTab) {
         id="retry"
         ${t?.status === "failed" && !retrying.has(t.id) ? "" : "disabled"}
       >
-        再接続して再試行</button
+        ${esc(failureLabels().restart)}</button
       ><button id="close-logs" aria-label="ログを閉じる">×</button>
     </header>
     ${t ? syncRoots(t) : ""}${t?.profile.mode === "mock" ? html`<div class="demo-controls"><span>モック動作確認</span><button id="burst">同じファイルを20回変更</button><button id="fail">次の転送を失敗させる</button></div>` : ""}
+    <div id="sync-failure-details">${syncFailureMarkup(t)}</div>
     <ul class="logs">
       ${
         (t?.logs ?? [])
           .slice(-100)
           .reverse()
-          .map((l) => html`<li>${esc(l)}</li>`)
+          .map((l) => html`<li>${esc(tError(l))}</li>`)
           .join("") || html`<li>まだログはありません</li>`
       }
     </ul>
@@ -3455,28 +3465,18 @@ function bind() {
     renderDialog();
   });
   on("#retry", async () => {
-    const t = tab();
-    const w = workspace();
-    if (!t || t.status !== "failed" || retrying.has(t.id)) return;
+    const t=tab(),w=workspace();
+    if(!t||t.status!=="failed"||retrying.has(t.id)||dialog)return;
+    const context=sessionResumeContext(w.id,t,ownedRetained());
     retrying.add(t.id);
-    $("#retry")!.disabled = true;
     try {
-      if (t.profile.mode === "sftp") await invoke("retry_sync", { id: t.id });
-      if (!store.tabs.includes(t) || ["stopping", "stopped"].includes(t.status))
-        return;
-      t.status = "running";
-    } catch (e) {
-      if (
-        store.tabs.includes(t) &&
-        !["stopping", "stopped"].includes(t.status)
-      ) {
-        w.notice = rawError(e);
-        if (active === w.id) notice = w.notice;
-      }
-    } finally {
-      retrying.delete(t.id);
-      if (active === w.id) render();
-    }
+      await stop(t);
+      if(active!==w.id||!store.workspaces.includes(w)||w.starting||dialog)return;
+      dialog={type:"start",workspaceId:w.id,p:{...t.profile},local:t.local,remote:t.remote,
+        ...(context?{retained:context}:{})};
+      renderDialog();
+    }catch(error){message(error);}
+    finally{retrying.delete(t.id);if(active===w.id)render();}
   });
   on("#burst", () => {
     const t = tab();
@@ -3821,6 +3821,7 @@ function renderDialog() {
   });
 }
 const stopPromises = new Map<string, Promise<void>>();
+const statusFailureStopped = new Set<string>();
 async function stop(t: SyncTab) {
   if (store.workspaces.some(w => w.jobId === t.id && workspaceMoving(w.id))) return;
   const previous = stopPromises.get(t.id);
@@ -3845,11 +3846,11 @@ async function stopInner(t: SyncTab) {
       }
       if (active === w.id) restoreWorkspace();
     }
-  let knownUnreflected=t.profile.mode==="mock"&&(t.queue.size>0||!!t.busy);
-  if (t.profile.mode === "sftp") {
+  let knownUnreflected=(t.failure?.pending??0)>0 || t.profile.mode==="mock"&&(t.queue.size>0||!!t.busy);
+  if (t.profile.mode === "sftp" && !statusFailureStopped.has(t.id)) {
     t.status = "stopping";render();
     try { const summary=await invoke("stop_sync", { id: t.id });knownUnreflected=summary?.knownUnreflected===true; }
-    catch(error){t.status="failed";render();throw error;}
+    catch(error){if(!(t.statusError&&rawError(error)==="Job not found")){t.status="failed";render();throw error;}}
   }
   t.status = "stopped";
   for (const w of store.workspaces)
@@ -3885,6 +3886,9 @@ setInterval(async () => {
       if (store.workspaces.some(w => w.jobId === t.id && workspaceMoving(w.id))) continue;
       if (t.profile.mode === "sftp") {
         if (t.status === "stopped" || stopPromises.has(t.id)) continue;
+        // A status read cannot prove a failed stop request made the remote safe.
+        // Keep the diagnostic latched until the user explicitly stops/restarts.
+        if(t.statusError||statusFailureStopped.has(t.id))continue;
         try {
           const status = await invoke("sync_status", { id: t.id });
           if (
@@ -3906,8 +3910,10 @@ setInterval(async () => {
           if (
             !["stopped"].includes(t.status) && !stopPromises.has(t.id) &&
             store.tabs.includes(t)
-          )
-            t.status = t.status === "stopping" && rawError(e) === "Job not found" ? "stopped" : "failed";
+          ) {
+            if(t.status === "stopping" && rawError(e) === "Job not found")t.status="stopped";
+            else if(await stopAfterStatusFailure(t,e,()=>invoke("stop_sync",{id:t.id})))statusFailureStopped.add(t.id);
+          }
         }
         continue;
       }
@@ -4081,7 +4087,7 @@ try {
       }
       const retained = store.retainedSyncs.find(r => r.ownerTabId === descriptor.id && !r.ownerTabClosed &&
         (!runtime || (sameRetainedConnection(r.profile, runtime.profile as Profile) && r.local === runtime.local && r.remote === runtime.remote)));
-      const job = runtime ? Object.fromEntries(["id","profile","local","remote","status","sent","speed","latency","logs","pending","errorCount","exclusionRules","deleteRemoved","recursive"].filter(key => Object.hasOwn(runtime,key)).map(key => [key,runtime[key]])) : undefined;
+      const job = runtime ? Object.fromEntries(["id","profile","local","remote","status","sent","speed","latency","logs","pending","errorCount","failure","statusError","stopComplete","exclusionRules","deleteRemoved","recursive"].filter(key => Object.hasOwn(runtime,key)).map(key => [key,runtime[key]])) : undefined;
       // A native stop can finish during reload; poll its existing ID to reconcile.
       const wasStopping = job?.status === "stopping";
       if (wasStopping && job) job.status = "running";
