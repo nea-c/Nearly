@@ -1,5 +1,6 @@
 import { t, text, html, getLanguage } from "./i18n.js";
 import type { Entry, Side, Store } from "./core.js";
+import { compareNames } from "./name-order.js";
 import {
   defaultPaneColumns,
   type ColumnId,
@@ -168,21 +169,15 @@ export function sortedEntries(
         const missingY = y === undefined || !Number.isFinite(y);
         if (missingX !== missingY) return missingX ? 1 : -1;
         if (!missingX && !missingY) compared = x! - y!;
+      } else if (sort.column === "name") {
+        compared = compareNames(left.name, right.name);
       } else {
         if (sort.column === "owner" && (!left.owner || !right.owner)) {
           if (!!left.owner !== !!right.owner) return left.owner ? -1 : 1;
         }
         compared = collator.compare(
-          sort.column === "name"
-            ? left.name
-            : sort.column === "owner"
-              ? (left.owner ?? "")
-              : fileType(left),
-          sort.column === "name"
-            ? right.name
-            : sort.column === "owner"
-              ? (right.owner ?? "")
-              : fileType(right),
+          sort.column === "owner" ? (left.owner ?? "") : fileType(left),
+          sort.column === "owner" ? (right.owner ?? "") : fileType(right),
         );
       }
       return compared * direction || a.index - b.index;

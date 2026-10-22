@@ -1,6 +1,7 @@
 import { t } from "./i18n.js";
 import type { Entry, Side } from "./core.js";
 import { normalizeLocalBrowse } from "./navigation.js";
+import { compareNames } from "./name-order.js";
 export const PC_ROOT = "@pc";
 export interface TreeSnapshot {
   root: string;
@@ -12,6 +13,8 @@ export interface TreeChild {
   name: string;
   hidden?: boolean;
 }
+const compareChildren = (left: TreeChild, right: TreeChild) =>
+  compareNames(left.name, right.name);
 export interface TreeNode {
   path: string;
   children: TreeChild[];
@@ -139,8 +142,10 @@ export class FolderTree {
       for (const name of path.slice(3).split(/[\\/]/).filter(Boolean)) {
         const next = childPath("local", parent, name),
           node = this.node(parent);
-        if (!node.children.some((c) => this.id(c.path) === this.id(next)))
+        if (!node.children.some((c) => this.id(c.path) === this.id(next))) {
           node.children.push({ path: next, name });
+          node.children.sort(compareChildren);
+        }
         parent = next;
       }
       this.recordChildren(path, entries);
@@ -159,8 +164,10 @@ export class FolderTree {
       for (const name of rest.split(/[\\/]/).filter(Boolean)) {
         const next = childPath(this.side, parent, name),
           node = this.node(parent);
-        if (!node.children.some((c) => this.id(c.path) === this.id(next)))
+        if (!node.children.some((c) => this.id(c.path) === this.id(next))) {
           node.children.push({ path: next, name });
+          node.children.sort(compareChildren);
+        }
         parent = next;
       }
     this.recordChildren(path, entries);
@@ -193,7 +200,7 @@ export class FolderTree {
           /* Never turn a server entry into traversal. */
         }
       }
-    node.children = children.slice(0, 500);
+    node.children = children.sort(compareChildren).slice(0, 500);
     node.limited = children.length > 500;
     node.loaded = true;
     node.loading = false;
