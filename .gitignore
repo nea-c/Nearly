@@ -93,6 +93,7 @@ Thumbs.db
 !/docs/startup-updates.md
 !/docs/actions-signing.md
 /scripts/*
+!/scripts/initial-scan-check.mjs
 !/scripts/installer-qa-standard-user.ps1
 !/scripts/installer-qa-standard-user.cs
 !/scripts/build-windows.mjs
@@ -149,3 +150,4 @@ Thumbs.db
 !/scripts/uninstall-completion-fixture.cs
 !/scripts/payload-sharing-fixture.cs
 !/scripts/release-native-admission.ps1
+!/scripts/sync-runtime-fixture.mjs

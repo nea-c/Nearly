@@ -49,6 +49,8 @@ export const uploadPartialSuffix = {
 // Complete templates use numeric placeholders; captured data is never translated.
 export const nativeErrorLiterals: ReadonlyArray<readonly [string, string]> = [
   ...uploadErrorLiterals,
+  ['初回のローカル走査が完了しました','Initial local scan completed'],
+  ['エラーのため同期を停止しました。手動で再開すると全体を走査します。一時ファイルや反映済みの変更が残っている可能性があります。','Sync stopped after error; manual restart performs a full scan. Staging or already committed changes may remain.'],
   ["保持するフォルダーの追跡上限に達したため削除を中断しました。同期を停止して開始し直してください。","Retained directory tracking limit reached; deletion paused, stop and start a new sync"],
   ["フォルダー検証情報のメモリー上限に達しました。より浅い範囲で同期を開始し直してください。","Directory authority memory limit reached; stop and start a shallower sync"],
   ["走査対象のローカルパスが同期元の外にあります。","Local scan path outside root"],

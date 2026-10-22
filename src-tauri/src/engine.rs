@@ -315,6 +315,16 @@ impl Default for StopSummary {
     fn default() -> Self { Self { known_unreflected: false } }
 }
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncFailure {
+    pub relative_path: Option<String>,
+    pub operation: String,
+    pub reason: String,
+    pub commit_state: String,
+    pub pending: usize,
+    pub requires_rescan: bool,
+}
+#[derive(Clone, Serialize)]
 pub struct Status {
     #[serde(skip)]
     activity: crate::taskbar_status::Activity,
@@ -330,6 +340,9 @@ pub struct Status {
     #[serde(rename = "remoteChanges")]
     pub remote_changes: RemoteChanges,
     pub logs: Vec<String>,
+    pub failure: Option<SyncFailure>,
+    #[serde(rename = "stopComplete")]
+    pub stop_complete: bool,
 }
 impl Status {
     fn new() -> Self {
@@ -344,6 +357,8 @@ impl Status {
             error_count: 0,
             remote_changes: RemoteChanges::default(),
             logs: vec!["Initial scan started".into()],
+            failure: None,
+            stop_complete: false,
         }
     }
     fn log(&mut self, s: &str) {
@@ -354,14 +369,40 @@ impl Status {
     }
     fn failure(&mut self, message: &str, cancelled: bool) {
         if !cancelled {
-            self.activity.failure(false);
+            self.activity.failure(true);
             self.error_count = self.error_count.saturating_add(1);
+            self.status = "failed".into();
+            self.speed = 0;
+            // The first failure survives informational log eviction and stop.
+            if self.failure.is_none() {
+                self.failure = Some(SyncFailure {
+                    relative_path: None, operation: "sync".into(),
+                    reason: message.chars().take(2048).collect(),
+                    commit_state: "unknown".into(), pending: self.pending,
+                    requires_rescan: true,
+                });
+            }
         }
         self.log(message);
     }
+    fn failure_context(&mut self, message: &str, relative: Option<&Path>, operation: &str, commit_state: &str, pending: usize, cancelled: bool) {
+        self.pending = pending;
+        let first = self.failure.is_none();
+        self.failure(message, cancelled);
+        if first && !cancelled {
+            if let Some(failure) = self.failure.as_mut() {
+                failure.relative_path = relative.filter(|p| !p.as_os_str().is_empty() && p.components().all(|c| matches!(c, std::path::Component::Normal(_))))
+                    .map(|p| p.to_string_lossy().chars().take(4096).collect());
+                failure.operation = operation.into();
+                failure.commit_state = commit_state.into();
+                failure.pending = pending;
+            }
+        }
+    }
     fn record_stopped_queue(&mut self, remaining: usize) {
-        self.stop_summary.known_unreflected = remaining > 0;
-        self.pending = 0;
+        self.stop_summary.known_unreflected = remaining > 0 || self.failure.is_some();
+        self.pending = if self.failure.is_some() { remaining } else { 0 };
+        if let Some(failure) = self.failure.as_mut() { failure.pending = remaining; }
     }
     // Call only after a successful final SFTP result, never after staging writes.
     fn committed_remote_change(&mut self, remote: &str, relative: &Path) {
@@ -374,8 +415,7 @@ impl Status {
             journal.truncated = true;
             journal.records.clear();
             journal.records.push(RemoteChange { revision: MAX_REMOTE_REVISION, path: remote.to_owned(), removed_directory: None });
-            self.activity.failure(true);
-            self.log("Remote refresh journal exhausted; stop and restart sync");
+            self.failure_context("Remote refresh journal exhausted; stop and restart sync",Some(relative),"record","committed",self.pending,false);
             return;
         }
         journal.revision += 1;
@@ -894,26 +934,14 @@ impl Engine {
     pub fn status(&self, id: &str) -> Result<Status, String> {
         let jobs = self.jobs.lock().map_err(|_| "Job lock failed")?;
         let job = jobs.get(id).ok_or("Job not found")?;
-        let value = job.status.lock().map_err(|_| "Status lock failed")?.clone();
+        let mut value = job.status.lock().map_err(|_| "Status lock failed")?.clone();
+        value.stop_complete = value.failure.is_some() && job.handle.as_ref().is_some_and(|h| h.is_finished());
         Ok(value)
     }
     pub fn retry(&self, id: &str) -> Result<(), String> {
         let jobs = self.jobs.lock().map_err(|_| "Job lock failed")?;
-        let j = jobs.get(id).ok_or("Job not found")?;
-        if j.handle.as_ref().is_some_and(|h| h.is_finished())
-            || j.status
-                .lock()
-                .map_err(|_| "Status lock failed")?
-                .logs
-                .last()
-                .is_some_and(|s| s.contains("rescan") || s.contains("restart"))
-        {
-            return Err(
-                "This failure requires stopping and starting a new sync for a full rescan".into(),
-            );
-        }
-        j.retry.store(true, Ordering::Relaxed);
-        Ok(())
+        jobs.get(id).ok_or("Job not found")?;
+        Err("This failure requires stopping and starting a new sync for a full rescan".into())
     }
     pub fn stop(&self, id: &str) -> Result<(), String> {
         self.stop_with_summary(id).map(|_| ())
@@ -1234,7 +1262,7 @@ fn worker(
     initial: sftp::Connection,
     state: Arc<Mutex<Status>>,
     stop: Arc<AtomicBool>,
-    retry: Arc<AtomicBool>,
+    _retry: Arc<AtomicBool>,
     passphrase: zeroize::Zeroizing<String>,
     expected_identity: String,
     rules: crate::exclusion::Rules,
@@ -1243,9 +1271,11 @@ fn worker(
 ) {
     let fatal = |error: String| {
         let mut s = state.lock().unwrap();
-        s.status = if stop.load(Ordering::Relaxed) { "stopping" } else { "failed" }.into();
+        if s.failure.is_none() { s.status = if stop.load(Ordering::Relaxed) { "stopping" } else { "failed" }.into(); }
         s.speed = 0;
         s.failure(&error, stop.load(Ordering::Relaxed));
+        let pending=s.pending;
+        s.record_stopped_queue(pending);
     };
     let (tx, rx) = std::sync::mpsc::sync_channel(10000);
     let overflow = Arc::new(AtomicBool::new(false));
@@ -1253,16 +1283,24 @@ fn worker(
     let event_epoch=Arc::new(AtomicU64::new(0));
     let callback_epoch=event_epoch.clone();
     let callback_state=state.clone();
+    let callback_stop=stop.clone();
     let watcher =
         notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
             if matches!(&event,Ok(e) if matches!(e.kind,notify::EventKind::Access(_))) {
                 return;
             }
             let mut status=callback_state.lock().unwrap();
+            if status.failure.is_some() { return; }
             callback_epoch.fetch_add(1,Ordering::SeqCst);
             status.activity.mark_working();
+            if event.as_ref().is_err() || matches!(&event,Ok(e) if e.need_rescan()) {
+                status.failure_context("Watcher error: stop and restart for a full rescan",None,"watch","unknown",0,false);
+                callback_stop.store(true,Ordering::SeqCst);
+                return;
+            }
             if tx.try_send((Instant::now(), event)).is_err() {
-                status.activity.failure(true);
+                status.failure_context("Watcher overflow: stop and restart for a full rescan",None,"watch","unknown",0,false);
+                callback_stop.store(true,Ordering::SeqCst);
                 of.store(true, Ordering::Relaxed);
             }
         });
@@ -1283,28 +1321,19 @@ fn worker(
         return;
     }
     let mut queue = HashMap::new();
-    if let Err(e) = scan(&root, &root, &mut queue, &stop, &rules, options.recursive) {
-        fatal(e);
-        if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
+    let mut directories: HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>> = HashMap::new();
+    if let Err(error) = crate::initial_scan::walk(&root,&stop,&rules,options.recursive,options.delete_removed, |path,is_directory| {
+        if is_directory { directories.entry(path.clone()).or_insert(None); }
+        enqueue_at(&mut queue,path,Instant::now())
+    }) {
+        let mut status=state.lock().unwrap();
+        status.failure_context(&error.reason,error.relative_path.as_deref(),"scan","not_committed",queue.len(),stop.load(Ordering::Relaxed));
+        status.record_stopped_queue(queue.len());
         return;
     }
-    let mut directories: HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>> = HashMap::new();
-    if options.delete_removed && options.recursive {
-        if let Err(error) = queue_directories(
-            &root,
-            &root,
-            &mut queue,
-            &mut directories,
-            &stop,
-            &rules,
-            Instant::now(),
-        ) {
-            fatal(error);
-            if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
-            return;
-        }
-    }
     state.lock().unwrap().activity.scan_finished();
+    state.lock().unwrap().log("Initial local scan completed");
+    state.lock().unwrap().pending=queue.len();
     let mut connection = Some(initial);
     let mut inventory: HashMap<PathBuf, sftp::RemoteStamp> = HashMap::new();
     let mut file_authority_bytes = 0usize;
@@ -1332,8 +1361,9 @@ fn worker(
         }
         Ok(())
     }) {
-        fatal(error);
-        if stop.load(Ordering::Relaxed) { state.lock().unwrap().record_stopped_queue(queue.len()); }
+        let mut s=state.lock().unwrap();
+        s.failure_context(&error,None,"inventory","not_committed",queue.len(),stop.load(Ordering::Relaxed));
+        s.record_stopped_queue(queue.len());
         return;
     }
     state.lock().unwrap().log("Comparison uses size and whole-second UTC mtime; equal metadata does not prove equal content");
@@ -1342,6 +1372,7 @@ fn worker(
     let mut rescan_required = false;
     let mut last_transfer = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if state.lock().unwrap().failure.is_some() { break; }
         if overflow.swap(false, Ordering::Relaxed) {
             fatal("Watcher overflow: stop and restart for a full rescan".into());
             rescan_required = true;
@@ -1416,13 +1447,7 @@ fn worker(
                 }
             }
         }
-        if retry.swap(false, Ordering::Relaxed) && !rescan_required {
-            blocked = false;
-            for item in queue.values_mut() {
-                item.attempt = 0;
-            }
-            state.lock().unwrap().status = "running".into();
-        }
+        if state.lock().unwrap().failure.is_some() { break; }
         {
             let mut s = state.lock().unwrap();
             s.pending = queue.len();
@@ -1482,10 +1507,9 @@ fn worker(
                 Ok(LocalAction::Skip) if !is_directory => continue,
                 Ok(_) => (),
                 Err(error) => {
-                    fatal(error);
-                    blocked = true;
+                    state.lock().unwrap().failure_context(&error,Some(&path),"validate","not_committed",queue.len()+1,stop.load(Ordering::Relaxed));
                     queue.insert(path, item);
-                    continue;
+                    break;
                 }
             }
             let start = Instant::now();
@@ -1504,26 +1528,22 @@ fn worker(
                 match sftp::connect(&p, &passphrase, &stop) {
                     Ok((s, identity)) => {
                         if identity != expected_identity {
-                            fatal(
-                                "Server identity changed; stop and verify before starting again"
-                                    .into(),
-                            );
-                            blocked = true;
+                            state.lock().unwrap().failure_context("Server identity changed; stop and verify before starting again",Some(&path),"connect","not_committed",queue.len()+1,false);
                             queue.insert(path, item);
-                            continue;
+                            break;
                         }
                         connection = Some(s)
                     }
                     Err(e) => {
-                        fatal(e);
-                        blocked = true;
+                        state.lock().unwrap().failure_context(&e,Some(&path),"connect","not_committed",queue.len()+1,stop.load(Ordering::Relaxed));
                         queue.insert(path, item);
-                        continue;
+                        break;
                     }
                 }
             }
             // Revalidate after reconnect: a pending deletion may have become an
             // upload while the connection was unavailable.
+            let mut operation = if is_directory {"directory"} else {"compare"};
             let transfer = (|| {
                 if is_directory {
                     let action = directory_action(&root, &path, &root_identity, &stop)?;
@@ -1589,15 +1609,18 @@ fn worker(
                 }
                 match action {
                     LocalAction::Upload if delete_enabled => {
+                        operation = "upload";
                         let (bytes, stamp) =
                             sftp::upload_recorded(connection, &root, &path, &remote, &stop, &id)?;
                         Ok((bytes, Some(stamp), LocalAction::Upload, true))
                     }
                     LocalAction::Upload => {
+                        operation = "upload";
                         sftp::upload(connection, &root, &path, &remote, &stop, &id)
                             .map(|bytes| (bytes, None, LocalAction::Upload, true))
                     }
                     LocalAction::Delete => {
+                        operation = "delete";
                         let stamp = inventory
                             .get(&path)
                             .ok_or("File was not uploaded by this sync job")?;
@@ -1616,7 +1639,14 @@ fn worker(
                     if let Some(stamp) = stamp {
                         if let Err(error) = remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes) {
                             delete_enabled=false; inventory.clear(); directories.clear();
-                            state.lock().unwrap().failure(&error,false);
+                            let mut status=state.lock().unwrap();
+                            status.failure_context(&error,Some(&path),"record",if changed {"committed"} else {"not_committed"},queue.len()+1,false);
+                            if changed {
+                                status.committed_remote_change(&remote,&path);
+                                if action==LocalAction::Upload {status.sent+=1;}
+                            }
+                            queue.insert(path.clone(),item.clone());
+                            break;
                         }
                     }
                     if action == LocalAction::Skip {
@@ -1654,43 +1684,72 @@ fn worker(
                         s.log(&format!("Uploaded {}", path.display()));
                     }
                     s.latency = item.first.elapsed().as_millis() as u64;
-                    s.speed = (bytes as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64;
+                    s.speed = if s.failure.is_some() {0} else {(bytes as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64};
                     s.pending = queue.len();
                 }
                 Err(e) => {
                     suspend_directories(&mut directories);
                     directory_authority_bytes=0;
                     connection = None;
-                    item.attempt += 1;
-                    item.last = Instant::now() + Duration::from_secs(1 << item.attempt.min(4));
-                    queue.insert(path, item.clone());
+                    let commit_state = if e.starts_with("Upload committed; ") { "committed" }
+                        else if operation == "directory" || operation == "delete" || e.contains("final rename") || e.contains("may have completed") || e.contains("outcome is uncertain") { "unknown" }
+                        else { "not_committed" };
                     let mut s = state.lock().unwrap();
-                    s.failure(&e, stop.load(Ordering::Relaxed));
-                    if retained_directories.exhausted() {
-                        rescan_required=true;
-                        blocked=true;
-                        s.status="failed".into();
+                    s.failure_context(&e,Some(&path),operation,commit_state,queue.len()+1,stop.load(Ordering::Relaxed));
+                    if commit_state=="committed" {
+                        s.committed_remote_change(&remote,&path);
+                        if operation=="upload" {s.sent+=1;}
                     }
-                    if item.attempt >= 3 {
-                        s.status = "failed".into();
-                        blocked = true;
-                        s.log("Automatic retry limit reached. Retry or stop explicitly.");
-                    }
+                    queue.insert(path,item);
+                    break;
                 }
             }
         }
         thread::sleep(Duration::from_millis(100));
     }
     let mut s = state.lock().unwrap();
-    s.status = "stopped".into();
-    s.activity.stopped();
+    if s.failure.is_none() {
+        s.status = "stopped".into();
+        s.activity.stopped();
+    }
     s.speed = 0;
     s.record_stopped_queue(queue.len());
-    s.log("Stopped; pending changes discarded. Restart performs a full scan.");
+    if s.failure.is_some() { s.log("Sync stopped after error; manual restart performs a full scan. Staging or already committed changes may remain."); }
+    else { s.log("Stopped; pending changes discarded. Restart performs a full scan."); }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_error_is_latched_with_context_and_survives_log_eviction() {
+        let mut s=Status::new();
+        s.failure_context("Local source changed during upload; staging was not committed",Some(Path::new("nested/file.txt")),"upload","not_committed",3,false);
+        assert_eq!(s.status,"failed");
+        assert_eq!(s.speed,0);
+        for _ in 0..110 {s.log("ordinary progress");}
+        let failure=s.failure.as_ref().unwrap();
+        assert_eq!(failure.relative_path.as_deref(),Some("nested/file.txt"));
+        assert_eq!(failure.operation,"upload");
+        assert_eq!(failure.commit_state,"not_committed");
+        assert!(failure.requires_rescan);
+        s.record_stopped_queue(3);
+        assert_eq!(s.pending,3);
+        assert!(s.stop_summary.known_unreflected);
+        assert_eq!(Status::new().status,"running");
+    }
+    #[test]
+    fn structured_failure_never_exposes_an_absolute_target() {
+        let mut s=Status::new();
+        s.failure_context("Local source unavailable",Some(Path::new("C:\\private\\name")),"upload","not_committed",1,false);
+        assert!(s.failure.unwrap().relative_path.is_none());
+    }
+    #[test]
+    fn committed_journal_exhaustion_stops_job_and_keeps_commit_state() {
+        let mut s=Status::new();s.remote_changes.revision=MAX_REMOTE_REVISION;
+        s.committed_remote_change("/synthetic",Path::new("file"));
+        assert_eq!(s.status,"failed");
+        assert_eq!(s.failure.unwrap().commit_state,"committed");
+    }
     #[cfg(windows)]
     #[test]
     fn complete_scan_refuses_unreadable_source_entries_before_mirror_authority() {
@@ -3277,7 +3336,7 @@ mod stop_summary_tests {
  use super::*; use crate::taskbar_status::{TaskbarState as T,NativeSyncState as N};
  #[test] fn native_activity_is_not_frontend_or_settings_data(){let status=Status::new();assert_eq!(status.activity.phase(),N::Scanning);let json=serde_json::to_value(status).unwrap();assert!(json.get("activity").is_none());}
  #[test] fn prepared_start_failure_and_cancel_are_truthful(){let e=Engine::default();assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.prepare("one".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.record_start_failure("one");e.discard_prepared_start("one");assert_eq!(e.taskbar_state().unwrap(),T::Error);e.prepare("two".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.stop("two").unwrap();e.record_start_failure("two");e.discard_prepared_start("two");assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.record_start_failure("unknown");assert_eq!(e.taskbar_state().unwrap(),T::Idle);}
- #[test] fn historical_failure_can_recover_but_scan_and_cancel_never_complete(){let mut s=Status::new();s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Scanning);s.activity.scan_finished();s.failure("transient",false);s.activity.settle(1,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::CaughtUp);assert_eq!(s.error_count,1);s.activity.settle(0,true,false,true,false);assert_eq!(s.activity.phase(),N::Stopping);}
+ #[test] fn terminal_failure_never_automatically_recovers(){let mut s=Status::new();s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Scanning);s.activity.scan_finished();s.failure("transient",false);s.activity.settle(1,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);assert_eq!(s.error_count,1);s.activity.settle(0,true,false,true,false);assert_eq!(s.activity.phase(),N::Stopping);}
 }
 #[cfg(test)] mod upload_guard_tests {
  use super::*;

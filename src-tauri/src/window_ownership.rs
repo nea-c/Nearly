@@ -131,14 +131,24 @@ pub fn validate_payload(v:&Value,id:&str)->Result<(),String>{
     if let Some(p)=w.get("connection").filter(|v|!v.is_null()){object(p,&profile_keys)?;serde_json::from_value::<crate::sftp::Profile>(p.clone()).map_err(|_|"Invalid transfer profile")?;}
     if let Some(entries)=w.get("entries"){let entries=object(entries,&["local","remote"])?;let mut count=0;for list in entries.values(){let list=list.as_array().ok_or("Invalid transfer entries")?;count+=list.len();for e in list{object(e,&["name","hidden","dir","size","modifiedAt","permissions","owner"])?;serde_json::from_value::<crate::sftp::Entry>(e.clone()).map_err(|_|"Invalid transfer entry")?;}}if count>20000{return Err("Transfer exceeds 20000 entries".into());}}
     if let Some(job)=root.get("job").filter(|v|!v.is_null()){
-        let j=object(job,&["id","retainedId","profile","local","remote","status","pending","sent","speed","latency","errorCount","exclusionRules","deleteRemoved","recursive","logs"])?;
+        let j=object(job,&["id","retainedId","profile","local","remote","status","pending","sent","speed","latency","errorCount","exclusionRules","deleteRemoved","recursive","logs","failure","statusError","stopComplete"])?;
         let p=j.get("profile").ok_or("Job profile required")?;object(p,&profile_keys)?;serde_json::from_value::<crate::sftp::Profile>(p.clone()).map_err(|_|"Invalid job profile")?;
         let logs=j.get("logs").and_then(Value::as_array).ok_or("Job logs required")?;if logs.len()>100||logs.iter().any(|v|v.as_str().is_none_or(|s|s.len()>16384)){return Err("Transfer log limit exceeded".into());}
         for key in ["id","local","remote","status"]{if j.get(key).and_then(Value::as_str).is_none(){return Err("Missing job string field".into());}}
-        for (key,value) in j{match key.as_str(){"profile"|"logs"=>(),"pending"|"sent"|"speed"|"latency"|"errorCount"=>if value.as_f64().is_none_or(|n|!n.is_finite()||n<0.0){return Err("Invalid job metric".into());},"deleteRemoved"|"recursive"=>if !value.is_boolean(){return Err("Invalid job flag".into());},_=>if value.as_str().is_none_or(|s|s.len()>65536){return Err("Invalid job string".into());}}}
+        for (key,value) in j{match key.as_str(){"profile"|"logs"=>(),"failure"=>validate_sync_failure(value)?,"statusError"=>{bounded_string(value,16384)?;},"pending"|"sent"|"speed"|"latency"|"errorCount"=>if value.as_f64().is_none_or(|n|!n.is_finite()||n<0.0){return Err("Invalid job metric".into());},"deleteRemoved"|"recursive"|"stopComplete"=>if !value.is_boolean(){return Err("Invalid job flag".into());},_=>if value.as_str().is_none_or(|s|s.len()>65536){return Err("Invalid job string".into());}}}
     }
     // Primitive fields cannot smuggle arbitrarily structured credential objects.
     for (k,value) in w{if !["connection","entries"].contains(&k.as_str())&&!value.is_string()&&!value.is_boolean()&&!value.is_null(){return Err("Invalid workspace field type".into());}}
+    Ok(())
+}
+fn validate_sync_failure(value:&Value)->Result<(),String>{
+    if value.is_null(){return Ok(());}
+    let f=object(value,&["relativePath","operation","reason","commitState","pending","requiresRescan"])?;
+    let required=|key:&str| f.get(key).ok_or_else(||"Missing sync failure field".to_string());
+    let path=required("relativePath")?;
+    if !path.is_null(){let path=bounded_string(path,16384)?;if path.is_empty()||path.starts_with(['/', '\\'])||path.as_bytes().get(1)==Some(&b':')||path.split(['/', '\\']).any(|part|part==".."){return Err("Invalid sync failure relative path".into());}}
+    for (key,limit) in [("operation",128),("reason",16384)]{if bounded_string(required(key)?,limit)?.is_empty(){return Err("Empty sync failure detail".into());}}
+    if !matches!(required("commitState")?.as_str(),Some("not_committed"|"committed"|"unknown"))||required("requiresRescan")?.as_bool()!=Some(true)||required("pending")?.as_u64().is_none_or(|n|n>9_007_199_254_740_991){return Err("Invalid sync failure state".into());}
     Ok(())
 }
 fn bounded_string(value:&Value,limit:usize)->Result<&str,String>{let s=value.as_str().ok_or("Invalid view state string")?;if s.chars().count()>limit||s.contains('\0'){return Err("View state string exceeds limit".into());}Ok(s)}
@@ -163,6 +173,14 @@ fn validate_view_state(v:&Value,w:&serde_json::Map<String,Value>)->Result<(),Str
 use super::*;
 fn setup()->Registry{let mut r=Registry::default();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","tab").unwrap();r}
 fn payload()->Value{serde_json::json!({"version":1,"workspace":{"id":"tab"}})}
+#[test]fn structured_sync_failure_transfers_without_accepting_nested_secrets_or_absolute_paths(){
+ let mut p=serde_json::json!({"version":1,"workspace":{"id":"tab"},"job":{"id":"job","profile":{"id":"p","name":"P","host":"mock","port":22,"user":"u","auth":"key","mode":"mock","keyFile":"","hostKey":""},"local":"C:\\generated","remote":"/generated","status":"failed","logs":[],"stopComplete":true,"statusError":"Status lock failed","failure":{"relativePath":"folder/a.txt","operation":"upload","reason":"Local source changed","commitState":"not_committed","pending":2,"requiresRescan":true}}});
+ assert!(validate_payload(&p,"tab").is_ok());
+ p["job"]["failure"]["passphrase"]="secret".into();assert!(validate_payload(&p,"tab").is_err());
+ p["job"]["failure"].as_object_mut().unwrap().remove("passphrase");
+ for path in ["C:\\private\\a.txt","../a.txt","/private/a.txt"]{p["job"]["failure"]["relativePath"]=path.into();assert!(validate_payload(&p,"tab").is_err());}
+ p["job"]["failure"]=Value::Null;assert!(validate_payload(&p,"tab").is_ok());
+}
 #[test]fn stopped_badge_is_window_scoped_survives_transfer_and_clears_with_its_workspace(){
  let mut r=setup();assert!(!r.has_stopped_sync("main"));
  r.prepare_job("main","job",Some("tab")).unwrap();r.finish_job("job");assert!(!r.has_stopped_sync("main"),"cancelled preparation is not a stopped sync");

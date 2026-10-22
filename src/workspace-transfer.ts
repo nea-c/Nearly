@@ -56,6 +56,9 @@ const jobOptional = [
   "exclusionRules",
   "deleteRemoved",
   "recursive",
+  "failure",
+  "statusError",
+  "stopComplete",
 ];
 function fail(): never {
   throw Error("Invalid workspace transfer");
@@ -307,6 +310,15 @@ function checked(input: unknown, project = false): WorkspaceTransfer {
     for (const k of ["deleteRemoved", "recursive"])
       if (Object.hasOwn(j, k)) bool(j[k]);
     j.logs = array(j.logs, 100).map((value) => str(value, 16384));
+    if(Object.hasOwn(j,'statusError'))str(j.statusError,16384);
+    if(Object.hasOwn(j,'stopComplete'))bool(j.stopComplete);
+    if(Object.hasOwn(j,'failure')&&j.failure!==null){
+      const f=fields(j.failure,['relativePath','operation','reason','commitState','pending','requiresRescan'],[],project);
+      if(f.relativePath!==null){const path=str(f.relativePath,16384,false);if(/^(?:[\\/]|[A-Za-z]:)/.test(path)||path.split(/[\\/]/).includes('..'))fail();}
+      str(f.operation,128,false);str(f.reason,16384,false);num(f.pending);
+      if(!['not_committed','committed','unknown'].includes(f.commitState as string)||f.requiresRescan!==true)fail();
+      j.failure=f;
+    }
     result.job = j as unknown as WorkspaceTransfer["job"];
   }
   if (
