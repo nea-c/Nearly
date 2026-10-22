@@ -3144,7 +3144,7 @@ mod directory_regression {
     }
     #[test]
     #[ignore = "generated localhost fixture"]
-    fn directory_deletion_generated_localhost_reconnect_revokes_authority() {
+    fn directory_deletion_generated_localhost_error_stops_until_manual_restart() {
         let f = Fixture::load();
         let (local, remote) = f.roots("dir-reconnect");
         std::fs::create_dir(local.join("owned")).unwrap();
@@ -3164,20 +3164,37 @@ mod directory_regression {
         )
         .unwrap();
         write(&local, "trigger.txt");
-        wait(|| engine.status("dir-reconnect").unwrap().error_count > 0);
-        wait(|| remote.join("trigger.txt").exists());
-        std::fs::remove_dir(local.join("owned")).unwrap();
         wait(|| {
-            engine
-                .status("dir-reconnect")
-                .unwrap()
-                .logs
-                .iter()
-                .any(|s| s.contains("Directory deletion authority unavailable"))
+            let status = engine.status("dir-reconnect").unwrap();
+            status.status == "failed" && status.stop_complete
         });
+        let failed = engine.status("dir-reconnect").unwrap();
+        assert_eq!(failed.error_count, 1);
+        assert_eq!(failed.failure.as_ref().unwrap().relative_path.as_deref(), Some("trigger.txt"));
+        assert!(!remote.join("trigger.txt").exists());
+        assert!(failed.pending > 0);
+        assert!(engine.retry("dir-reconnect").is_err());
+        // A failed job no longer reconnects automatically. Subsequent local
+        // changes must not perform uploads or consume stale deletion authority.
+        std::fs::remove_dir(local.join("owned")).unwrap();
+        std::fs::write(local.join("trigger.txt"), b"latest content after failure").unwrap();
+        thread::sleep(Duration::from_millis(1000));
         assert!(remote.join("owned").is_dir());
-        assert!(engine.status("dir-reconnect").unwrap().pending > 0);
+        assert!(!remote.join("trigger.txt").exists());
+        let stopped = engine.status("dir-reconnect").unwrap();
+        assert_eq!(stopped.status, "failed");
+        assert_eq!(stopped.error_count, 1);
         engine.stop("dir-reconnect").unwrap();
+        // Explicit new start builds a fresh inventory and evaluates the latest
+        // source state rather than replaying the failed session's queue/stamps.
+        let resumed = f.start("dir-reconnect", &local, SyncOptions {
+            delete_removed: true,
+            ..SyncOptions::default()
+        });
+        wait(|| std::fs::read(remote.join("trigger.txt")).ok().as_deref() == Some(b"latest content after failure"));
+        wait(|| !remote.join("owned").exists());
+        settled(&resumed, "dir-reconnect");
+        resumed.stop("dir-reconnect").unwrap();
     }
     #[test]
     fn directory_scope_and_local_guards() {

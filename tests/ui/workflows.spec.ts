@@ -140,11 +140,13 @@ test("keyboard focus survives background status updates", async ({ page }) => {
   await page.waitForTimeout(1000);
   await expect(button).toBeFocused();
 });
-test("delayed retry cannot revive a stopped job", async ({ page }) => {
+test("delayed stop and cancelled restart review cannot revive a stopped job", async ({ page }) => {
   await page.addInitScript(() => {
+    window.restartCalls=[];
     window.__TAURI__ = {
       core: {
         invoke: async (cmd) => {
+          window.restartCalls.push(cmd);
           if (cmd === "load_settings")
             return {
               version: 1,
@@ -175,10 +177,11 @@ test("delayed retry cannot revive a stopped job", async ({ page }) => {
               latency: 0,
               logs: [],
             };
-          if (cmd === "retry_sync")
+          if (cmd === "stop_sync")
             await new Promise((resolve) => {
-              window.releaseRetry = resolve;
+              window.releaseRestartStop = resolve;
             });
+          if (cmd === "retry_sync")throw Error('Automatic retry is forbidden');
         },
       },
     };
@@ -192,14 +195,18 @@ test("delayed retry cannot revive a stopped job", async ({ page }) => {
   await expect(page.locator("#retry")).toBeEnabled();
   await page.locator("#retry").click();
   await expect
-    .poll(() => page.evaluate(() => !!window.releaseRetry))
+    .poll(() => page.evaluate(() => !!window.releaseRestartStop))
     .toBe(true);
-  await page.locator("#prepare").click();
-  await expect(page.locator("#prepare")).toHaveText("同期");
-  await page.evaluate(() => window.releaseRetry());
+  expect(await page.evaluate(()=>window.restartCalls.filter(cmd=>cmd==='start_sync').length)).toBe(1);
+  await expect(page.locator('#start-form')).toHaveCount(0);
+  await page.evaluate(() => window.releaseRestartStop());
+  await expect(page.locator('#start-form')).toBeVisible();
+  await page.locator('#cancel').click();
   await page.waitForTimeout(900);
   await expect(page.locator("#retry")).toBeDisabled();
   await expect(page.locator("#prepare")).toHaveText("同期");
+  expect(await page.evaluate(()=>window.restartCalls.filter(cmd=>cmd==='start_sync').length)).toBe(1);
+  expect(await page.evaluate(()=>window.restartCalls.filter(cmd=>cmd==='retry_sync').length)).toBe(0);
 });
 
 test("pending sync startup freezes settings and cancellation restores them", async ({

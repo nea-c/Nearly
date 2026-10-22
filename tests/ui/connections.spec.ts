@@ -181,8 +181,15 @@ test("coalescing and errors keep logs closed until requested; retry and overlap 
   await expect(page.locator("#log-drawer")).toHaveCount(0);
   await page.locator("#error-count").click();
   await expect(page.locator(".logs")).toContainText("通信失敗");
+  await page.waitForTimeout(900);
+  await expect(page.locator("#sent-count")).toHaveText("送信 1");
   await page.locator("#retry").click();
-  await expect(page.locator("#sent-count")).toHaveText("送信 2");
+  await expect(page.locator("#start-form")).toBeVisible();
+  await page.locator("#start-form .primary").click();
+  await expect(page.locator("#start-form")).toHaveCount(0);
+  await expect(page.locator("#sent-count")).toHaveText("送信 0");
+  await page.locator("#burst").click();
+  await expect(page.locator("#sent-count")).toHaveText("送信 1");
   await page.locator("#burst").click();
   await page.locator("#add-tab").click();
   await connect(page);
@@ -192,6 +199,6 @@ test("coalescing and errors keep logs closed until requested; retry and overlap 
   await browse(page, "remote", "/two");
   await start(page);
   await page.locator(`[data-tab="${a}"]`).click();
-  await expect(page.locator("#sent-count")).toHaveText("送信 3");
+  await expect(page.locator("#sent-count")).toHaveText("送信 2");
   await expect(page.locator(".roots")).toContainText("/one");
 });
