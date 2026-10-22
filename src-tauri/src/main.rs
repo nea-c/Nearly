@@ -34,6 +34,7 @@ mod settings_location;
 mod settings_clients;
 mod sftp;
 mod source_change;
+mod listing_hint;
 mod unified_settings;
 mod split_settings;
 mod window_ownership;

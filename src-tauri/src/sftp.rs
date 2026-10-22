@@ -954,6 +954,40 @@ pub fn compare_files(s:&mut Connection,root:&Path,paths:&[std::path::PathBuf],re
     });
     result.map_err(|e|(failed_path.into_inner(),e))
 }
+// No remote I/O and no mutation stamp: a one-shot listing candidate only.
+#[cfg(test)]
+#[path="listing_test_hooks.rs"]
+mod listing_test_hooks;
+pub(crate) fn listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool)->Result<crate::listing_hint::Candidate,String>{
+    crate::file_ops::check(stop)?;
+    recorded_target("/",relative)?;
+    let source=root.join(relative);
+    let input=std::fs::File::open(&source).map_err(|_|"Local listing comparison source unavailable")?;
+    let snapshot=crate::source_change::Snapshot::capture(&input)?;
+    #[cfg(test)] listing_test_hooks::after_capture(&source,stop)?;
+    let candidate=hint.select(snapshot.length(),protocol_seconds(snapshot.modified()),session,false);
+    let mut observation=ObservedComparison{comparison:FileComparison::Upload{remote_newer:false},source,root:root.to_path_buf(),snapshot};
+    observation.revalidate()?;
+    crate::file_ops::check(stop)?;
+    Ok(finish_listing_candidate(candidate,&observation.comparison))
+}
+fn finish_listing_candidate(candidate:crate::listing_hint::Candidate,comparison:&FileComparison)->crate::listing_hint::Candidate {
+    if matches!(comparison,FileComparison::SourceChanged){crate::listing_hint::Candidate::SourceChanged}else{candidate}
+}
+#[cfg(test)]
+#[test]
+fn listing_changed_source_does_not_collapse_to_fresh_or_unchanged(){
+    use crate::listing_hint::Candidate;
+    let root=std::env::temp_dir().join(format!("nearly-listing-observation-{}",std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let source=root.join("generated.txt");
+    std::fs::write(&source,b"first").unwrap();let input=std::fs::File::open(&source).unwrap();let snapshot=crate::source_change::Snapshot::capture(&input).unwrap();
+    std::fs::write(&source,b"changed generated content").unwrap();
+    let mut observed=ObservedComparison{comparison:FileComparison::Upload{remote_newer:false},source:source.clone(),root:root.clone(),snapshot};
+    observed.revalidate().unwrap();
+    assert!(matches!(observed.comparison,FileComparison::SourceChanged));
+    for candidate in [Candidate::ListedUnchanged,Candidate::FreshComparison]{assert_eq!(finish_listing_candidate(candidate,&observed.comparison),Candidate::SourceChanged);}
+    drop(input);std::fs::remove_file(source).unwrap();std::fs::remove_dir(root).unwrap();
+}
 struct ObservedComparison {comparison:FileComparison,source:std::path::PathBuf,root:std::path::PathBuf,snapshot:crate::source_change::Snapshot}
 impl ObservedComparison {
     fn revalidate(&mut self)->Result<(),String>{
@@ -1040,56 +1074,79 @@ pub struct RemoteSnapshot {
     pub directories: Vec<(std::path::PathBuf, RemoteDirectoryStamp)>,
     pub retained: RetainedDirectories,
 }
+// These futures are polled together on the same runtime thread (never spawned).
+// One shared budget includes provisional results from every in-flight directory.
+#[derive(Default)]
+struct MirrorBudget {
+    entries: std::cell::Cell<usize>,
+    batches: std::cell::Cell<usize>,
+    bytes: std::cell::Cell<usize>,
+}
+fn mirror_charge(counter: &std::cell::Cell<usize>, amount: usize, limit: usize, error: &str) -> Result<(), String> {
+    let next=counter.get().saturating_add(amount);
+    if next>limit {return Err(error.into());}
+    counter.set(next);Ok(())
+}
+async fn mirror_directory(
+    raw:&RawSftpSession, relative:std::path::PathBuf, absolute:String,
+    rules:&crate::exclusion::Rules, recursive:bool, stop:&AtomicBool, budget:&MirrorBudget,
+) -> Result<(RemoteSnapshot,Vec<(std::path::PathBuf,String)>),String> {
+    crate::file_ops::check(stop)?;
+    let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
+    let mut children=Vec::new();
+    let guard=directory_guard(raw,&absolute).await?;
+    mirror_charge(&budget.bytes,guard.authority_bytes()+absolute.len()+relative.as_os_str().len()*2,16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
+    if !relative.as_os_str().is_empty(){snapshot.directories.push((relative.clone(),guard.clone()));}
+    let handle=raw.opendir(absolute.clone()).await.map_err(|_|"Remote mirror inventory open failed; deletion refused")?.handle;
+    let mut seen=std::collections::HashSet::new();
+    loop {
+        crate::file_ops::check(stop)?;
+        mirror_charge(&budget.batches,1,20000,"Remote mirror listing budget exceeded; deletion refused")?;
+        match raw.readdir(handle.clone()).await {
+            Ok(batch)=>for entry in batch.files {
+                if entry.filename=="."||entry.filename==".."{continue;}
+                mirror_charge(&budget.entries,1,10000,"Remote mirror inventory exceeds 10,000 entries; deletion refused")?;
+                if !seen.insert(entry.filename.to_lowercase()){return Err("Duplicate or case-ambiguous remote mirror entry; deletion refused".into());}
+                if crate::file_ops::validate_creation_name(&entry.filename,crate::file_ops::Side::Local).is_err(){snapshot.retained.retain(&relative)?;continue;}
+                let child=relative.join(&entry.filename);
+                mirror_charge(&budget.bytes,child.as_os_str().len()*4+entry.filename.len(),16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
+                let dir=entry.attrs.file_type().is_dir()&&!entry.attrs.is_symlink();
+                if rules.excludes(&child,dir)?||entry.attrs.is_symlink()||(!dir&&!entry.attrs.file_type().is_file())||(!recursive&&dir){snapshot.retained.retain(&relative)?;continue;}
+                if dir {
+                    if child.components().count()>64{return Err("Remote mirror directory depth exceeds 64; deletion refused".into());}
+                    children.push((child,format!("{}/{}",absolute.trim_end_matches('/'),entry.filename)));
+                }else if let Ok(mut stamp)=remote_stamp(&entry.attrs){stamp.parent=Some(guard.clone());snapshot.files.push((child,stamp));}
+                else{snapshot.retained.retain(&relative)?;}
+            },
+            Err(SftpError::Status(status)) if status.status_code==StatusCode::Eof=>break,
+            Err(_)=>return Err("Remote mirror inventory read failed; deletion refused".into()),
+        }
+    }
+    raw.close(handle).await.map_err(|_|"Remote mirror inventory close failed; deletion refused")?;
+    if directory_guard(raw,&absolute).await?!=guard{return Err("Remote mirror directory changed during inventory; deletion refused".into());}
+    Ok((snapshot,children))
+}
 // Build everything before publishing authority. A failed READDIR, budget or
 // invalid UTF-8 packet discards the complete snapshot, never authorizes a purge.
 pub fn mirror_snapshot(s: &mut Connection, remote: &str, rules: &crate::exclusion::Rules, recursive: bool, stop: &AtomicBool) -> Result<RemoteSnapshot, String> {
-    let remote = normalize(remote)?;
-    s.run(stop, async {
-        let mut snapshot = RemoteSnapshot { files: Vec::new(), directories: Vec::new(), retained: Default::default() };
-        let mut stack = vec![(std::path::PathBuf::new(), remote)];
-        let mut entries = 0usize;
-        let mut batches = 0usize;
-        let mut authority_bytes = 0usize;
-        while let Some((relative, absolute)) = stack.pop() {
+    let remote=normalize(remote)?;
+    s.run(stop,async {
+        let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
+        let mut stack=vec![(std::path::PathBuf::new(),remote)];
+        let budget=MirrorBudget::default();
+        while !stack.is_empty(){
             crate::file_ops::check(stop)?;
-            let guard = directory_guard(&s.raw, &absolute).await?;
-            authority_bytes=authority_bytes.saturating_add(guard.authority_bytes()+absolute.len()+relative.as_os_str().len()*2);
-            if authority_bytes > 16*1024*1024 { return Err("Remote mirror authority memory limit reached; deletion refused".into()); }
-            if !relative.as_os_str().is_empty() { snapshot.directories.push((relative.clone(), guard.clone())); }
-            let handle = s.raw.opendir(absolute.clone()).await.map_err(|_| "Remote mirror inventory open failed; deletion refused")?.handle;
-            let mut seen = std::collections::HashSet::new();
-            loop {
-                batches += 1;
-                if batches > 20000 { return Err("Remote mirror listing budget exceeded; deletion refused".into()); }
-                match s.raw.readdir(handle.clone()).await {
-                    Ok(batch) => for entry in batch.files {
-                        if entry.filename == "." || entry.filename == ".." { continue; }
-                        entries += 1;
-                        if entries > 10000 { return Err("Remote mirror inventory exceeds 10,000 entries; deletion refused".into()); }
-                        if !seen.insert(entry.filename.to_lowercase()) { return Err("Duplicate or case-ambiguous remote mirror entry; deletion refused".into()); }
-                        if crate::file_ops::validate_creation_name(&entry.filename, crate::file_ops::Side::Local).is_err() {
-                            snapshot.retained.retain(&relative)?; continue;
-                        }
-                        let child = relative.join(&entry.filename);
-                        authority_bytes=authority_bytes.saturating_add(child.as_os_str().len()*4+entry.filename.len());
-                        if authority_bytes > 16*1024*1024 { return Err("Remote mirror authority memory limit reached; deletion refused".into()); }
-                        let dir = entry.attrs.file_type().is_dir() && !entry.attrs.is_symlink();
-                        if rules.excludes(&child, dir)? || entry.attrs.is_symlink() || (!dir && !entry.attrs.file_type().is_file()) || (!recursive && dir) {
-                            snapshot.retained.retain(&relative)?; continue;
-                        }
-                        if dir {
-                            if child.components().count() > 64 { return Err("Remote mirror directory depth exceeds 64; deletion refused".into()); }
-                            stack.push((child, format!("{}/{}", absolute.trim_end_matches('/'), entry.filename)));
-                        } else if let Ok(mut stamp) = remote_stamp(&entry.attrs) {
-                            stamp.parent = Some(guard.clone()); snapshot.files.push((child, stamp));
-                        } else { snapshot.retained.retain(&relative)?; }
-                    },
-                    Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
-                    Err(_) => return Err("Remote mirror inventory read failed; deletion refused".into()),
-                }
+            let batch:Vec<_>=(0..4).filter_map(|_|stack.pop()).collect();
+            // Only descendants of fully verified parents enter the next batch.
+            // A failure drops sibling futures; Connection::run closes the channel.
+            let results=futures_util::future::try_join_all(batch.into_iter().map(|(relative,absolute)|mirror_directory(&s.raw,relative,absolute,rules,recursive,stop,&budget))).await?;
+            crate::file_ops::check(stop)?;
+            for (mut partial,children) in results{
+                snapshot.files.append(&mut partial.files);
+                snapshot.directories.append(&mut partial.directories);
+                for retained in partial.retained.paths{snapshot.retained.retain(&retained)?;}
+                stack.extend(children);
             }
-            s.raw.close(handle).await.map_err(|_| "Remote mirror inventory close failed; deletion refused")?;
-            if directory_guard(&s.raw,&absolute).await? != guard { return Err("Remote mirror directory changed during inventory; deletion refused".into()); }
         }
         Ok(snapshot)
     })
@@ -1155,6 +1212,42 @@ pub fn authorize_directory(
     verify_local: &dyn Fn() -> Result<(), String>,
 ) -> Result<RemoteDirectoryStamp, String> {
     authorize_directory_observed(s,remote,relative,stop,verify_local).map(|(stamp,_)|stamp)
+}
+// Read-only confirmation only. Missing targets return to the serial creator;
+// independent futures never race to mkdir a shared missing ancestor.
+pub fn authorize_existing_directories(
+    s:&mut Connection, remote:&str, paths:&[std::path::PathBuf], stop:&AtomicBool,
+    verify_local:&dyn Fn(&Path)->Result<(),String>,
+) -> Result<Vec<Option<RemoteDirectoryStamp>>,(Option<std::path::PathBuf>,String)> {
+    if paths.is_empty()||paths.len()>4{return Err((None,"Invalid directory confirmation batch".into()));}
+    let root=normalize(remote).map_err(|error|(None,error))?;
+    let raw=&s.raw;
+    let failed_path=std::cell::RefCell::new(None);
+    let result=s.run(stop,async {
+        for path in paths {verify_local(path).map_err(|error|{*failed_path.borrow_mut()=Some(path.clone());error})?;}
+        let results=futures_util::future::try_join_all(paths.iter().map(|path|{
+            let root=&root;
+            let failed_path=&failed_path;
+            async move {
+                let result:Result<Option<RemoteDirectoryStamp>,String>=async {
+                let target=recorded_target(root,path)?;
+                checked_directory(raw,root,false).await?;
+                match raw.lstat(target.clone()).await {
+                    Ok(_)=>(),
+                    Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile=>return Ok(None),
+                    Err(_)=>return Err("Remote directory lookup failed".into()),
+                }
+                checked_directory(raw,&target,false).await?;
+                directory_guard(raw,&target).await.map(Some)
+                }.await;
+                result.map_err(|error|{*failed_path.borrow_mut()=Some(path.clone());error})
+            }
+        })).await?;
+        for path in paths {verify_local(path).map_err(|error|{*failed_path.borrow_mut()=Some(path.clone());error})?;}
+        crate::file_ops::check(stop)?;
+        Ok(results)
+    });
+    result.map_err(|error|(failed_path.into_inner(),error))
 }
 pub fn authorize_directory_observed(
     s: &mut Connection, remote: &str, relative: &Path, stop: &AtomicBool,
@@ -1283,6 +1376,14 @@ pub fn delete_uploaded_file(
         Ok(())
     })
 }
+async fn checked_commit_parent<F>(stop:&AtomicBool, verification:F)->Result<(),String>
+where F:Future<Output=Result<(),String>> {
+    crate::file_ops::check(stop)?;
+    verification.await?;
+    // The parent check can wait on the network. A stop during that wait must
+    // not authorize a new rename after its response arrives.
+    crate::file_ops::check(stop)
+}
 pub fn upload(
     s: &mut Connection,
     root: &Path,
@@ -1387,8 +1488,7 @@ pub fn upload(
             }
             return Ok(SourceOutcome::Changed { committed: None });
         }
-        if stop.load(Ordering::Relaxed){return Err("Stopped before final rename; staging retained".into());}
-        checked_directory(&s.raw,parent,false).await?;
+        checked_commit_parent(stop,checked_directory(&s.raw,parent,false)).await?;
         if s.posix_rename {
             let mut data=Vec::new();for value in [&stage,&target]{data.extend_from_slice(&(value.len() as u32).to_be_bytes());data.extend_from_slice(value.as_bytes());}
             match s.raw.extended("posix-rename@openssh.com",data).await.map_err(|_|remote_error("final rename"))? {
@@ -1402,6 +1502,31 @@ pub fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mirror_budget_includes_provisional_sibling_results() {
+        let budget=MirrorBudget::default();
+        mirror_charge(&budget.entries,9600,10000,"entries").unwrap();
+        assert_eq!(mirror_charge(&budget.entries,401,10000,"entries"),Err("entries".into()));
+        assert_eq!(budget.entries.get(),9600);
+        mirror_charge(&budget.bytes,16*1024*1024,16*1024*1024,"bytes").unwrap();
+        assert!(mirror_charge(&budget.bytes,1,16*1024*1024,"bytes").is_err());
+        mirror_charge(&budget.batches,20000,20000,"batches").unwrap();
+        assert!(mirror_charge(&budget.batches,1,20000,"batches").is_err());
+    }
+    #[tokio::test]
+    async fn final_commit_refuses_stop_observed_during_parent_verification() {
+        let stop=AtomicBool::new(false);
+        let result=checked_commit_parent(&stop,async {stop.store(true,Ordering::SeqCst);Ok(())}).await;
+        assert!(result.is_err(),"A stop raised during final parent verification must prevent rename");
+    }
+    #[tokio::test]
+    async fn final_commit_preserves_parent_error_and_never_polls_after_stop() {
+        let stop=AtomicBool::new(false);
+        assert_eq!(checked_commit_parent(&stop,async {stop.store(true,Ordering::SeqCst);Err("unsafe parent".into())}).await,Err("unsafe parent".into()));
+        let polled=std::cell::Cell::new(false);
+        assert!(checked_commit_parent(&stop,async {polled.set(true);Ok(())}).await.is_err());
+        assert!(!polled.get());
+    }
     #[test]
     fn retained_directory_authority_is_bounded_across_distinct_lifetime_paths() {
         let mut retained=RetainedDirectories::default();

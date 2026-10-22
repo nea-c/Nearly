@@ -22,6 +22,16 @@ const profile = {
   keyFile: "C:\\key",
   hostKey: "",
 };
+test("deletion rescan warning survives workspace transfer without changing running status", () => {
+  const {store,w}=fixture();store.tabs[0].deletionRescanRequired=true;
+  const dto=snapshotWorkspaceTransfer(store,w.id);
+  assert.equal(dto.job.deletionRescanRequired,true);
+  const target=new Store({profiles:[profile]});hydrateWorkspaceTransfer(target,dto,w.id);
+  assert.equal(target.tabs[0].deletionRescanRequired,true);
+  assert.equal(target.tabs[0].status,"running");
+  const invalid=structuredClone(dto);invalid.job.deletionRescanRequired="true";
+  assert.throws(()=>validateWorkspaceTransfer(invalid));
+});
 test("transfer retains file selection anchor and browse back/forward state", () => {
   const { store, w } = fixture();
   w.entries.local = ["a", "b", "c"].map((name) => ({

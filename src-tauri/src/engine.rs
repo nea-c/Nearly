@@ -1,4 +1,7 @@
 use crate::sftp::{self, Profile};
+use crate::listing_hint::{DeletionBasis,ListingHint,Candidate};
+impl DeletionBasis<sftp::RemoteStamp> { fn authority_bytes(&self)->usize {self.storage_bytes(sftp::RemoteStamp::authority_bytes)} }
+impl DeletionBasis<sftp::RemoteDirectoryStamp> { fn authority_bytes(&self)->usize {self.storage_bytes(sftp::RemoteDirectoryStamp::authority_bytes)} }
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
@@ -160,7 +163,7 @@ fn queue_directories(
     path: &Path,
     root: &Path,
     queue: &mut HashMap<PathBuf, Pending>,
-    directories: &mut HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>>,
+    directories: &mut HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>>,
     stop: &AtomicBool,
     rules: &crate::exclusion::Rules,
     detected: Instant,
@@ -278,16 +281,16 @@ fn deletion_parent_guard(root: &Path, relative: &Path) -> Result<Vec<std::fs::Fi
     }
     Ok(held)
 }
-fn suspend_directories(directories: &mut HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>>) {
+fn suspend_directories(directories: &mut HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>>) {
     for stamp in directories.values_mut() {
-        *stamp = None;
+        if let Some(basis)=stamp {basis.suspend();}
     }
 }
-fn remember_directory(directories: &mut HashMap<PathBuf,Option<sftp::RemoteDirectoryStamp>>, path: PathBuf, stamp: sftp::RemoteDirectoryStamp, bytes: &mut usize) -> Result<(),String> {
-    let old=directories.get(&path).and_then(Option::as_ref).map_or(0,sftp::RemoteDirectoryStamp::authority_bytes);
+fn remember_directory(directories: &mut HashMap<PathBuf,Option<DeletionBasis<sftp::RemoteDirectoryStamp>>>, path: PathBuf, stamp: sftp::RemoteDirectoryStamp, bytes: &mut usize) -> Result<(),String> {
+    let old=directories.get(&path).and_then(Option::as_ref).map_or(0,DeletionBasis::<sftp::RemoteDirectoryStamp>::authority_bytes);
     let next=bytes.saturating_sub(old).saturating_add(stamp.authority_bytes());
     if next>16*1024*1024 { return Err("Directory authority memory limit reached; stop and start a shallower sync".into()); }
-    directories.insert(path,Some(stamp)); *bytes=next; Ok(())
+    directories.insert(path,Some(DeletionBasis::Verified(stamp))); *bytes=next; Ok(())
 }
 
 const REMOTE_CHANGE_LIMIT: usize = 64;
@@ -343,6 +346,8 @@ pub struct Status {
     pub failure: Option<SyncFailure>,
     #[serde(rename = "stopComplete")]
     pub stop_complete: bool,
+    #[serde(rename = "deletionRescanRequired")]
+    pub deletion_rescan_required: bool,
 }
 impl Status {
     fn new() -> Self {
@@ -359,6 +364,7 @@ impl Status {
             logs: vec!["Initial scan started".into()],
             failure: None,
             stop_complete: false,
+            deletion_rescan_required: false,
         }
     }
     fn log(&mut self, s: &str) {
@@ -605,13 +611,13 @@ fn remember_upload<T>(
     Ok(())
 }
 fn remember_file(
-    inventory: &mut HashMap<PathBuf,sftp::RemoteStamp>, path: PathBuf, stamp: sftp::RemoteStamp,
+    inventory: &mut HashMap<PathBuf,DeletionBasis<sftp::RemoteStamp>>, path: PathBuf, stamp: sftp::RemoteStamp,
     authority_bytes: &mut usize,
 ) -> Result<(),String> {
     let previous=inventory.get(&path).map_or(0,|old|old.authority_bytes()+path.as_os_str().len()*2);
     let next=authority_bytes.saturating_sub(previous).saturating_add(stamp.authority_bytes()+path.as_os_str().len()*2);
     if next > 16*1024*1024 { return Err("Deletion disabled: file authority memory limit reached; stop and start a shallower sync".into()); }
-    remember_upload(inventory,path,stamp)?;
+    remember_upload(inventory,path,DeletionBasis::Verified(stamp))?;
     *authority_bytes=next;
     Ok(())
 }
@@ -1336,7 +1342,7 @@ fn worker(
         return;
     }
     let mut queue = HashMap::new();
-    let mut directories: HashMap<PathBuf, Option<sftp::RemoteDirectoryStamp>> = HashMap::new();
+    let mut directories: HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>> = HashMap::new();
     if let Err(error) = crate::initial_scan::walk(&root,&stop,&rules,options.recursive,options.delete_removed, |path,is_directory| {
         if is_directory { directories.entry(path.clone()).or_insert(None); }
         enqueue_at(&mut queue,path,Instant::now())
@@ -1350,7 +1356,9 @@ fn worker(
     state.lock().unwrap().log("Initial local scan completed");
     state.lock().unwrap().pending=queue.len();
     let mut connection = Some(initial);
-    let mut inventory: HashMap<PathBuf, sftp::RemoteStamp> = HashMap::new();
+    let mut inventory: HashMap<PathBuf, DeletionBasis<sftp::RemoteStamp>> = HashMap::new();
+    let mut listing_hints: HashMap<PathBuf,ListingHint> = HashMap::new();
+    let mut listing_session=1u64;
     let mut file_authority_bytes = 0usize;
     let mut retained_directories = sftp::RetainedDirectories::default();
     let mut directory_authority_bytes=0usize;
@@ -1363,14 +1371,25 @@ fn worker(
             if local_root_identity(&root)? != root_identity { return Err("Local root changed during mirror inventory; deletion refused".into()); }
             for entry in std::fs::read_dir(&root).map_err(|_| "Local root unreadable after mirror inventory")? { entry.map_err(|_| "Local root entry unreadable after mirror inventory")?; }
             for (path, stamp) in snapshot.files {
-                remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes)?;
+                listing_hints.insert(path.clone(),ListingHint::from_listing(stamp.size,Some(stamp.mtime),listing_session));
+                remember_file(&mut inventory,path.clone(),stamp.clone(),&mut file_authority_bytes)?;
+                inventory.insert(path.clone(),DeletionBasis::listed_after_complete_inventory(stamp,listing_session));
                 enqueue_at(&mut queue,path,Instant::now())?;
             }
             retained_directories = snapshot.retained;
             for (path,stamp) in snapshot.directories {
                 if directories.len() >= 10000 && !directories.contains_key(&path) { return Err("Directory tracking limit reached; deletion refused".into()); }
-                remember_directory(&mut directories,path.clone(),stamp,&mut directory_authority_bytes)?;
-                enqueue_at(&mut queue,path,Instant::now())?;
+                remember_directory(&mut directories,path.clone(),stamp.clone(),&mut directory_authority_bytes)?;
+                directories.insert(path.clone(),Some(DeletionBasis::listed_after_complete_inventory(stamp,listing_session)));
+                // No-op classification only: complete traversal guards already
+                // succeeded. Real RMDIR/MKDIR still use fresh mutation guards.
+                // This queue still contains initial-scan entries only. Watcher
+                // events remain in rx until the loop below and are not consumed.
+                if directory_action(&root,&path,&root_identity,&stop)?==LocalAction::Skip {
+                    crate::file_ops::check(&stop)?;
+                    queue.remove(&path);
+                    state.lock().unwrap().log(&format!("Listed existing directory {}",path.display()));
+                }else{enqueue_at(&mut queue,path,Instant::now())?;}
             }
             state.lock().unwrap().log("Mirror inventory verified; only in-scope source-absent files and empty directories may be deleted");
         }
@@ -1467,6 +1486,10 @@ fn worker(
             let mut s = state.lock().unwrap();
             s.pending = queue.len();
             let drained=events_drained && event_epoch.load(Ordering::SeqCst)==observed_epoch;
+            s.deletion_rescan_required=delete_enabled && (inventory.values().any(DeletionBasis::is_suspended)
+                || directories.values().flatten().any(DeletionBasis::is_suspended));
+            let deletion_rescan_required=s.deletion_rescan_required;
+            s.activity.set_deletion_rescan_required(deletion_rescan_required);
             let unsafe_state=blocked || rescan_required || (options.delete_removed&&!delete_enabled) || (queue.is_empty()&&directories.values().any(Option::is_none));
             s.activity.settle(queue.len(),drained,false,stop.load(Ordering::SeqCst),unsafe_state);
             if last_transfer.elapsed() > Duration::from_secs(2) {
@@ -1477,7 +1500,7 @@ fn worker(
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        let ready = queue
+        let mut ready = queue
             .iter()
             .filter(|(path, v)| {
                 v.last.elapsed() >= Duration::from_millis(500)
@@ -1490,14 +1513,96 @@ fn worker(
             .min_by_key(|(path, _)| {
                 let depth = path.components().count();
                 if directories.contains_key(*path) && root.join(path).is_dir() {
-                    (0, depth)
+                    (1, depth)
                 } else if directories.contains_key(*path) {
                     (2, 64usize.saturating_sub(depth))
                 } else {
-                    (1, depth)
+                    (0, depth)
                 }
             })
             .map(|(k, _)| k.clone());
+        // Only this source's missing ancestors precede it; each guarded mkdir
+        // records its own receipt rather than upload creating untracked parents.
+        if delete_enabled {
+            if let Some(candidate)=ready.clone().filter(|path|root.join(path).exists()) {
+                let mut parents:Vec<_>=candidate.parent().into_iter().flat_map(Path::ancestors)
+                    .filter(|path|!path.as_os_str().is_empty()).map(Path::to_path_buf).collect();
+                parents.reverse();
+                for parent in &parents {
+                    if !directories.contains_key(parent){
+                        if directories.len()>=10000 {fatal("Directory tracking limit reached; deletion refused".into());break;}
+                        directories.insert(parent.clone(),None);
+                        if let Err(error)=enqueue_at(&mut queue,parent.clone(),Instant::now()){fatal(error);break;}
+                    }
+                    // An unknown initial parent can already be tracked without
+                    // a queue entry. Register once; never reset debounce in a loop.
+                    if directories.get(parent).is_some_and(Option::is_none)&&!queue.contains_key(parent){
+                        if let Err(error)=enqueue_at(&mut queue,parent.clone(),Instant::now()){fatal(error);break;}
+                    }
+                }
+                if state.lock().unwrap().failure.is_some(){break;}
+                if let Some(parent)=parents.into_iter().find(|parent|directories.get(parent).is_some_and(Option::is_none)) {
+                    ready=queue.get(&parent).filter(|item|item.last.elapsed()>=Duration::from_millis(500)).map(|_|parent);
+                }
+            }
+        }
+        // Hints classify once and never publish a deletion permit. The separate
+        // complete-inventory baseline is checked freshly at the actual mutation.
+        if let Some(path)=ready.as_ref().filter(|p|!directories.contains_key(*p)
+            &&queue.get(*p).is_some_and(|v|!v.force_upload&&!v.batch_checked)
+            &&connection.as_ref().is_some_and(|c|!c.needs_recycle())) {
+            if let Some(hint)=listing_hints.remove(path) {
+                let result=local_transfer_action(&root,path,&root_identity,delete_enabled&&inventory.contains_key(path),&stop)
+                    .and_then(|action|if action==LocalAction::Upload {sftp::listing_candidate(&root,path,&hint,listing_session,&stop)}else{Ok(Candidate::FreshComparison)});
+                match result {
+                    Ok(Candidate::ListedUnchanged)=>{
+                        if stop.load(Ordering::SeqCst){break;}
+                        queue.remove(path);
+                        state.lock().unwrap().log(&format!("Skipped listed unchanged {}; deletion uses the complete-listing baseline",path.display()));
+                        continue;
+                    },
+                    Ok(Candidate::FreshComparison)=>(),
+                    Ok(Candidate::SourceChanged)=>{
+                        if let Some(item)=queue.get_mut(path){item.force_upload=true;item.last=Instant::now();}
+                        state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));
+                        continue;
+                    },
+                    Err(error)=>{state.lock().unwrap().failure_context(&error,Some(path),"compare","not_committed",queue.len(),stop.load(Ordering::Relaxed));break;}
+                }
+            }
+        }
+        // Unrelated directory adoption must not block the first file transfer.
+        // Once directory work is selected, confirm existing peers read-only in
+        // bounded batches. Missing targets still use serial creation below.
+        if ready.as_ref().is_some_and(|p|directories.contains_key(p)&&root.join(p).is_dir()
+            &&queue.get(p).is_some_and(|v|!v.batch_checked))
+            &&connection.as_ref().is_some_and(|c|!c.needs_recycle()) {
+            let candidates:Vec<_>=queue.iter().filter(|(p,v)|directories.get(*p).is_some_and(Option::is_some)
+                &&!v.batch_checked&&v.last.elapsed()>=Duration::from_millis(500)&&root.join(p).is_dir())
+                .map(|(p,_)|p.clone()).take(4).collect();
+            if candidates.len()>1 {
+                let verify=|path:&Path|{
+                    if directory_action(&root,path,&root_identity,&stop)?!=LocalAction::Skip{return Err("Local directory disappeared during verification".into());}Ok(())
+                };
+                let result=sftp::authorize_existing_directories(connection.as_mut().unwrap(),&remote,&candidates,&stop,&verify);
+                match result {
+                    Err((path,error))=>{state.lock().unwrap().failure_context(&error,path.as_deref(),"directory","not_committed",queue.len(),stop.load(Ordering::Relaxed));break;},
+                    Ok(results)=>{
+                        if stop.load(Ordering::SeqCst){break;}
+                        let mut failed=false;
+                        for (path,stamp) in candidates.into_iter().zip(results){
+                            if let Some(_stamp)=stamp {
+                                // Confirmation cannot change the fixed basis.
+                                queue.remove(&path);
+                            }else if let Some(item)=queue.get_mut(&path){item.batch_checked=true;}
+                        }
+                        if failed{break;}
+                        state.lock().unwrap().pending=queue.len();
+                        continue;
+                    }
+                }
+            }
+        }
         // Compare at most four independent files on the existing authenticated
         // session. Publish no authority/skip result until the entire batch has
         // succeeded. Upload/delete paths retain their fresh mutation guards.
@@ -1514,6 +1619,8 @@ fn worker(
                     Ok(LocalAction::Upload)=>files.push(path),Ok(_)=>(),Err(e)=>{invalid=Some((Some(path),e));break;}
                 }
             }
+            // Fresh observations supersede all hints in the batch, including peers.
+            for path in &files {listing_hints.remove(path);}
             let batch=if let Some(error)=invalid {Err(error)} else if files.len()>1 {
                 sftp::compare_files(connection.as_mut().unwrap(),&root,&files,&remote,&stop)
             } else {Ok(Vec::new())};
@@ -1526,12 +1633,8 @@ fn worker(
                     let mut consumed=false;let mut failed=false;
                     for (path,result) in files.into_iter().zip(results){
                         match result {
-                            sftp::FileComparison::Unchanged(stamp)=>{
-                                if delete_enabled {
-                                    if let Err(error)=remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes){
-                                        state.lock().unwrap().failure_context(&error,Some(&path),"record","not_committed",queue.len(),false);failed=true;break;
-                                    }
-                                }
+                            sftp::FileComparison::Unchanged(_stamp)=>{
+                                // Read-only matches never rebase deletion state.
                                 queue.remove(&path);consumed=true;
                                 state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display()));
                             },
@@ -1549,6 +1652,9 @@ fn worker(
             }
         }
         if let Some(path) = ready {
+            // Serial comparisons and forced uploads supersede the original hint
+            // too; a later directory event must never resurrect that observation.
+            listing_hints.remove(&path);
             state.lock().unwrap().activity.mark_working();
             let mut item = queue.remove(&path).unwrap();
             let is_directory = directories.contains_key(&path);
@@ -1579,6 +1685,10 @@ fn worker(
             }
             let start = Instant::now();
             if connection.as_ref().is_some_and(|c| c.needs_recycle()) {
+                listing_hints.clear();
+                listing_session=listing_session.saturating_add(1);
+                for basis in inventory.values_mut(){basis.suspend();}
+                file_authority_bytes=inventory.keys().map(|path|path.as_os_str().len()*2).sum();
                 suspend_directories(&mut directories);
                 directory_authority_bytes=0;
                 connection = None;
@@ -1615,13 +1725,17 @@ fn worker(
                     let action = directory_action(&root, &path, &root_identity, &stop)?;
                     let connection = connection.as_mut().unwrap();
                     if action == LocalAction::Delete {
+                        if inventory.iter().any(|(child,basis)|child.starts_with(&path)&&basis.is_suspended())
+                            ||directories.iter().any(|(child,basis)|child!=&path&&child.starts_with(&path)&&basis.as_ref().is_none_or(DeletionBasis::is_suspended)) {
+                            return Err("Descendant deletion basis suspended after reconnect or incomplete verification; stop and restart".into());
+                        }
                         if retained_directories.contains(&path) {
                             if let Some(Some(stamp))=directories.remove(&path) {directory_authority_bytes=directory_authority_bytes.saturating_sub(stamp.authority_bytes());}
                             state.lock().unwrap().log(&format!("Retained remote directory with excluded or unsupported entries {}",path.display()));
                             return Ok((0,None,LocalAction::Skip,false));
                         }
                         let _local_parents = deletion_parent_guard(&root, &path)?;
-                        let stamp=directories.get(&path).and_then(Option::as_ref).ok_or("Directory deletion authority unavailable after reconnect or incomplete verification; restore local directory or stop and restart")?;
+                        let stamp=directories.get(&path).and_then(Option::as_ref).ok_or("Directory deletion authority unavailable after reconnect or incomplete verification; restore local directory or stop and restart")?.expected(listing_session)?;
                         let removed = sftp::delete_owned_directory(
                             connection,
                             &remote,
@@ -1655,7 +1769,11 @@ fn worker(
                             }
                             Ok(())
                         })?;
-                    remember_directory(&mut directories,path.clone(),stamp,&mut directory_authority_bytes)?;
+                    if created {
+                        remember_directory(&mut directories,path.clone(),stamp,&mut directory_authority_bytes)?;
+                    } else if let Some(basis)=directories.get_mut(&path) {
+                        if basis.is_none(){*basis=Some(DeletionBasis::Suspended);}
+                    }
                     return Ok((0, None, LocalAction::Skip, created));
                 }
                 let action = local_transfer_action(
@@ -1669,7 +1787,7 @@ fn worker(
                 if action == LocalAction::Upload && !item.force_upload {
                     match sftp::compare_file(connection,&root,&path,&remote,&stop)? {
                         sftp::FileComparison::SourceChanged => { source_changed=true; return Ok((0,None,LocalAction::Skip,false)); },
-                        sftp::FileComparison::Unchanged(stamp) => return Ok((0, if delete_enabled {Some(stamp)}else{None},LocalAction::Skip,false)),
+                        sftp::FileComparison::Unchanged(_stamp) => return Ok((0,None,LocalAction::Skip,false)),
                         sftp::FileComparison::Upload { remote_newer: true } => state.lock().unwrap().log(&format!("Remote newer; source-authoritative overwrite {}",path.display())),
                         sftp::FileComparison::Upload { remote_newer: false } => (),
                     }
@@ -1695,7 +1813,7 @@ fn worker(
                         operation = "delete";
                         let stamp = inventory
                             .get(&path)
-                            .ok_or("File was not uploaded by this sync job")?;
+                            .ok_or("File was not uploaded by this sync job")?.expected(listing_session)?;
                         let _local_parents = deletion_parent_guard(&root,&path)?;
                         sftp::delete_uploaded_file(connection, &remote, &path, stamp, &stop, &|| {
                             if local_transfer_action(&root,&path,&root_identity,true,&stop)? != LocalAction::Delete { return Err("Local file recreated before remote removal; deletion refused".into()); }
@@ -3434,6 +3552,10 @@ mod stop_summary_tests {
         let e=Engine::default();e.prepare("old-api".into()).unwrap();assert!(e.stop("old-api").is_ok());
     }
 }
+
+#[cfg(test)]
+#[path="startup_pipeline_tests.rs"]
+mod startup_pipeline_tests;
 
 #[cfg(test)] mod taskbar_integration_tests {
  use super::*; use crate::taskbar_status::{TaskbarState as T,NativeSyncState as N};

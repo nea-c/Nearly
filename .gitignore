@@ -153,3 +153,6 @@ Thumbs.db
 !/scripts/sync-runtime-fixture.mjs
 !/docs/sync-source-changes.md
 !/docs/updater-cleanup.md
+!/docs/sync-startup-inventory.md
+!/scripts/listing-worker-test.mjs
+!/scripts/listing-existing-pipeline-test.mjs

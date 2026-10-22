@@ -59,6 +59,7 @@ const jobOptional = [
   "failure",
   "statusError",
   "stopComplete",
+  "deletionRescanRequired",
 ];
 function fail(): never {
   throw Error("Invalid workspace transfer");
@@ -312,6 +313,7 @@ function checked(input: unknown, project = false): WorkspaceTransfer {
     j.logs = array(j.logs, 100).map((value) => str(value, 16384));
     if(Object.hasOwn(j,'statusError'))str(j.statusError,16384);
     if(Object.hasOwn(j,'stopComplete'))bool(j.stopComplete);
+    if(Object.hasOwn(j,'deletionRescanRequired'))bool(j.deletionRescanRequired);
     if(Object.hasOwn(j,'failure')&&j.failure!==null){
       const f=fields(j.failure,['relativePath','operation','reason','commitState','pending','requiresRescan'],[],project);
       if(f.relativePath!==null){const path=str(f.relativePath,16384,false);if(/^(?:[\\/]|[A-Za-z]:)/.test(path)||path.split(/[\\/]/).includes('..'))fail();}

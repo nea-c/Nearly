@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, beforeRename, posixRename = true} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true} = {}) {
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -219,7 +219,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               try {
                 const status = beforeStat ? await beforeStat(op, p) : undefined;
                 if (status !== undefined) { stream.status(id,status); return; }
-                stream.attrs(id, attrs(fs.lstatSync(local(p))));
+                stream.attrs(id, mapStat ? mapStat(p,attrs(fs.lstatSync(local(p)))) : attrs(fs.lstatSync(local(p))));
               } catch {
                 stream.status(id, 2);
               }
