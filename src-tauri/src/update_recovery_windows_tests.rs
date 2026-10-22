@@ -3,6 +3,291 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::cell::{Cell, RefCell};
 
 #[test]
+fn cleanup_success_keeps_user_files_and_reclaims_owned_recovery_images() {
+    let f = Fixture::new();
+    let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap();
+    tx.apply_with_fault(usize::MAX).unwrap();
+    tx.session.record.engine = RecoveryRecord { sequence: 20, phase: RecoveryPhase::Succeeded, step: None };
+    tx.session.record.file_step = None;
+    let setup = f.0.join(&tx.session.record.installer_name);
+    std::fs::write(&setup, b"generated setup").unwrap();
+    tx.session.record.installer = FileProof::open(&setup, false).unwrap().1;
+    tx.session.publish().unwrap();
+    // Run only the native file/journal layer with generated ownership proofs.
+    // This does not claim to exercise current()'s production-image admission.
+    let saved = tx.session.record.clone();
+    drop(tx);
+    let mut store = RecoveryStore::open(&root, "Local\\NearlyCleanupSuccessFixture").unwrap();
+    cleanup::fixture_run(&mut store, saved, usize::MAX).unwrap();
+    assert!(!root.path().join(crate::update_transaction::STATE_DIRECTORY).join(&store.read().unwrap().unwrap().nonce).join(BACKUP_NAMES[0]).exists());
+    assert_eq!(std::fs::read(f.0.join("Nearly.exe")).unwrap(), b"new image");
+    assert_eq!(std::fs::read(f.0.join("settings.json")).unwrap(), b"settings sentinel");
+    drop(store);
+}
+
+fn cleanup_fixture() -> (Fixture, PinnedRoot, RecoveryStore, RecoveryTransaction) {
+    let f = Fixture::new();
+    let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap();
+    tx.apply_with_fault(usize::MAX).unwrap();
+    tx.session.record.engine = RecoveryRecord { sequence: 20, phase: RecoveryPhase::Succeeded, step: None };
+    tx.session.record.file_step = None;
+    let setup = f.0.join(&tx.session.record.installer_name);
+    std::fs::write(&setup, b"generated setup").unwrap();
+    tx.session.record.installer = FileProof::open(&setup, false).unwrap().1;
+    tx.session.publish().unwrap();
+    let record = tx.session.record.clone();
+    drop(tx);
+    let store = RecoveryStore::open(&root, &format!("Local\\NearlyCleanupFixture-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))).unwrap();
+    (f, root, store, record)
+}
+
+#[test]
+fn cleanup_every_interruption_boundary_resumes_without_reclaiming_other_transactions() {
+    for at in 0..20 {
+        let (f, root, mut store, record) = cleanup_fixture();
+        let unrelated = store.directory.join("ffffffffffffffffffffffffffffffff");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("previous-image.exe"), b"other transaction").unwrap();
+        let unknown = store.directory.join(&record.nonce).join("user-kept.txt");
+        std::fs::write(&unknown, b"unknown retained").unwrap();
+        let _ = cleanup::fixture_run(&mut store, record, at);
+        let interrupted = store.read().unwrap().unwrap();
+        assert_eq!(interrupted.engine.phase, RecoveryPhase::Succeeded);
+        cleanup::fixture_run(&mut store, interrupted, usize::MAX).unwrap();
+        assert!(store.read().unwrap().unwrap().cleanup.as_ref().unwrap().finished());
+        assert_eq!(std::fs::read(&unknown).unwrap(), b"unknown retained");
+        assert_eq!(std::fs::read(unrelated.join("previous-image.exe")).unwrap(), b"other transaction");
+        assert_eq!(std::fs::read(f.0.join("settings.json")).unwrap(), b"settings sentinel");
+        assert_eq!(std::fs::read(root.path().join("uninstall.exe")).unwrap(), b"new uninstaller");
+    }
+}
+
+#[test]
+fn cleanup_locked_owned_file_defers_and_retries_setup_last() {
+    let (_f, root, mut store, record) = cleanup_fixture();
+    let backup = store.directory.join(&record.nonce).join(BACKUP_NAMES[0]);
+    let lock = FileProof::open(&backup, false).unwrap().0;
+    assert!(cleanup::fixture_run(&mut store, record.clone(), usize::MAX).is_err());
+    let pending = store.read().unwrap().unwrap();
+    assert_eq!(pending.engine.phase, RecoveryPhase::Succeeded);
+    assert!(root.path().join(&record.installer_name).exists());
+    assert!(backup.exists());
+    drop(lock);
+    cleanup::fixture_run(&mut store, pending, usize::MAX).unwrap();
+    assert!(!backup.exists());
+    assert!(!root.path().join(&record.installer_name).exists());
+}
+
+#[test]
+fn cleanup_rejects_changed_hardlinked_and_missing_unproven_backups() {
+    for mode in 0..3 {
+        let (_f, root, mut store, record) = cleanup_fixture();
+        let backup = store.directory.join(&record.nonce).join(BACKUP_NAMES[0]);
+        match mode {
+            0 => std::fs::write(&backup, b"tampered!").unwrap(),
+            1 => std::fs::hard_link(&backup, root.path().join("foreign-link.exe")).unwrap(),
+            _ => std::fs::remove_file(&backup).unwrap(),
+        }
+        assert!(cleanup::fixture_run(&mut store, record.clone(), usize::MAX).is_err());
+        assert!(root.path().join(&record.installer_name).exists());
+        assert!(!store.read().unwrap().unwrap().cleanup.as_ref().unwrap().finished());
+        if mode != 2 { assert!(backup.exists()); }
+    }
+}
+
+#[test]
+fn cleanup_rejects_non_success_and_legacy_decode_remains_compatible() {
+    let (_f, _root, mut store, record) = cleanup_fixture();
+    let mut legacy = serde_json::to_value(&record).unwrap();
+    legacy.as_object_mut().unwrap().remove("cleanup");
+    assert!(RecoveryTransaction::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap().cleanup.is_none());
+    for phase in [RecoveryPhase::AwaitingHealth, RecoveryPhase::Restored, RecoveryPhase::ManualRepair] {
+        let mut invalid = record.clone(); invalid.engine.phase = phase;
+        assert!(cleanup::fixture_run(&mut store, invalid, usize::MAX).is_err());
+    }
+    legacy["installer_name"] = serde_json::json!("../Nearly.exe");
+    assert!(RecoveryTransaction::decode(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    assert!(store.read().unwrap().unwrap().cleanup.is_none());
+}
+
+#[test]
+fn cleanup_exclusive_store_lease_rejects_double_start() {
+    let (_f, root, _store, _record) = cleanup_fixture();
+    assert!(RecoveryStore::open(&root, "Local\\NearlyCleanupSecondFixture").is_err());
+}
+
+fn cleanup_signed_fixture() -> (Fixture, PinnedRoot, FixtureTransaction, crate::update_package::TrustedKey) {
+    let f = Fixture::new();
+    let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap();
+    tx.apply_with_fault(usize::MAX).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    let label = crate::version::display_label(&semver::Version::parse(version).unwrap());
+    let (mut stage, candidate, key) = crate::update_package::fixture_stage(root.path(), version, &sha256(b"new image"));
+    let snapshot = stage.transaction_snapshot(&candidate, &key).unwrap();
+    tx.session.record.target_version = version.into();
+    tx.session.record.public_label = label.clone();
+    tx.session.record.installer_name = format!("Nearly_{label}_x64-setup.exe");
+    let setup = root.path().join(&tx.session.record.installer_name);
+    std::fs::copy(snapshot.path(), &setup).unwrap();
+    tx.session.record.package_signature = String::from_utf8(snapshot.package().signature().to_vec()).unwrap();
+    tx.session.record.installer = FileProof::open(&setup, false).unwrap().1;
+    tx.session.record.engine = RecoveryRecord { sequence: 20, phase: RecoveryPhase::Succeeded, step: None };
+    tx.session.record.file_step = None;
+    // Windows PIDs are multiples of four. This invalid, nonzero PID proves only
+    // that the original peer is not live; it does not assert zero exit.
+    let absent = ProcessIdentity { pid: u32::MAX, created: 1 };
+    tx.session.record.parent = absent.clone();
+    tx.session.record.helper = Some(absent.clone());
+    tx.session.record.worker = Some(absent);
+    for (i, value) in [(0, RawValue::string(&label)), (1, RawValue::string(version))] {
+        let previous = tx.session.registry.read(i).unwrap();
+        tx.session.registry.write(i, &previous, &value).unwrap();
+    }
+    tx.session.record.new_values = tx.session.registry.snapshot().unwrap();
+    tx.session.publish().unwrap();
+    drop(snapshot); drop(stage);
+    (f, root, tx, key)
+}
+
+#[test]
+fn cleanup_admission_authenticates_protocol3_signature_running_identity_and_registry() {
+    let (_f, root, mut tx, key) = cleanup_signed_fixture();
+    let current = root.path().join("Nearly.exe");
+    let record = tx.session.record.clone();
+    let result = cleanup::fixture_admit(&root, &record, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry);
+    assert!(result.is_ok(), "signed admission: {result:?}");
+    for kind in 0..5 {
+        let mut changed = record.clone();
+        match kind {
+            0 => changed.package_signature = "invalid".into(),
+            1 => changed.payload_sha256 = sha256(b"different payload"),
+            2 => changed.files[0].candidate.as_mut().unwrap().identity.file_id = "0".repeat(32),
+            3 => changed.new_values[0] = RawValue::string("r999.0"),
+            _ => changed.helper = Some(current_process_identity().unwrap()),
+        }
+        assert!(cleanup::fixture_admit(&root, &changed, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err(), "case {kind}");
+        assert!(tx.backup_path(0).exists());
+    }
+    assert!(cleanup::fixture_admit(&root, &record, &key, &current, "3.0.0", &tx.session.registry).is_err());
+    let outside = Fixture::new();
+    assert!(cleanup::fixture_admit(&root, &record, &key, &outside.0.join("Nearly.exe"), env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err());
+    // Deferral before any deletion gets a durable diagnostic without changing
+    // success. Repeating it does not consume a publication slot unnecessarily.
+    tx.session.record.helper = Some(current_process_identity().unwrap()); tx.session.publish().unwrap();
+    let pending = tx.session.record.clone();
+    assert!(cleanup::fixture_admitted_run(&mut tx.session.store, pending, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err());
+    let durable = tx.session.store.read().unwrap().unwrap();
+    assert_eq!(durable.engine.phase, RecoveryPhase::Succeeded);
+    let json = serde_json::to_value(&durable).unwrap();
+    assert_eq!(json["cleanup"]["issue"], "LockedOrIo");
+    assert!(tx.backup_path(0).exists());
+}
+
+#[test]
+fn cleanup_final_setup_absence_only_finalizes_journal_and_never_deletes_more() {
+    let (_f, root, mut tx, key) = cleanup_signed_fixture();
+    tx.session.record.cleanup = Some(serde_json::from_value(serde_json::json!({"next":6,"intent":true,"issue":null})).unwrap());
+    tx.session.publish().unwrap();
+    let setup = root.path().join(&tx.session.record.installer_name);
+    std::fs::remove_file(&setup).unwrap();
+    let record = tx.session.record.clone();
+    cleanup::fixture_admitted_run(&mut tx.session.store, record, &key, &root.path().join("Nearly.exe"), env!("CARGO_PKG_VERSION"), &tx.session.registry).unwrap();
+    assert!(tx.session.store.read().unwrap().unwrap().cleanup.as_ref().unwrap().finished());
+    assert!(tx.backup_path(0).exists());
+    assert!(tx.backup_path(1).exists());
+    assert_eq!(std::fs::read(root.path().join("Nearly.exe")).unwrap(), b"new image");
+}
+
+#[test]
+fn cleanup_peer_liveness_distinguishes_live_reused_and_nonzero_exited_processes() {
+    for code in [0, 9] {
+        let (mut child, id, _path, _proof) = peer_fixture(250, code);
+        assert!(matches!(cleanup::fixture_peer(&id), Err(Error::Busy)));
+        let reused = ProcessIdentity { pid: id.pid, created: id.created + 1 };
+        assert!(cleanup::fixture_peer(&reused).is_ok());
+        child.wait().unwrap();
+        assert_eq!(cleanup::fixture_peer(&id).is_ok(), code == 0);
+    }
+}
+
+#[test]
+fn cleanup_reparse_candidate_parent_is_refused_without_touching_external_files() {
+    let (_f, _root, mut store, record) = cleanup_fixture();
+    let external = Fixture::new();
+    let candidate = store.directory.join(&record.nonce).join("candidate");
+    // The successful apply moved the candidate payloads into the live root.
+    // This remove is constrained to the generated, exact empty fixture folder.
+    std::fs::remove_dir(&candidate).unwrap();
+    fixture_junction(&candidate, &external.0);
+    assert!(cleanup::fixture_run(&mut store, record, usize::MAX).is_err());
+    assert_eq!(std::fs::read(external.0.join("Nearly.exe")).unwrap(), b"old image");
+    std::fs::remove_dir(&candidate).unwrap();
+}
+
+// A mount-point junction does not require SeCreateSymbolicLinkPrivilege. Every
+// path is an explicit generated fixture; never invoke cmd/mklink or shell delete.
+fn fixture_junction(path: &Path, target: &Path) {
+    assert!(path.starts_with(std::env::temp_dir()) && target.starts_with(std::env::temp_dir()));
+    std::fs::create_dir(path).unwrap();
+    let file = OpenOptions::new().access_mode(0x40000000).share_mode(3)
+        .custom_flags(0x02000000 | REPARSE).open(path).unwrap();
+    let substitute: Vec<u16> = format!("\\??\\{}", target.display()).encode_utf16().collect();
+    let print: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let total = 16 + (substitute.len() + print.len() + 2) * 2;
+    let mut bytes = vec![0u8; total];
+    bytes[0..4].copy_from_slice(&0xa0000003u32.to_le_bytes());
+    bytes[4..6].copy_from_slice(&((total - 8) as u16).to_le_bytes());
+    bytes[10..12].copy_from_slice(&((substitute.len() * 2) as u16).to_le_bytes());
+    bytes[12..14].copy_from_slice(&(((substitute.len() + 1) * 2) as u16).to_le_bytes());
+    bytes[14..16].copy_from_slice(&((print.len() * 2) as u16).to_le_bytes());
+    for (i, ch) in substitute.iter().chain(std::iter::once(&0)).chain(print.iter()).chain(std::iter::once(&0)).enumerate() {
+        bytes[16 + i * 2..18 + i * 2].copy_from_slice(&ch.to_le_bytes());
+    }
+    let mut returned = 0;
+    unsafe { windows::Win32::System::IO::DeviceIoControl(windows::Win32::Foundation::HANDLE(file.as_raw_handle()),
+        0x000900a4, Some(bytes.as_ptr().cast()), bytes.len() as u32, None, 0, Some(&mut returned), None) }.unwrap();
+}
+
+#[test]
+fn cleanup_locked_setup_archives_exact_proofs_and_allows_the_next_update() {
+    let (_f, root, mut store, record) = cleanup_fixture();
+    let setup = root.path().join(&record.installer_name);
+    let lock = FileProof::open(&setup, false).unwrap().0;
+    cleanup::fixture_archive(&store).unwrap();
+    let path = store.directory.join(&record.nonce).join(format!("retained-v3-{}.dpapi", record.publication));
+    let bytes = fs::read_bounded(&path, 64 * 1024).unwrap().unwrap();
+    let plain = fs::crypt_root(&record.root, "retained-v3", &bytes, false).unwrap();
+    assert_eq!(RecoveryTransaction::decode(&plain).unwrap(), record);
+    assert_eq!(store.read().unwrap().unwrap(), record);
+    // A later progress publication receives a different immutable receipt and
+    // does not collide with the earlier attempt's archive.
+    let mut progressed = record.clone();
+    progressed.cleanup = Some(serde_json::from_value(serde_json::json!({"next":0,"intent":false,"issue":"LockedOrIo"})).unwrap());
+    store.publish(&mut progressed).unwrap();
+    cleanup::fixture_archive(&store).unwrap();
+    assert!(path.exists());
+    drop(store);
+    let next = FixtureTransaction::prepare(&root).expect("a locked old setup must not prevent a new transaction");
+    assert_ne!(next.session.record.nonce, record.nonce);
+    assert!(path.exists());
+    assert!(setup.exists());
+    drop(next); drop(lock);
+}
+
+#[test]
+fn cleanup_archive_refuses_foreign_receipt_without_overwriting_current_proofs() {
+    let (_f, _root, store, record) = cleanup_fixture();
+    let archive = store.directory.join(&record.nonce).join(format!("retained-v3-{}.dpapi", record.publication));
+    std::fs::write(&archive, b"foreign receipt sentinel").unwrap();
+    assert!(cleanup::fixture_archive(&store).is_err());
+    assert_eq!(store.read().unwrap().unwrap(), record);
+    assert_eq!(std::fs::read(&archive).unwrap(), b"foreign receipt sentinel");
+}
+
+#[test]
 fn rm_snapshot_growth_discards_partial_entries_and_retains_foreign_users() {
     let mut capacities = Vec::new();
     let complete = rm_complete_snapshot_with(|entries| {

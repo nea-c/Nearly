@@ -49,6 +49,22 @@ export const uploadPartialSuffix = {
 // Complete templates use numeric placeholders; captured data is never translated.
 export const nativeErrorLiterals: ReadonlyArray<readonly [string, string]> = [
   ...uploadErrorLiterals,
+  ['ローカル送信元のメタデータを取得できません。','Local source metadata unavailable'],
+  ['ローカル送信元のファイル識別情報を取得できません。','Local source identity unavailable'],
+  ['ローカル送信元がフォルダーまたは再解析ポイントのため停止しました。','Local source is a directory or reparse point'],
+  ['ローカル送信元の更新日時を取得できません。','Local source timestamp unavailable'],
+  ['ローカル送信元の読み取りハンドルを取得できません。','Local source handle unavailable'],
+  ['比較中のローカル送信元を開けません。','Local comparison source unavailable'],
+  ['比較中のローカルパスが再解析ポイントに変わったため停止しました。','Local comparison path became a reparse point'],
+  ['転送中のローカル送信元を開けません。','Local source unavailable while uploading'],
+  ['一時転送後のローカル送信元を開けません。','Local source unavailable after staging'],
+  ['転送確定後のローカル送信元を開けません。','Local source unavailable after upload'],
+  ['更新前の一時ファイルの所有を確認できないため保持しました。','Changed-source staging ownership unavailable; staging retained'],
+  ['更新前の一時ファイルを確認できないため保持しました。','Changed-source staging lookup failed; staging retained'],
+  ['更新前の一時ファイルに変化があるため削除を拒否しました。','Changed-source staging changed; cleanup refused'],
+  ['更新前の一時ファイルの削除に失敗したか結果が不明です。一時ファイルが残る可能性があります。','Changed-source staging cleanup failed or outcome uncertain; staging may remain'],
+  ['更新前の一時ファイルの削除を確認できません。同期待ちの状態を確認して手動で開始し直してください。','Changed-source staging removal was not confirmed; restart to reconcile'],
+  ['同時比較するファイル数が不正なため停止しました。','Invalid comparison batch size'],
   ['初回のローカル走査が完了しました','Initial local scan completed'],
   ['エラーのため同期を停止しました。手動で再開すると全体を走査します。一時ファイルや反映済みの変更が残っている可能性があります。','Sync stopped after error; manual restart performs a full scan. Staging or already committed changes may remain.'],
   ["保持するフォルダーの追跡上限に達したため削除を中断しました。同期を停止して開始し直してください。","Retained directory tracking limit reached; deletion paused, stop and start a new sync"],
@@ -1280,6 +1296,7 @@ export const nativeErrorLiterals: ReadonlyArray<readonly [string, string]> = [
 ];
 
 export const nativeErrorTemplates: ReadonlyArray<readonly [string, string]> = [
+  ["ローカルファイルが更新されたため、最新版の再送を待っています: {0}","Local source changed; waiting to resend {0}"],
   ["変更のないファイルを省略しました: {0}","Skipped unchanged {0}"],
   ["リモートの方が新しいため、ローカル優先で上書きします: {0}","Remote newer; source-authoritative overwrite {0}"],
   ["削除対象を確認したファイルを削除しました: {0}","Deleted verified file {0}"],

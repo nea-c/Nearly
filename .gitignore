@@ -151,3 +151,5 @@ Thumbs.db
 !/scripts/payload-sharing-fixture.cs
 !/scripts/release-native-admission.ps1
 !/scripts/sync-runtime-fixture.mjs
+!/docs/sync-source-changes.md
+!/docs/updater-cleanup.md

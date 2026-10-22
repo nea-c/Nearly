@@ -297,7 +297,13 @@ impl Runtime {
                 Some(SupervisorEvent::Success)=>{
                     let s=self.0.inner.lock().map_err(|_|"runtimeUnavailable")?;
                     (s.actions.as_ref().ok_or("runtimeUnavailable")?.release)().map_err(|_|"probationReleaseFailed")?;
-                    drop(s);self.publish("succeeded",None);return Ok(());
+                    drop(s);self.publish("succeeded",None);
+                    let exited=live.wait_exit_after_success(Duration::from_secs(5)).is_ok();
+                    // The health snapshot pins the helper and setup without
+                    // delete sharing. Release ALL of it before reclamation.
+                    drop(live);
+                    if exited { self.cleanup(); } else { self.publish("cleanupPending",Some("cleanupHelperStillRunning")); }
+                    return Ok(());
                 },
                 Some(SupervisorEvent::ExitRequest)=>{
                     #[cfg(feature="installer-qa")] crate::installer_qa::trace("exit","requested");
@@ -345,7 +351,18 @@ impl Runtime {
         if let Startup::Health(nonce)=&startup{return self.run_supervisor_health(nonce);}
         crate::update_recovery_windows::ordinary_startup_allowed().map_err(|_|"transactionUnavailable")?;
         self.publish("idle", None);
+        // Cleanup is nonfatal and never changes admission/rollback state.
+        if self.waiting_ui(Duration::from_secs(30)).is_ok() && self.native_health() { self.cleanup(); }
         Ok(())
+    }
+    #[cfg(windows)]
+    fn cleanup(&self) {
+        if !self.native_health() { return; }
+        match crate::update_recovery_windows::cleanup_after_success() {
+            Ok(true) => self.publish("cleaned",None),
+            Ok(false) => (),
+            Err(reason) => self.publish("cleanupPending",Some(reason)),
+        }
     }
 }
 #[cfg(test)]

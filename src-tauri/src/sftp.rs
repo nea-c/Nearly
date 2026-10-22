@@ -928,18 +928,57 @@ fn matching_metadata(local_size: u64, local_time: Option<SystemTime>, attrs: &Fi
 pub enum FileComparison {
     Unchanged(RemoteStamp),
     Upload { remote_newer: bool },
+    SourceChanged,
 }
+#[derive(Debug)]
+pub enum SourceOutcome<T> { Complete(T), Changed { committed: Option<T> } }
+#[derive(Debug)]
+pub struct UploadReceipt { pub bytes: u64, source: crate::source_change::Snapshot }
 // Comparison is metadata-only. Keep the exact source metadata stable across the
 // round trip; unknown times always require upload (which may refuse preservation).
 pub fn compare_file(s: &mut Connection, root: &Path, relative: &Path, remote: &str, stop: &AtomicBool) -> Result<FileComparison, String> {
+    s.run(stop,async {Ok(compare_file_observed(s,root,relative,remote).await?.comparison)})
+}
+// Independent files share one authenticated transport. Each file still verifies
+// its ancestors in order. No result escapes a failed/cancelled batch.
+pub fn compare_files(s:&mut Connection,root:&Path,paths:&[std::path::PathBuf],remote:&str,stop:&AtomicBool)->Result<Vec<FileComparison>,(Option<std::path::PathBuf>,String)>{
+    if paths.is_empty() || paths.len()>4 {return Err((None,"Invalid comparison batch size".into()));}
+    let failed_path=std::cell::RefCell::new(None);
+    let result=s.run(stop,async {
+        let mut results=futures_util::future::try_join_all(paths.iter().map(|path|async {
+            compare_file_observed(s,root,path,remote).await.map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})
+        })).await?;
+        // Recheck all local observations after the slowest sibling finishes.
+        for (path,result) in paths.iter().zip(&mut results) {result.revalidate().map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})?;}
+        Ok(results.into_iter().map(|result|result.comparison).collect())
+    });
+    result.map_err(|e|(failed_path.into_inner(),e))
+}
+struct ObservedComparison {comparison:FileComparison,source:std::path::PathBuf,root:std::path::PathBuf,snapshot:crate::source_change::Snapshot}
+impl ObservedComparison {
+    fn revalidate(&mut self)->Result<(),String>{
+        let relative=self.source.strip_prefix(&self.root).map_err(|_|"Local comparison path escaped root")?;
+        let mut path=self.root.clone();
+        for part in relative.components(){
+            path.push(part);let m=std::fs::symlink_metadata(&path).map_err(|_|"Local comparison source unavailable")?;
+            #[cfg(windows)] let reparse={use std::os::windows::fs::MetadataExt;m.file_attributes()&0x400!=0};
+            #[cfg(not(windows))] let reparse=m.file_type().is_symlink();
+            if reparse||m.file_type().is_symlink(){return Err("Local comparison path became a reparse point".into());}
+        }
+        if !self.source.canonicalize().map_err(|_|"Local comparison source unavailable")?.starts_with(&self.root){return Err("Local comparison path escaped root".into());}
+        let current=std::fs::File::open(&self.source).map_err(|_|"Local comparison source unavailable")?;
+        if self.snapshot.changed(&current,&current,self.snapshot.length())?.is_some(){self.comparison=FileComparison::SourceChanged;}
+        Ok(())
+    }
+}
+async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&str)->Result<ObservedComparison,String>{
     let target = recorded_target(remote, relative)?;
     let source = root.join(relative);
     let canonical = source.canonicalize().map_err(|_| "Local source unavailable for comparison")?;
     if !canonical.starts_with(root) { return Err("Local comparison path escaped root".into()); }
     let input = std::fs::File::open(&source).map_err(|_| "Local source unreadable for comparison")?;
-    let before = input.metadata().map_err(|_| "Local metadata unavailable for comparison")?;
-    if !before.is_file() { return Err("Local comparison source is not a file".into()); }
-    s.run(stop, async {
+    let source_snapshot = crate::source_change::Snapshot::capture(&input)?;
+    let comparison:Result<FileComparison,String>=async {
         let parent = target.rsplit_once('/').map(|(p,_)| if p.is_empty(){"/"}else{p}).ok_or("Invalid comparison target")?;
         let mut current = String::new();
         for part in parent.split('/').filter(|p| !p.is_empty()) {
@@ -956,19 +995,22 @@ pub fn compare_file(s: &mut Connection, root: &Path, relative: &Path, remote: &s
             Err(_) => return Err("Remote comparison lookup failed".into()),
         };
         if !attrs.file_type().is_file() || attrs.is_symlink() { return Err("Remote comparison target is not a regular file".into()); }
-        let after = input.metadata().map_err(|_| "Local comparison source changed")?;
         let current = std::fs::symlink_metadata(&source).map_err(|_| "Local comparison source changed")?;
-        if current.file_type().is_symlink() || before.len()!=after.len() || before.modified().ok()!=after.modified().ok()
-            || current.len()!=before.len() || current.modified().ok()!=before.modified().ok() {
-            return Err("Local source changed during comparison".into());
+        if current.file_type().is_symlink() { return Err("Local comparison path became a symlink".into()); }
+        let current = std::fs::File::open(&source).map_err(|_| "Local comparison source unavailable")?;
+        if source_snapshot.changed(&input, &current, source_snapshot.length())?.is_some() {
+            return Ok(FileComparison::SourceChanged);
         }
-        if matching_metadata(before.len(), before.modified().ok(), &attrs) {
+        if matching_metadata(source_snapshot.length(), Some(source_snapshot.modified()), &attrs) {
             let mut stamp = remote_stamp(&attrs)?;
             stamp.parent = Some(directory_guard(&s.raw, parent).await?);
             return Ok(FileComparison::Unchanged(stamp));
         }
-        Ok(FileComparison::Upload { remote_newer: attrs.mtime.zip(before.modified().ok().and_then(protocol_seconds)).is_some_and(|(r,l)| r>l) })
-    })
+        Ok(FileComparison::Upload { remote_newer: attrs.mtime.zip(protocol_seconds(source_snapshot.modified())).is_some_and(|(r,l)| r>l) })
+    }.await;
+    let mut result=ObservedComparison{comparison:comparison?,source,root:root.to_path_buf(),snapshot:source_snapshot};
+    result.revalidate()?;
+    Ok(result)
 }
 
 #[derive(Default)]
@@ -1178,21 +1220,28 @@ pub fn upload_recorded(
     remote: &str,
     stop: &AtomicBool,
     id: &str,
-) -> Result<(u64, RemoteStamp), String> {
+) -> Result<SourceOutcome<(u64, RemoteStamp)>, String> {
     let target = recorded_target(remote, relative)?;
-    let bytes = upload(s, root, relative, remote, stop, id)?;
+    let receipt = match upload(s, root, relative, remote, stop, id)? {
+        SourceOutcome::Complete(receipt) => receipt,
+        SourceOutcome::Changed { .. } => return Ok(SourceOutcome::Changed { committed: None }),
+    };
+    let bytes = receipt.bytes;
     let stamp=s.run(stop,async {
         let parent=target.rsplit_once('/').map(|(parent,_)|if parent.is_empty(){"/"}else{parent}).ok_or("Invalid owned target")?;
         checked_directory(&s.raw,parent,false).await?;
         let attrs=s.raw.lstat(target.clone()).await.map_err(|_|"Upload completed but ownership metadata is unavailable; deletion ownership was not recorded")?.attrs;
         let mut stamp=remote_stamp(&attrs)?;
         if stamp.size!=bytes {return Err("Remote file changed after upload; deletion ownership was not recorded".into());}
-        let local=std::fs::metadata(root.join(relative)).map_err(|_|"Local source changed after upload")?;
-        if stamp.mtime != local.modified().ok().and_then(protocol_seconds).ok_or("Local source mtime unavailable")? { return Err("Remote timestamp changed after upload; deletion ownership was not recorded".into()); }
+        if Some(stamp.mtime) != protocol_seconds(receipt.source.modified()) { return Err("Remote timestamp changed after upload; deletion ownership was not recorded".into()); }
         stamp.parent=Some(directory_guard(&s.raw,parent).await?);
-        Ok(stamp)
+        let local=std::fs::File::open(root.join(relative)).map_err(|_|"Local source unavailable after upload")?;
+        if receipt.source.changed(&local,&local,bytes)?.is_some() {
+            return Ok(SourceOutcome::Changed { committed: Some((bytes,stamp)) });
+        }
+        Ok(SourceOutcome::Complete((bytes,stamp)))
     }).map_err(|reason| format!("Upload committed; {reason}"))?;
-    Ok((bytes, stamp))
+    Ok(stamp)
 }
 pub fn delete_uploaded_file(
     s: &mut Connection,
@@ -1241,7 +1290,7 @@ pub fn upload(
     remote: &str,
     stop: &AtomicBool,
     id: &str,
-) -> Result<u64, String> {
+) -> Result<SourceOutcome<UploadReceipt>, String> {
     if relative
         .components()
         .any(|c| !matches!(c, std::path::Component::Normal(_)))
@@ -1282,18 +1331,20 @@ pub fn upload(
     let stage = format!("{parent}/.syncfiles-{id}-{stamp}-{unique}.part");
     s.run(stop,async {
         checked_directory(&s.raw,parent,true).await?;
+        let stage_parent = directory_guard(&s.raw,parent).await?;
         let existing=match s.raw.lstat(target.clone()).await {
             Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}true},
             Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile=>false,
             Err(_)=>return Err(remote_error("target lookup")),
         };
         if existing && !s.posix_rename{return Err("Server lacks posix-rename@openssh.com; safe overwrite is unavailable. The existing target was not deleted.".into());}
-        let mut input=tokio::fs::File::open(canonical).await.map_err(|_|"Local source unavailable")?;
-        let before=input.metadata().await.map_err(|_|"Local metadata unavailable")?;
-        if !before.is_file(){return Err("Local source is not a regular file".into());}
-        let source_mtime=before.modified().ok().and_then(protocol_seconds).ok_or("Local source timestamp unsupported by SFTPv3; upload was not committed")?;
+        let original=std::fs::File::open(canonical).map_err(|_|"Local source unavailable")?;
+        let source_snapshot=crate::source_change::Snapshot::capture(&original)?;
+        let mut input=tokio::fs::File::from_std(original.try_clone().map_err(|_|"Local source handle unavailable")?);
+        let source_mtime=protocol_seconds(source_snapshot.modified()).ok_or("Local source timestamp unsupported by SFTPv3; upload was not committed")?;
         let handle=s.raw.open(stage.clone(),OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|remote_error("staging open"))?.handle;
         let mut offset=0u64;
+        let mut source_changed=false;
         loop {
             let mut chunks=Vec::new();
             for _ in 0..8 {
@@ -1303,18 +1354,39 @@ pub fn upload(
             if chunks.is_empty(){break;}
             let writes=chunks.into_iter().map(|(at,data)|s.raw.write(handle.clone(),at,data));
             futures_util::future::try_join_all(writes).await.map_err(|_|remote_error("upload"))?;
+            let current=std::fs::File::open(&source).map_err(|_|"Local source unavailable while uploading")?;
+            if source_snapshot.changed(&original,&current,source_snapshot.length())?.is_some() { source_changed=true; break; }
         }
         let mut times=FileAttributes::empty();
-        times.atime=Some(before.accessed().ok().and_then(protocol_seconds).unwrap_or(source_mtime));
+        times.atime=Some(original.metadata().ok().and_then(|m|m.accessed().ok()).and_then(protocol_seconds).unwrap_or(source_mtime));
         times.mtime=Some(source_mtime);
         let status=s.raw.fsetstat(handle.clone(),times).await.map_err(|_|"SFTP source timestamp preservation failed; staging was not committed")?;
         if status.status_code != StatusCode::Ok { return Err("SFTP source timestamp preservation refused; staging was not committed".into()); }
         let staged=s.raw.fstat(handle.clone()).await.map_err(|_|"SFTP staging timestamp verification failed; staging was not committed")?.attrs;
         if staged.mtime!=Some(source_mtime) || staged.size!=Some(offset) { return Err("SFTP staging timestamp or size was not preserved; staging was not committed".into()); }
         s.raw.close(handle).await.map_err(|_|remote_error("staging close"))?;
-        let after=input.metadata().await.map_err(|_|"Local source changed")?;
-        let current=tokio::fs::metadata(source).await.map_err(|_|"Local source changed")?;
-        if before.len()!=after.len()||before.modified().ok()!=after.modified().ok()||before.len()!=offset||current.len()!=after.len()||current.modified().ok()!=after.modified().ok(){return Err("Local source changed during upload; staging was not committed".into());}
+        let current=std::fs::File::open(&source).map_err(|_|"Local source unavailable after staging")?;
+        if source_changed || source_snapshot.changed(&original,&current,offset)?.is_some() {
+            // Only this CREATE|EXCLUDE stage may be removed; never the final
+            // target or another matching prefix. Fresh parent and file proofs
+            // must still match. Cleanup errors remain fatal, not normal changes.
+            if staged.permissions.is_none() || directory_guard(&s.raw,parent).await? != stage_parent {
+                return Err("Changed-source staging ownership unavailable; staging retained".into());
+            }
+            let now=s.raw.lstat(stage.clone()).await.map_err(|_|"Changed-source staging lookup failed; staging retained")?.attrs;
+            if !now.file_type().is_file() || now.is_symlink() || now.size!=staged.size || now.mtime!=staged.mtime
+                || now.uid!=staged.uid || now.gid!=staged.gid || now.permissions!=staged.permissions
+                || directory_guard(&s.raw,parent).await? != stage_parent {
+                return Err("Changed-source staging changed; cleanup refused".into());
+            }
+            crate::file_ops::check(stop)?;
+            s.raw.remove(stage.clone()).await.map_err(|_|"Changed-source staging cleanup failed or outcome uncertain; staging may remain")?;
+            match s.raw.lstat(stage.clone()).await {
+                Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile => (),
+                _ => return Err("Changed-source staging removal was not confirmed; restart to reconcile".into()),
+            }
+            return Ok(SourceOutcome::Changed { committed: None });
+        }
         if stop.load(Ordering::Relaxed){return Err("Stopped before final rename; staging retained".into());}
         checked_directory(&s.raw,parent,false).await?;
         if s.posix_rename {
@@ -1324,7 +1396,7 @@ pub fn upload(
                 _=>return Err(remote_error("final rename")),
             }
         }else{s.raw.rename(stage,target.clone()).await.map_err(|_|remote_error("final rename"))?;}
-        Ok(offset)
+        Ok(SourceOutcome::Complete(UploadReceipt { bytes:offset, source:source_snapshot }))
     })
 }
 #[cfg(test)]

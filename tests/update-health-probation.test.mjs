@@ -39,6 +39,17 @@ test('ordinary startup remains immediate and does not show probation',async()=>{
  }finally{while(frames.length)frames.shift()();await f.dispose();}
 });
 
+test('cleanup deferral preserves successful startup and shows a separate nonfatal notice',async()=>{
+ const f=await fixture();try{
+ const startup=f.api.initializeUpdateRestart('main',()=>true);
+ await new Promise(resolve=>setImmediate(resolve));f.event('succeeded',2);await startup;
+ f.event('cleanupPending',3);
+ assert(!f.elements.has('update-probation'));assert(!f.elements.has('update-recovery-notice'));
+ assert.match(f.elements.get('update-cleanup-notice')?.textContent??'',/update succeeded/i);
+ f.event('cleaned',4);assert(!f.elements.has('update-cleanup-notice'));
+ }finally{await f.dispose();}
+});
+
 test('actual probation still requires both rendered frames and authenticated native Success',async()=>{
  const f=await fixture(),frames=[];globalThis.requestAnimationFrame=fn=>frames.push(fn);
  try{let completed=false;const startup=f.api.initializeUpdateRestart('main',()=>true).then(()=>completed=true);
