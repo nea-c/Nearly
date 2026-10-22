@@ -159,6 +159,16 @@ mod native {
             if exit==0{return Ok(Some(SupervisorEvent::ExitRequest));}Ok(None)
         }
         pub(crate) fn signal_probation_idle(&self,_proof:&crate::HealthIdleProof)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.idle.0)}==0{return Err("Probation idle signal failed".into());}Ok(())}
+        pub(crate) fn wait_exit_after_success(&self,timeout:Duration)->Result<(),String>{
+            self.snapshot.confirm_succeeded()?;
+            if unsafe{WaitForSingleObject(self.success_ack.0,0)}!=0{return Err("Success was not acknowledged".into());}
+            match unsafe{WaitForSingleObject(self.process.0,timeout.as_millis().min(5000) as u32)}{
+                0=>{},_=>return Err("Supervisor exit not confirmed; cleanup deferred".into())
+            }
+            let mut code=259;
+            if unsafe{GetExitCodeProcess(self.process.0,&mut code)}==0||code!=0{return Err("Supervisor did not exit successfully; cleanup deferred".into());}
+            Ok(())
+        }
         pub(crate) fn signal_idle(&self,_seal:&crate::HealthExitSeal)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.idle.0)}==0{return Err("Idle signal failed".into());}Ok(())}
     }
     #[cfg(test)]mod tests {

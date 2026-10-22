@@ -468,6 +468,19 @@ struct Pending {
     first: Instant,
     last: Instant,
     attempt: u8,
+    force_upload: bool,
+    batch_checked: bool,
+}
+#[cfg(test)]
+mod source_reschedule_tests {
+    use super::*;
+    #[test]
+    fn old_watcher_events_cannot_rewind_a_source_change_debounce() {
+        let mut q=HashMap::new();let path=PathBuf::from("source.txt");let now=Instant::now();
+        enqueue_at(&mut q,path.clone(),now).unwrap();
+        enqueue_at(&mut q,path.clone(),now-Duration::from_secs(2)).unwrap();
+        assert_eq!(q[&path].last,now);
+    }
 }
 #[cfg(test)]
 fn enqueue(q: &mut HashMap<PathBuf, Pending>, p: PathBuf) -> Result<(), String> {
@@ -479,13 +492,15 @@ fn enqueue_at(q: &mut HashMap<PathBuf, Pending>, p: PathBuf, now: Instant) -> Re
     }
     q.entry(p)
         .and_modify(|e| {
-            e.last = now;
+            e.last = e.last.max(now);
             e.attempt = 0;
         })
         .or_insert(Pending {
             first: now,
             last: now,
             attempt: 0,
+            force_upload: false,
+            batch_checked: false,
         });
     Ok(())
 }
@@ -1422,7 +1437,7 @@ fn worker(
                             Ok(meta) if meta.is_file() => {
                                 queue_candidate(
                                     &path, &root, false, &mut queue, &stop, &rules, detected, options.recursive,
-                                )
+                                ).map(|()|{if let Ok(relative)=path.strip_prefix(&root){if let Some(item)=queue.get_mut(relative){item.force_upload=true;}}})
                             },
                             Ok(_) => Ok(()),
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1483,6 +1498,56 @@ fn worker(
                 }
             })
             .map(|(k, _)| k.clone());
+        // Compare at most four independent files on the existing authenticated
+        // session. Publish no authority/skip result until the entire batch has
+        // succeeded. Upload/delete paths retain their fresh mutation guards.
+        if ready.as_ref().is_some_and(|p|!directories.contains_key(p)&&queue.get(p).is_some_and(|v|!v.force_upload&&!v.batch_checked))
+            && connection.as_ref().is_some_and(|c|!c.needs_recycle()) {
+            let mut candidates:Vec<_>=queue.iter().filter(|(p,v)|!directories.contains_key(*p)
+                && !v.force_upload && !v.batch_checked && v.last.elapsed()>=Duration::from_millis(500)
+                && !rules.excludes(p,false).unwrap_or(true) && (options.recursive||p.components().count()==1))
+                .map(|(p,_)|p.clone()).take(4).collect();
+            candidates.sort_by_key(|p|(p.components().count(),p.clone()));
+            let mut files=Vec::new();let mut invalid=None;
+            for path in candidates {
+                match local_transfer_action(&root,&path,&root_identity,delete_enabled&&inventory.contains_key(&path),&stop){
+                    Ok(LocalAction::Upload)=>files.push(path),Ok(_)=>(),Err(e)=>{invalid=Some((Some(path),e));break;}
+                }
+            }
+            let batch=if let Some(error)=invalid {Err(error)} else if files.len()>1 {
+                sftp::compare_files(connection.as_mut().unwrap(),&root,&files,&remote,&stop)
+            } else {Ok(Vec::new())};
+            match batch {
+                Err((path,error))=>{
+                    state.lock().unwrap().failure_context(&error,path.as_deref(),"compare","not_committed",queue.len(),stop.load(Ordering::Relaxed));break;
+                },
+                Ok(results)=>{
+                    if stop.load(Ordering::SeqCst){break;}
+                    let mut consumed=false;let mut failed=false;
+                    for (path,result) in files.into_iter().zip(results){
+                        match result {
+                            sftp::FileComparison::Unchanged(stamp)=>{
+                                if delete_enabled {
+                                    if let Err(error)=remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes){
+                                        state.lock().unwrap().failure_context(&error,Some(&path),"record","not_committed",queue.len(),false);failed=true;break;
+                                    }
+                                }
+                                queue.remove(&path);consumed=true;
+                                state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display()));
+                            },
+                            sftp::FileComparison::SourceChanged=>{
+                                if let Some(item)=queue.get_mut(&path){item.last=Instant::now();item.force_upload=true;}
+                                state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));
+                                consumed=true;
+                            },
+                            sftp::FileComparison::Upload{..}=>{if let Some(item)=queue.get_mut(&path){item.batch_checked=true;}}
+                        }
+                    }
+                    if failed {break;}
+                    if consumed {state.lock().unwrap().pending=queue.len();continue;}
+                }
+            }
+        }
         if let Some(path) = ready {
             state.lock().unwrap().activity.mark_working();
             let mut item = queue.remove(&path).unwrap();
@@ -1544,7 +1609,8 @@ fn worker(
             // Revalidate after reconnect: a pending deletion may have become an
             // upload while the connection was unavailable.
             let mut operation = if is_directory {"directory"} else {"compare"};
-            let transfer = (|| {
+            let mut source_changed = false;
+            let transfer: Result<(u64,Option<sftp::RemoteStamp>,LocalAction,bool),String> = (|| {
                 if is_directory {
                     let action = directory_action(&root, &path, &root_identity, &stop)?;
                     let connection = connection.as_mut().unwrap();
@@ -1600,8 +1666,9 @@ fn worker(
                     &stop,
                 )?;
                 let connection = connection.as_mut().unwrap();
-                if action == LocalAction::Upload {
+                if action == LocalAction::Upload && !item.force_upload {
                     match sftp::compare_file(connection,&root,&path,&remote,&stop)? {
+                        sftp::FileComparison::SourceChanged => { source_changed=true; return Ok((0,None,LocalAction::Skip,false)); },
                         sftp::FileComparison::Unchanged(stamp) => return Ok((0, if delete_enabled {Some(stamp)}else{None},LocalAction::Skip,false)),
                         sftp::FileComparison::Upload { remote_newer: true } => state.lock().unwrap().log(&format!("Remote newer; source-authoritative overwrite {}",path.display())),
                         sftp::FileComparison::Upload { remote_newer: false } => (),
@@ -1610,14 +1677,19 @@ fn worker(
                 match action {
                     LocalAction::Upload if delete_enabled => {
                         operation = "upload";
-                        let (bytes, stamp) =
-                            sftp::upload_recorded(connection, &root, &path, &remote, &stop, &id)?;
-                        Ok((bytes, Some(stamp), LocalAction::Upload, true))
+                        match sftp::upload_recorded(connection, &root, &path, &remote, &stop, &id)? {
+                            sftp::SourceOutcome::Complete((bytes,stamp)) => Ok((bytes,Some(stamp),LocalAction::Upload,true)),
+                            sftp::SourceOutcome::Changed { committed } => { source_changed=true;
+                                Ok(match committed { Some((bytes,stamp)) => (bytes,Some(stamp),LocalAction::Upload,true), None => (0,None,LocalAction::Skip,false) })
+                            },
+                        }
                     }
                     LocalAction::Upload => {
                         operation = "upload";
-                        sftp::upload(connection, &root, &path, &remote, &stop, &id)
-                            .map(|bytes| (bytes, None, LocalAction::Upload, true))
+                        match sftp::upload(connection, &root, &path, &remote, &stop, &id)? {
+                            sftp::SourceOutcome::Complete(receipt) => Ok((receipt.bytes,None,LocalAction::Upload,true)),
+                            sftp::SourceOutcome::Changed { .. } => { source_changed=true; Ok((0,None,LocalAction::Skip,false)) },
+                        }
                     }
                     LocalAction::Delete => {
                         operation = "delete";
@@ -1636,6 +1708,14 @@ fn worker(
             })();
             match transfer {
                 Ok((bytes, stamp, action, changed)) => {
+                    if source_changed && action == LocalAction::Skip {
+                        let mut status=state.lock().unwrap();
+                        if stop.load(Ordering::SeqCst) || status.failure.is_some() { break; }
+                        item.last=Instant::now(); item.force_upload=true; queue.insert(path.clone(),item);
+                        status.pending=queue.len(); status.speed=0;
+                        status.log(&format!("Local source changed; waiting to resend {}",path.display()));
+                        continue;
+                    }
                     if let Some(stamp) = stamp {
                         if let Err(error) = remember_file(&mut inventory,path.clone(),stamp,&mut file_authority_bytes) {
                             delete_enabled=false; inventory.clear(); directories.clear();
@@ -1686,6 +1766,11 @@ fn worker(
                     s.latency = item.first.elapsed().as_millis() as u64;
                     s.speed = if s.failure.is_some() {0} else {(bytes as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64};
                     s.pending = queue.len();
+                    if source_changed && !stop.load(Ordering::SeqCst) && s.failure.is_none() {
+                        item.last=Instant::now(); item.force_upload=true; queue.insert(path.clone(),item);
+                        s.pending=queue.len(); s.speed=0;
+                        s.log(&format!("Local source changed; waiting to resend {}",path.display()));
+                    }
                 }
                 Err(e) => {
                     suspend_directories(&mut directories);
@@ -2980,14 +3065,14 @@ mod directory_regression {
     }
     #[test]
     #[ignore = "generated localhost fixture launched by scripts/directory-delete-test.mjs"]
-    fn directory_deletion_generated_localhost_failed_staging_has_no_journal() {
+    fn directory_deletion_generated_localhost_changed_staging_resends_latest() {
         let f = Fixture::load();
         let (local, remote) = f.roots("journal-failed");
         let source = local.join("changing.bin");
         std::fs::write(&source, vec![17u8; 32 * 1024 * 1024]).unwrap();
         let engine = f.start("journal-failed", &local, SyncOptions::default());
-        // Actual SFTP staging must begin before changing the source. The final
-        // source metadata guard then rejects commit, leaving only a .part file.
+        // Actual SFTP staging must begin before changing the source. The old
+        // stage must not become a final mixed file; the latest source is resent.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if std::fs::read_dir(&remote).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".part")) { break; }
@@ -2999,18 +3084,19 @@ mod directory_regression {
         // Debug-build localhost encryption of 32 MiB can exceed the small-file
         // fixture's 15s helper deadline. Await its actual final result instead.
         let deadline = Instant::now() + Duration::from_secs(90);
-        while engine.status("journal-failed").unwrap().error_count == 0 {
+        while !remote.join("changing.bin").is_file() || engine.status("journal-failed").unwrap().pending != 0 {
+            assert_eq!(engine.status("journal-failed").unwrap().error_count,0);
             if Instant::now() >= deadline {
                 engine.stop("journal-failed").unwrap();
                 panic!("Generated SFTP staging did not reach a final result");
             }
             thread::sleep(Duration::from_millis(20));
         }
-        let failed = engine.status("journal-failed").unwrap();
-        assert!(!remote.join("changing.bin").exists(), "Failed upload must not commit a final target");
-        assert!(std::fs::read_dir(&remote).unwrap().any(|entry| entry.unwrap().metadata().unwrap().len() > 0), "Failure occurred after real staging bytes were written");
-        assert_eq!(failed.remote_changes.revision, 0);
-        assert!(failed.remote_changes.records.is_empty());
+        let complete = engine.status("journal-failed").unwrap();
+        assert_eq!(std::fs::read(remote.join("changing.bin")).unwrap(),std::fs::read(&source).unwrap());
+        assert_eq!(complete.error_count,0);
+        assert!(!complete.remote_changes.records.is_empty());
+        assert!(!std::fs::read_dir(&remote).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".part")));
         engine.stop("journal-failed").unwrap();
     }
     #[test]

@@ -1,4 +1,6 @@
 //! Protocol-3 native recovery adapter. Persisted records are never capabilities.
+#[path = "update_recovery_cleanup.rs"]
+mod cleanup;
 use crate::update_cleanup::codec;
 use crate::update_transaction::windows_impl as fs;
 use crate::update_transaction::{Error, Result};
@@ -577,6 +579,8 @@ pub(crate) struct RecoveryTransaction {
     child: Option<ProcessIdentity>,
     old_restart_attempted: bool,
     abandoned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cleanup: Option<cleanup::Progress>,
 }
 impl RecoveryTransaction {
     fn validate(&self) -> Result<()> {
@@ -617,6 +621,7 @@ impl RecoveryTransaction {
             return Err(Error::Invalid);
         }
         model::validate(&self.engine).map_err(|_| Error::Invalid)?;
+        if let Some(progress) = &self.cleanup { progress.validate(self)?; }
         self.installer.validate()?;
         for f in &self.files {
             f.old.validate()?;
@@ -898,6 +903,9 @@ impl RecoverySession {
         }) {
             return Err(Error::Unsafe);
         }
+        // An old locked installer or unrecognized artifact must not permanently
+        // block future updates. Preserve exact proof/progress before reuse.
+        cleanup::archive_before_replace(&store)?;
         let nonce = random_nonce()?;
         let (transaction, created) = child_directory(&store.directory, &nonce)?;
         if !created {
@@ -960,6 +968,7 @@ impl RecoverySession {
             child: None,
             old_restart_attempted: false,
             abandoned: false,
+            cleanup: None,
         };
         drop(old_image_guard);
         drop(old_uninstaller_guard);
@@ -1527,6 +1536,9 @@ pub(crate) fn ordinary_startup_allowed() -> std::result::Result<(), String> {
         observed_startup_admission(&root)
     })()
     .map_err(|_| "An incomplete native update requires recovery before Nearly can open".into())
+}
+pub(crate) fn cleanup_after_success() -> std::result::Result<bool, &'static str> {
+    cleanup::current()
 }
 fn observed_startup_admission(root: &PinnedRoot) -> Result<()> {
     let state = root.path().join(crate::update_transaction::STATE_DIRECTORY);

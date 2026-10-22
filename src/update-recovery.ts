@@ -2,7 +2,7 @@ import {invoke,type UpdateRestartReport} from './api.js';
 import {getLanguage} from './i18n.js';
 import './update-recovery.css';
 
-let started=false,disposed=false,revision=-1,recovery=false,probation=false;
+let started=false,disposed=false,revision=-1,recovery=false,probation=false,cleanupPending=false;
 let settled:((error?:Error)=>void)|undefined;
 let stop:(()=>void)|undefined,observer:MutationObserver|undefined;
 function render(){
@@ -10,6 +10,11 @@ function render(){
  let settling=document.getElementById('update-probation');
  if(probation&&!settling){settling=document.createElement('div');settling.id='update-probation';settling.setAttribute('role','status');document.body.append(settling);}
  if(settling){if(!probation)settling.remove();else settling.textContent=getLanguage()==='ja'?'更新を確認しています…':'Confirming the update…';}
+ let cleanup=document.getElementById('update-cleanup-notice');
+ if(cleanupPending&&!recovery&&!cleanup){cleanup=document.createElement('aside');cleanup.id='update-cleanup-notice';cleanup.setAttribute('role','status');document.body.append(cleanup);}
+ if(cleanup){if(!cleanupPending||recovery)cleanup.remove();else cleanup.textContent=getLanguage()==='ja'
+  ?'更新は完了しました。更新用ファイルの一部を安全に削除できなかったため保持しています。次回起動時に再確認します。'
+  :'The update succeeded. Some update files were retained because they could not be safely removed. Cleanup will be checked again at the next startup.';}
  if(disposed||!recovery)return;
  let notice=document.getElementById('update-recovery-notice');
  if(!notice){notice=document.createElement('aside');notice.id='update-recovery-notice';notice.setAttribute('role','alert');document.body.append(notice);}
@@ -22,7 +27,8 @@ function accept(value:UpdateRestartReport|undefined){
  if(disposed||!value||typeof value.phase!=='string'||!Number.isFinite(value.revision)||value.revision<revision)return;
  revision=value.revision;
  if(value.phase==='waitingForUi'||value.phase==='awaitingSuccess'){probation=true;render();}
- if(value.phase==='succeeded'&&!recovery){probation=false;render();settled?.();}
+ if((value.phase==='succeeded'||value.phase==='cleaned')&&!recovery){probation=false;cleanupPending=false;render();settled?.();}
+ if(value.phase==='cleanupPending'&&!recovery){cleanupPending=true;render();}
  // Recovery is terminal for this process; a late or malformed idle report cannot
  // dismiss evidence loss. Native code also fences all later cleanup transitions.
  if(value.phase==='recoveryRequired'){recovery=true;render();settled?.(Error('Update confirmation requires repair'));}

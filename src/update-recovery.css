@@ -1,4 +1,4 @@
-#update-recovery-notice {
+#update-recovery-notice, #update-cleanup-notice {
  position:fixed;z-index:1200;inset:auto 16px 16px;max-width:720px;margin-inline:auto;
  padding:12px 16px;border:1px solid var(--border-main,var(--theme-control-border,#b9c8d9));border-radius:6px;
  background:var(--surface-input,var(--theme-control-bg,#f8faff));color:var(--text-main,var(--theme-control-fg,#243348));
