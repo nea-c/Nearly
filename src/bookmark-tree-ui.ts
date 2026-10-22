@@ -280,9 +280,30 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
         ? html`<button data-bookmark-action="rename" role="menuitem">名前を変更</button><button data-bookmark-action="delete" role="menuitem">削除</button>`
         : "");
     document.body.append(view);
-    releaseBarrier = popupBarrier(view, closeBookmarkTreeAndFocus, 1001, id ? opener : undefined);
+    const dismissContext = (event?: Event) => {
+      const keyboard = event instanceof KeyboardEvent;
+      const pointInside = (element: HTMLElement) => {
+        if (!(event instanceof MouseEvent)) return false;
+        const box = element.getBoundingClientRect();
+        return event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
+      };
+      const retainHierarchy = contextUnderlay && (keyboard || pointInside(root) ||
+        [...contextUnderlay.querySelectorAll<HTMLElement>('[role=menu]')].some(pointInside));
+      if (retainHierarchy) {
+        releaseBarrier?.(); releaseBarrier = undefined;
+        view.remove();
+        popup = contextUnderlay; contextUnderlay = undefined;
+        cancelMenuTimer();
+        if (keyboard) {
+          const focusTarget = opener?.matches('button,[tabindex]') ? opener : menus.find(item=>item.view===opener)?.anchor;
+          if (focusTarget?.isConnected) focusTarget.focus({preventScroll:true});
+        }
+      } else if (keyboard || !event) closeBookmarkTreeAndFocus();
+      else closeBookmarkTree();
+    };
+    releaseBarrier = popupBarrier(view, dismissContext, 1001, id ? opener : undefined);
     place(view, x, y);
-    menuKeys(view,closeBookmarkTreeAndFocus);
+    menuKeys(view,()=>dismissContext(new KeyboardEvent('keydown',{key:'Escape'})));
     view
       .querySelectorAll<HTMLButtonElement>("[data-bookmark-action]")
       .forEach((button) => {
@@ -321,6 +342,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
       if (
         popup === startedPopup &&
         popupOwner === options.owner &&
+        !releaseBarrier &&
         !dragging &&
         !options.busy()
       )
@@ -398,6 +420,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
               event.pointerType === "touch" ||
               event.buttons ||
               dragging ||
+              releaseBarrier ||
               options.busy()
             )
               return;
@@ -595,7 +618,7 @@ export function bindBookmarkTree(root: HTMLElement, options: Options) {
     popup.append(view);
     view.onpointerenter = cancelMenuTimer;
     view.onpointerleave = (event) => {
-      if (event.pointerType === "touch" || dragging) return;
+      if (event.pointerType === "touch" || dragging || releaseBarrier) return;
       // Keep the parent available while crossing into a child or across the
       // small gap; entering any open menu cancels this pending branch close.
       scheduleMenu(() => trimMenus(Math.max(1, depth)), 240);

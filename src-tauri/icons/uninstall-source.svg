@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Nearly uninstall</title>
+  <desc>A lime green Nearly tile with a dark green wastebasket and a red removal badge.</desc>
+  <rect x="8" y="8" width="224" height="224" rx="40" fill="#234b1c"/>
+  <rect x="16" y="16" width="208" height="208" rx="32" fill="#a7d92c"/>
+  <path d="M64 88h112l-10 104H74z" fill="#244a1c"/>
+  <path d="M62 68h116v16H62zM96 48h48v16H96z" fill="#244a1c"/>
+  <path d="M98 108v60m44-60v60" stroke="#b9e64b" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="196" cy="196" r="56" fill="#fff"/>
+  <circle cx="196" cy="196" r="48" fill="#c93635"/>
+  <path d="M172 196h48" stroke="#fff" stroke-width="16" stroke-linecap="round"/>
+</svg>

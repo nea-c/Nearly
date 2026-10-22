@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 const modelTimeoutMs=60_000;
 const probe=await import('../scripts/installer-ui-probe.mjs').catch(()=>({}));
 const template=await fs.readFile(new URL('../src-tauri/windows/installer.nsi',import.meta.url),'utf8');
-const paths={runRoot:'D:\\temp\\nearly-installer-qa-123-1',tools:'C:\\local\\tauri\\NSIS',icon:'C:\\source\\src-tauri\\icons\\icon.ico'};
+const paths={runRoot:'D:\\temp\\nearly-installer-qa-123-1',tools:'C:\\local\\tauri\\NSIS',icon:'C:\\source\\src-tauri\\icons\\icon.ico',uninstallerIcon:'C:\\source\\src-tauri\\icons\\uninstall.ico'};
 test('mock lifecycle selects only desktop while the independent boundary keeps both shortcuts disabled',()=>{
   assert.deepEqual(probe.probeShortcutChoices('lifecycle'),{start:0,desktop:1});
   assert.deepEqual(probe.probeShortcutChoices('boundary'),{start:0,desktop:0});
@@ -163,6 +163,8 @@ foreach($bad in @($altered,$old,[Text.Encoding]::UTF8.GetBytes("non-executable g
 test('strict rendering retains actual pages, ownership guards and independent shortcut code',()=>{
   const rendered=probe.renderProbeTemplate(template,paths);
   assert.doesNotMatch(rendered,/\{\{/);assert.match(rendered,/!define VERSION "1\.9\.0"/);
+  assert.ok(rendered.includes(`!define MUI_ICON "${paths.icon}"`));
+  assert.ok(rendered.includes(`!define MUI_UNICON "${paths.uninstallerIcon}"`));
   for(const name of ['NearlyDirectoryLeave','NearlyShortcutPage','NearlyShortcutPageLeave'])assert.ok(rendered.includes(`Function ${name}`),name);
   for(const name of ['NearlyPinRoot','NearlyRejectRoot'])assert.ok(rendered.includes('Function ${prefix}'+name),name);
   assert.match(rendered,/!insertmacro MUI_PAGE_DIRECTORY/);assert.match(rendered,/File .*oname=/);
@@ -171,6 +173,11 @@ test('strict rendering retains actual pages, ownership guards and independent sh
 test('unknown, missing, repeated structural fields and NSIS path injection fail closed',()=>{
   for(const source of [template+'{{unknown}}',template.replace('{{product_name}}','Nearly'),template.replace('{{#if resources}}','{{#if unknown}}'),template+'{{#if resources}}{{/if}}'])assert.throws(()=>probe.renderProbeTemplate(source,paths));
   for(const value of ['D:\\bad$TEMP','D:\\bad"','D:\\bad\n','D:\\temp\\..\\foreign','\\\\host\\share','D:/forward'])assert.throws(()=>probe.renderProbeTemplate(template,{...paths,runRoot:value}),value);
+  for(const field of ['installer_icon','uninstaller_icon']){
+    assert.throws(()=>probe.renderProbeTemplate(template+`{{${field}}}`,paths));
+    assert.throws(()=>probe.renderProbeTemplate(template.replace(`{{${field}}}`,'fixed.ico'),paths));
+  }
+  for(const uninstallerIcon of [undefined,'D:\\bad$TEMP','D:\\bad"','D:\\temp\\..\\foreign'])assert.throws(()=>probe.renderProbeTemplate(template,{...paths,uninstallerIcon}));
 });
 test('navigation and public summary cannot claim full qualification',()=>{
   for(const mode of ['Click','Command'])assert.equal(probe.validateNavigation(mode),mode);

@@ -26,9 +26,9 @@ export function mockPayload(){
   // Fixed shell-link control: no executable header, entry point or code.
   return Buffer.from('non-executable generated shell-link control','utf8');
 }
-export function renderProbeTemplate(template,{runRoot,tools,icon}){
-  for(const value of [runRoot,tools,icon])safePath(value);
-  const values={compression:'lzma',product_name:'Nearly',main_binary_name:'Nearly',main_binary_path:path.win32.join(runRoot,'mock-payload.exe'),bundle_id:'local.syncfiles.native',version:'1.9.0',version_with_build:'1.9.0.0',manufacturer:'Nearly',copyright:'Nearly diagnostic mock payload - not qualification',arch:'x64',installer_icon:icon,additional_plugins_path:path.win32.join(tools,'Plugins','x86-unicode','additional'),install_mode:'currentUser',install_webview2_mode:'',out_file:path.win32.join(runRoot,'diagnostic-setup.exe'),display_language_selector:'true',estimated_size:'1'};
+export function renderProbeTemplate(template,{runRoot,tools,icon,uninstallerIcon}){
+  for(const value of [runRoot,tools,icon,uninstallerIcon])safePath(value);
+  const values={compression:'lzma',product_name:'Nearly',main_binary_name:'Nearly',main_binary_path:path.win32.join(runRoot,'mock-payload.exe'),bundle_id:'local.syncfiles.native',version:'1.9.0',version_with_build:'1.9.0.0',manufacturer:'Nearly',copyright:'Nearly diagnostic mock payload - not qualification',arch:'x64',installer_icon:icon,uninstaller_icon:uninstallerIcon,additional_plugins_path:path.win32.join(tools,'Plugins','x86-unicode','additional'),install_mode:'currentUser',install_webview2_mode:'',out_file:path.win32.join(runRoot,'diagnostic-setup.exe'),display_language_selector:'true',estimated_size:'1'};
   if(typeof template!=='string'||template.length>256*1024)fail('Bounded actual installer template required');
   for(const [field,message] of [['resources','Nearly is self-contained; external resources could overwrite user settings.'],['binaries',"Nearly's installer only owns its main EXE and generated uninstaller."]]){
     const expression=new RegExp(`\\{\\{#if ${field}\\}\\}\\r?\\n  !error "${message.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}"\\r?\\n\\{\\{/if\\}\\}`,'g');
@@ -39,7 +39,7 @@ export function renderProbeTemplate(template,{runRoot,tools,icon}){
   const rendered=template.replace(/\{\{([a-z0-9_]+)\}\}/g,(_,field)=>{
     if(!Object.hasOwn(values,field))fail('Unknown installer placeholder');seen.set(field,(seen.get(field)??0)+1);return values[field];
   });
-  if(rendered.includes('{{')||rendered.includes('}}')||Object.keys(values).some(field=>seen.get(field)!==(field==='installer_icon'?2:1)))fail('Missing or unsupported installer placeholder');
+  if(rendered.includes('{{')||rendered.includes('}}')||Object.keys(values).some(field=>seen.get(field)!==1))fail('Missing or unsupported installer placeholder');
   return rendered;
 }
 export function probeSummary(context,navigation,uiSucceeded,lifecycleSucceeded=false,kind='lifecycle'){
@@ -74,7 +74,7 @@ export async function runProbe(e=process.env){
     await fs.writeFile(path.join(plan.runRoot,'plan.json'),JSON.stringify(plan,null,2)+'\n',{flag:'wx'});
     const tools=await requireCachedTools(e.LOCALAPPDATA);
     const template=await fs.readFile(path.join(root,'src-tauri','windows','installer.nsi'),'utf8');
-    const rendered=renderProbeTemplate(template,{runRoot:plan.runRoot,tools,icon:path.join(root,'src-tauri','icons','icon.ico')});
+    const rendered=renderProbeTemplate(template,{runRoot:plan.runRoot,tools,icon:path.join(root,'src-tauri','icons','icon.ico'),uninstallerIcon:path.join(root,'src-tauri','icons','uninstall.ico')});
     await fs.writeFile(path.join(plan.runRoot,'mock-payload.exe'),mockPayload(),{flag:'wx'});
     if(kind==='lifecycle'){
       await fs.mkdir(path.join(plan.runRoot,'settings'));

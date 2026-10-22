@@ -1,4 +1,5 @@
 export const sideBookmarkTranslations: Record<string, string> = {
+  "右クリックでブックマークを追加": "Right-click to add bookmarks",
   "フォルダを追加": "Add folder",
   "整理用フォルダを作成": "Add folder",
   ブックマークを追加: "Add bookmark",

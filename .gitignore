@@ -103,6 +103,8 @@ Thumbs.db
 !/scripts/native-lifecycle-build.json
 
 !/scripts/build-installer.mjs
+!/scripts/generate-uninstall-icon.mjs
+!/scripts/inspect-pe-icons.mjs
 !/docs/windows-installer.md
 !/docs/update-installer-design.md
 
