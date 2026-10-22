@@ -39,5 +39,3 @@ const rust=path.join(out,'harness.rs');fs.writeFileSync(rust,code);
 execFileSync('rustc',['--edition=2021','--test',rust,'-o',path.join(out,'checks.exe')],{stdio:'inherit'});
 execFileSync(path.join(out,'checks.exe'),['--test-threads=1'],{cwd:out,stdio:'inherit'});
 if(process.argv.includes('--benchmark')){execFileSync('rustc',['--edition=2021','-O',rust,'-o',path.join(out,'bench.exe')],{stdio:'inherit'});const result=execFileSync(path.join(out,'bench.exe'),[],{cwd:out,encoding:'utf8'});fs.writeFileSync(path.join(out,'before-after.csv'),result);process.stdout.write(result);}
-
-
