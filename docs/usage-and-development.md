@@ -20,6 +20,18 @@ Windows向けのローカル → SFTP同期アプリです。TypeScript、Tauri 
 
 ## 開発
 
+Node.js 22 系では 22.22.2 以降が必要です（直近の正式 Windows CI では 22.23.4 を使用）。Visual Studio 2026 に対応する `node-gyp` 13.1.0 を開発依存として固定しています。これは localhost SFTP テストで使う `ssh2` / `cpu-features` の構築用で、配布アプリの利用者に Node.js の導入は必要ありません。
+
+`npm ci` は通常どおり install scripts を実行します。`ssh2` は native 構築失敗を JavaScript 実装へのフォールバックで隠すことがあるため、Windows CI の `npm test` では両 native addon のロードを確認し、失敗したら停止します。ローカルでも明示確認できます。
+
+```powershell
+$env:NEARLY_NATIVE_ADDON_QUALIFY = '1'
+node --test tests/native-addon-install.test.mjs
+Remove-Item Env:NEARLY_NATIVE_ADDON_QUALIFY
+```
+
+構築ツールの互換性修正であり、同期速度や CI 全体の短縮を保証するものではありません。
+
 前提: Windows、Node.jsとnpm、RustのMSVCツールチェーン、Visual Studio C++ Build Tools、WebView2 Runtime。依存関係の取得には初回ネット接続が必要です。
 
 ```powershell
