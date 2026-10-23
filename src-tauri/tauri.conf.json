@@ -33,6 +33,8 @@
     "active": true,
     "targets": ["nsis"],
     "publisher": "Nearly",
+    "license": "Apache-2.0",
+    "licenseFile": "../DISTRIBUTION-LICENSES.txt",
     "icon": ["icons/icon.ico"],
     "createUpdaterArtifacts": false,
     "windows": {

@@ -1,4 +1,15 @@
-# Uninstaller icon
+# Icons
+
+## Application icon provenance
+
+On 2026-10-23, the user stated that they drew the application icon themselves,
+using an earlier ChatGPT-generated green N-shaped folder concept as a reference.
+This records the user's account of its origin, not a legal determination of
+copyrightability or non-infringement. The project's Apache-2.0 licensing scope
+includes `icon-source.png` and its derived application icon files, as directed
+by the user. See the root `LICENSE` and `LICENSING.md`.
+
+## Uninstaller icon
 
 `uninstall-source.svg` is an original vector drawing. The lime tile and dark
 green outline retain Nearly's icon family; the wastebasket and large red minus

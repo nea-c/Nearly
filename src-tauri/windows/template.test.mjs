@@ -189,6 +189,7 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   const exe = path.join(output, "generated-setup-DO-NOT-RUN.exe");
   const data = {
     compression: "lzma", product_name: "Nearly", main_binary_name: "Nearly", main_binary_path: payload,
+    license: path.join(root, 'DISTRIBUTION-LICENSES.txt'),
     bundle_id: "local.nearly.compile.only", version: internalVersion, version_with_build: `${internalVersion}.0`,
     manufacturer: "Nearly", copyright: "Nearly contributors", arch: "x64",
     installer_icon: path.join(root, "src-tauri", "icons", "icon.ico"),
@@ -198,6 +199,7 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
     install_mode: "currentUser", install_webview2_mode: "", display_language_selector: "true", estimated_size: "1", out_file: exe,
   };
   let rendered = template.replace(/\{\{#if (?:resources|binaries)\}\}[\s\S]*?\{\{\/if\}\}/g, "");
+  rendered = rendered.replace(/\{\{#if license\}\}([\s\S]*?)\{\{\/if\}\}/g, '$1');
   rendered = rendered.replace(/\{\{([a-z0-9_]+)\}\}/g, (_, key) => {
     assert.ok(Object.hasOwn(data, key), `Unknown NSIS template value ${key}`);
     return data[key];
