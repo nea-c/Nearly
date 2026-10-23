@@ -105,6 +105,55 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  browser-ui:
+    needs: policy
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      source-commit: ${{ steps.verified.outputs.source-commit }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.commit }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit clean source, main ancestry, canonical version and registered production gate
+        run: node control/.github/scripts/signed-release.mjs preflight source
+      - name: Install locked target dependencies in this secret-free runner
+        working-directory: source
+        run: npm ci
+      - name: Browser regression and production UI checks
+        working-directory: source
+        run: |
+          npm run test:ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:ui:production
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - id: verified
+        name: Reaudit tested source and bind successful checks to the exact commit
+        run: |
+          node control/.github/scripts/signed-release.mjs preflight source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sourceCommit = git -C source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceCommit -cne $env:RELEASE_COMMIT) { throw 'UI source commit mismatch' }
+          "source-commit=$sourceCommit" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
   unsigned-build:
     needs: policy
     runs-on: windows-2025
@@ -112,6 +161,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      source-commit: ${{ steps.package.outputs.source-commit }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
@@ -182,19 +232,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/listing-existing-pipeline-test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Browser regression and production UI checks
-        working-directory: source
-        run: |
-          npm run test:ui
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run test:ui:production
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build production NSIS without running setup
         working-directory: source
         run: npm run build:installer -- --offline --locked
       - id: package
         name: Reaudit and bind final installer plus final loose application
-        run: node control/.github/scripts/signed-release.mjs package source "$env:RUNNER_TEMP/nearly-unsigned"
+        run: |
+          node control/.github/scripts/signed-release.mjs package source "$env:RUNNER_TEMP/nearly-unsigned"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sourceCommit = git -C source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceCommit -cne $env:RELEASE_COMMIT) { throw 'Build source commit mismatch' }
+          "source-commit=$sourceCommit" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - id: upload
         if: inputs.mode == 'verify-signature' || inputs.mode == 'release'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
@@ -207,8 +256,8 @@ jobs:
           retention-days: 1
 
   sign:
-    needs: [policy, trusted-signer, unsigned-build]
-    if: (inputs.mode == 'verify-signature' || inputs.mode == 'release') && needs.policy.result == 'success' && needs.trusted-signer.result == 'success' && needs.unsigned-build.result == 'success'
+    needs: [policy, trusted-signer, browser-ui, unsigned-build]
+    if: (inputs.mode == 'verify-signature' || inputs.mode == 'release') && needs.policy.result == 'success' && needs.trusted-signer.result == 'success' && needs.browser-ui.result == 'success' && needs.unsigned-build.result == 'success' && needs.browser-ui.outputs.source-commit == inputs.commit && needs.unsigned-build.outputs.source-commit == inputs.commit
     runs-on: windows-2025
     timeout-minutes: 20
     environment: nearly-updater-production
@@ -285,8 +334,8 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [policy, trusted-signer, unsigned-build, sign]
-    if: inputs.mode == 'release' && needs.sign.result == 'success'
+    needs: [policy, trusted-signer, browser-ui, unsigned-build, sign]
+    if: inputs.mode == 'release' && needs.policy.result == 'success' && needs.trusted-signer.result == 'success' && needs.browser-ui.result == 'success' && needs.unsigned-build.result == 'success' && needs.sign.result == 'success' && needs.browser-ui.outputs.source-commit == inputs.commit && needs.unsigned-build.outputs.source-commit == inputs.commit
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

@@ -168,10 +168,16 @@ test('strict rendering retains actual pages, ownership guards and independent sh
   for(const name of ['NearlyDirectoryLeave','NearlyShortcutPage','NearlyShortcutPageLeave'])assert.ok(rendered.includes(`Function ${name}`),name);
   for(const name of ['NearlyPinRoot','NearlyRejectRoot'])assert.ok(rendered.includes('Function ${prefix}'+name),name);
   assert.match(rendered,/!insertmacro MUI_PAGE_DIRECTORY/);assert.match(rendered,/File .*oname=/);
+  // This non-qualification mock has no bundle license configuration. Real
+  // installer/license compile contracts separately retain the configured page.
+  assert.match(template,/!insertmacro MUI_PAGE_LICENSE "\{\{license\}\}"/);
+  assert.doesNotMatch(rendered,/!insertmacro MUI_PAGE_LICENSE/);
   assert.equal(rendered.split(/\r?\n/).length,template.split(/\r?\n/).length);
 });
 test('unknown, missing, repeated structural fields and NSIS path injection fail closed',()=>{
   for(const source of [template+'{{unknown}}',template.replace('{{product_name}}','Nearly'),template.replace('{{#if resources}}','{{#if unknown}}'),template+'{{#if resources}}{{/if}}'])assert.throws(()=>probe.renderProbeTemplate(source,paths));
+  const license=template.match(/\{\{#if license\}\}[\s\S]*?\{\{\/if\}\}/)[0];
+  for(const source of [template.replace(license,''),template+license,template.replace('{{license}}','{{unknown}}')])assert.throws(()=>probe.renderProbeTemplate(source,paths));
   for(const value of ['D:\\bad$TEMP','D:\\bad"','D:\\bad\n','D:\\temp\\..\\foreign','\\\\host\\share','D:/forward'])assert.throws(()=>probe.renderProbeTemplate(template,{...paths,runRoot:value}),value);
   for(const field of ['installer_icon','uninstaller_icon']){
     assert.throws(()=>probe.renderProbeTemplate(template+`{{${field}}}`,paths));

@@ -35,6 +35,12 @@ export function renderProbeTemplate(template,{runRoot,tools,icon,uninstallerIcon
     let count=0;template=template.replace(expression,block=>{count++;return block.replace(/[^\r\n]/g,'');});
     if(count!==1)fail('Unexpected resource conditional in actual template');
   }
+  // The plaintext diagnostic has no bundle license configuration. Render the
+  // exact optional page as false, retaining line positions and strict shape.
+  // Production licensing remains covered by the actual installer compile tests.
+  const license=/\{\{#if license\}\}\r?\n!define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive\r?\n!insertmacro MUI_PAGE_LICENSE "\{\{license\}\}"\r?\n\{\{\/if\}\}/g;
+  let licenseCount=0;template=template.replace(license,block=>{licenseCount++;return block.replace(/[^\r\n]/g,'');});
+  if(licenseCount!==1)fail('Unexpected license conditional in actual template');
   const seen=new Map();
   const rendered=template.replace(/\{\{([a-z0-9_]+)\}\}/g,(_,field)=>{
     if(!Object.hasOwn(values,field))fail('Unknown installer placeholder');seen.set(field,(seen.get(field)??0)+1);return values[field];
