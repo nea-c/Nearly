@@ -11,14 +11,16 @@ const text=fs.readFileSync(path.join(root,'.github/workflows/release-signed-wind
 const commit='a'.repeat(40);
 function gate(expression,{mode='release',results={},sources={}}={}){
   return Function('return ('+expression
-    .replace(/needs\.([a-z-]+)\.outputs\.source-commit/g,(_,job)=>JSON.stringify(sources[job]??commit))
-    .replace(/needs\.([a-z-]+)\.result/g,(_,job)=>JSON.stringify(results[job]??'success'))
+    .replace(/needs\.([a-z0-9-]+)\.outputs\.source-commit/g,(_,job)=>JSON.stringify(sources[job]??commit))
+    .replace(/needs\.([a-z0-9-]+)\.result/g,(_,job)=>JSON.stringify(results[job]??'success'))
     .replace(/inputs\.commit/g,JSON.stringify(commit))
     .replace(/inputs\.mode/g,JSON.stringify(mode))+')')();
 }
 
-test('browser checks are independent of the Rust build and expose only a reaudited exact source',()=>{
-  const browser=w.jobs['browser-ui'],build=w.jobs['unsigned-build'];
+test('both browser shards are independent and expose only a reaudited exact source',()=>{
+  const build=w.jobs['unsigned-build'];
+  for(const index of [1,2]){
+  const browser=w.jobs[`browser-ui-${index}`];
   assert.ok(browser,'browser checks need their own job');
   assert.equal(browser.needs,'policy');assert.equal(build.needs,'policy');
   assert.deepEqual(browser.permissions,{contents:'read'});
@@ -27,14 +29,15 @@ test('browser checks are independent of the Rust build and expose only a reaudit
   const source=browser.steps.find(s=>s.with?.path==='source');
   assert.equal(source.with.ref,'${{ inputs.commit }}');
   assert.equal(source.with['fetch-depth'],'0');assert.equal(source.with['persist-credentials'],false);
-  const checks=browser.steps.findIndex(s=>s.run?.includes('npm run test:ui'));
-  assert.ok(checks>=0);assert.match(browser.steps[checks].run,/test:ui:production/);
+  const checks=browser.steps.findIndex(s=>s.run?.includes('scripts/ui-shard-test.mjs'));
+  assert.ok(checks>=0);assert.equal(browser.steps[checks].run,`node scripts/ui-shard-test.mjs ${index}`);
   const verified=browser.steps.findIndex(s=>s.id==='verified');assert.ok(verified>checks);
   assert.match(browser.steps[verified].run,/signed-release\.mjs preflight source/);
   assert.match(browser.steps[verified].run,/rev-parse HEAD/);
   assert.match(browser.steps[verified].run,/-cne \$env:RELEASE_COMMIT/);
   assert.match(browser.steps[verified].run,/source-commit=.*GITHUB_OUTPUT/s);
   assert.equal(browser.outputs['source-commit'],'${{ steps.verified.outputs.source-commit }}');
+  }
   assert.equal(build.outputs['source-commit'],'${{ steps.package.outputs.source-commit }}');
   assert.doesNotMatch(build.steps.map(s=>s.run||'').join('\n'),/npm run test:ui/);
   const packageStep=build.steps.find(s=>s.id==='package');
@@ -44,14 +47,14 @@ test('browser checks are independent of the Rust build and expose only a reaudit
 test('signing and publishing reject failed, cancelled, skipped, missing or mismatched prerequisites',()=>{
   for(const name of ['sign','publish']){
     const job=w.jobs[name];
-    const required=['policy','trusted-signer','browser-ui','native-tests','unsigned-build',...(name==='publish'?['sign']:[])];
+    const required=['policy','trusted-signer','browser-ui-1','browser-ui-2','native-tests','unsigned-build',...(name==='publish'?['sign']:[])];
     assert.deepEqual(job.needs,required);
     for(const mode of ['validate','verify-signature','release','unknown']){
       assert.equal(gate(job.if,{mode}),name==='publish'?mode==='release':['verify-signature','release'].includes(mode));
       for(const prerequisite of required)for(const result of ['failure','cancelled','skipped','']){
         assert.equal(gate(job.if,{mode,results:{[prerequisite]:result}}),false,`${name}/${mode}/${prerequisite}/${result}`);
       }
-      for(const producer of ['browser-ui','native-tests','unsigned-build'])for(const sha of ['','b'.repeat(40),'a'.repeat(39),'0'.repeat(40)]){
+      for(const producer of ['browser-ui-1','browser-ui-2','native-tests','unsigned-build'])for(const sha of ['','b'.repeat(40),'a'.repeat(39),'0'.repeat(40)]){
         assert.equal(gate(job.if,{mode,sources:{[producer]:sha}}),false,`${name}/${mode}/${producer}/${sha}`);
       }
     }
@@ -84,7 +87,11 @@ test('parallelism keeps all native, localhost, installer and licensing checks',(
   const native=w.jobs['native-tests'];assert.ok(native,'native tests need an independent job');
   const checks=native.steps.map(s=>s.run||'').join('\n');
   const build=w.jobs['unsigned-build'].steps.map(s=>s.run||'').join('\n');
-  for(const command of ['npm test','npm run test:installer','scripts/ppk-fixtures.mjs','cargo +1.97.1 test --offline --locked','release-native-admission.ps1','sync_difference_generated_localhost','directory_deletion_generated_localhost','scripts/listing-worker-test.mjs','scripts/listing-existing-pipeline-test.mjs']){assert.ok(checks.includes(command),command);assert.ok(!build.includes(command),`not duplicated in packaging: ${command}`);}
+  for(const command of ['npm test','npm run test:installer','scripts/ppk-fixtures.mjs','scripts/native-parallel-test.mjs','release-native-admission.ps1']){assert.ok(checks.includes(command),command);assert.ok(!build.includes(command),`not duplicated in packaging: ${command}`);}
+  const lanes=fs.readFileSync(path.join(root,'scripts/native-parallel-test.mjs'),'utf8');
+  for(const command of ['sync_difference_generated_localhost','directory_deletion_generated_localhost','listing-worker-test.mjs','listing-existing-pipeline-test.mjs','--no-run','--offline','--locked','--test-threads=1'])assert.ok(lanes.includes(command),command);
+  assert.equal(native.steps.filter(s=>s.run?.includes('scripts/native-parallel-test.mjs')).length,1);
+  assert.ok(native.steps.findIndex(s=>s.run?.includes('release-native-admission.ps1'))>native.steps.findIndex(s=>s.run?.includes('scripts/native-parallel-test.mjs')));
   assert.ok(build.includes('npm run build:installer -- --offline --locked'));
   assert.doesNotMatch(checks,/npm run build:installer/);
   assert.match(checks,/node --test control\/tests\/manual-release\.test\.mjs control\/tests\/manual-release-workflow\.test\.mjs control\/tests\/signed-\*\.test\.mjs/);
@@ -107,8 +114,8 @@ test('verification-only mode builds/signs/uploads but can never start the conten
     for(const job of Object.values(w.jobs))if(job.permissions.contents==='write')assert.equal(allowed(job.if,mode),mode==='release');
   }
 });
-test('completed local workflow is manual exact-input only, defaults to validation and separates seven jobs',()=>{
-  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);assert.equal(w.on.workflow_dispatch.inputs.mode.default,'validate');assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(),['mode','commit','version','confirmation'].sort());assert.deepEqual(w.permissions,{});assert.equal(w.concurrency['cancel-in-progress'],false);assert.deepEqual(Object.keys(w.jobs),['policy','trusted-signer','browser-ui','native-tests','unsigned-build','sign','publish']);assert.match(w.jobs.policy.if,/workflow_dispatch.*refs\/heads\/main/);
+test('completed local workflow is manual exact-input only, defaults to validation and separates eight jobs',()=>{
+  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);assert.equal(w.on.workflow_dispatch.inputs.mode.default,'validate');assert.deepEqual(Object.keys(w.on.workflow_dispatch.inputs).sort(),['mode','commit','version','confirmation'].sort());assert.deepEqual(w.permissions,{});assert.equal(w.concurrency['cancel-in-progress'],false);assert.deepEqual(Object.keys(w.jobs),['policy','trusted-signer','browser-ui-1','browser-ui-2','native-tests','unsigned-build','sign','publish']);assert.match(w.jobs.policy.if,/workflow_dispatch.*refs\/heads\/main/);
   assert.deepEqual(w.jobs.publish.permissions,{contents:'write',actions:'read'});assert.equal(w.jobs.publish.environment,undefined);
   for(const[name,job]of Object.entries(w.jobs))if(name!=='publish')assert.notEqual(job.permissions.contents,'write');
 });
@@ -117,7 +124,7 @@ test('only one protected signing step maps Secrets, all prerequisites finish fir
   assert.equal(secretSteps.length,1);assert.equal(secretSteps[0].name,'sign');assert.equal(w.jobs.sign.environment,'nearly-updater-production');
   const sign=w.jobs.sign.steps,index=secretSteps[0].index;assert.ok(sign.slice(0,index).some(s=>s.run?.includes(' prepare-sign ')));assert.ok(sign.slice(0,index).some(s=>s.run?.includes(' preflight ')));assert.match(secretSteps[0].step.run,/nearly-updater-signer\.exe" sign --ci/);
   for(const s of sign.slice(index+1))assert.doesNotMatch(s.run||'',/npm|cargo|rustup|Invoke-WebRequest|install|Expand-Archive/);
-  for(const name of ['trusted-signer','browser-ui','native-tests','unsigned-build','publish'])assert.doesNotMatch(JSON.stringify(w.jobs[name]),/secrets\./);
+  for(const name of ['trusted-signer','browser-ui-1','browser-ui-2','native-tests','unsigned-build','publish'])assert.doesNotMatch(JSON.stringify(w.jobs[name]),/secrets\./);
   assert.match(w.jobs.sign.if,/mode == 'release'/);assert.match(w.jobs.publish.if,/mode == 'release'.*sign.result == 'success'/);
 });
 test('all action refs are pinned, downloaded IDs come only from dependencies, no target checkout or build in privileged jobs',()=>{

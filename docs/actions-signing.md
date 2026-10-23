@@ -62,9 +62,11 @@ No PR, fork, moving tag checkout, supplied artifact URL or arbitrary artifact ID
    source closure, dependency lock, executable/DLL hashes and manifest are bound to
    the controller/run/attempt. No target checkout or shared cache is present.
 3. unsigned-build checks out the exact reviewed source on a separate secret-free
-   runner. It audits source/history/privacy/version/gates, runs model/native/UI and
-   generated localhost tests, builds NSIS without executing setup, then reaudits
+   runner. It audits source/history/privacy/version/gates, builds NSIS without
+   executing setup, then reaudits
    and packages final setup/checksum, final loose Nearly.exe and an unsigned manifest.
+   Independent secret-free browser/native jobs must also succeed on the same source
+   before signing or publication; their execution is described below.
 4. sign starts after Environment approval. Before downloads it checks server artifact
    IDs/digests/repository/run/attempt. It recomputes the trusted tool closure, verifies
    bundle bytes and creates a new signing plan with the now-known artifact ID. Native
@@ -145,6 +147,46 @@ in the sole signing step; no key regeneration or Secret change is involved.
 This mode creates no GitHub Release. Public repository code, logs and nonsecret
 Actions artifacts may be viewed/downloaded by others. No real installer is executed,
 normal EXE replaced or installation gate enabled by this workflow.
+
+## Parallel browser and native verification
+
+`browser-ui-1` and `browser-ui-2` run disjoint file-level Playwright shards, each
+limited to two workers. Each checks that both listed shards cover the full suite
+exactly once, and that every assigned case actually passed without a skipped,
+failed or hidden retried attempt. Shard 1 also builds the frontend and runs all
+production UI cases once. Both jobs independently reaudit and bind their actual
+source SHA. Sign and publish explicitly require both successful jobs and both
+SHA outputs; failure, cancellation, skip or mismatch cannot release a payload.
+
+`native-tests` retains the controller, Node, installer and license checks. The
+native runner compiles Cargo test harnesses once, then overlaps the normal test
+lane with a second lane containing all four sequential localhost fixture groups.
+The resource harness and existing admission exclusions are retained; the exact
+standard-user admission tests remain a separate sequential guarded step. Wrapper
+processes use the same built main harness, isolated fixture directories and
+process-local environment. Failure/cancellation stops owned process trees and
+reports cleanup errors; no test timeout or assertion is shortened. Hard OS/runner
+termination cannot guarantee execution of JavaScript finally blocks; hosted-runner
+process cleanup remains the final boundary in that case.
+Current non-detaching fixture subprocesses are qualified; the helper is not a
+general containment mechanism for arbitrary detached/breakaway descendants.
+
+Local commands: `node scripts/ui-shard-test.mjs 1`, then shard `2` (sequentially on
+one PC because their mock server ports are shared); `node scripts/ppk-fixtures.mjs`
+then `node scripts/native-parallel-test.mjs` for generated native fixtures. Windows
+loopback/process qualification requires an ordinary native user process; sandbox
+denials are failures to diagnose, not a reason to skip test cases. Reports and
+generated fixture evidence remain under ignored `test-results/`. These commands
+do not run the installed application or connect to a user's server.
+
+Local success proves test coverage and overlap, not hosted CI performance. After
+separately authorized integration, the workflow edit changes the dependency-cache
+policy hash, so the first exact-SHA, no-release `validate` seeds new caches. Warm
+comparison requires a second separately authorized run on that same SHA after
+successful seed verification. Compare all job durations and runner usage, test
+counts, source bindings, final EXE audit, sign/publish skips and unchanged release
+assets. Do not infer a guaranteed speedup from the scheduling model or add
+dispatches without authorization.
 
 ## Optional Rust dependency cache
 
