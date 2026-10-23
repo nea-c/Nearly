@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createFixture} from './sftp-fixture.mjs';
-import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
-const output=path.resolve('test-results/listing-worker-'+Date.now());
+import fs from 'node:fs';import path from 'node:path';import {fixtureDirectory,runFixtureTest} from './native-test-process.mjs';
+const output=fixtureDirectory('listing-worker');
 let fixture;let changed=false;
 fixture=await createFixture(output,{async beforeStat(op,p){
  const staged=p.match(/^\/listing-staged-(save|error|cancel)\/(a|b)\.txt$/);
@@ -20,9 +20,7 @@ const control=setInterval(()=>{
  if(disconnected&&!resumed&&fixture.connectionCount===0){resumed=true;fixture.resume();fs.writeFileSync(path.join(output,'reconnect-closed'),'generated');}
 },10);
 try {
- const child=spawn('cargo',['test','--offline','--locked','--manifest-path','src-tauri/Cargo.toml','listing_worker_','--','--ignored','--nocapture','--test-threads=1'],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,NEARLY_PIPELINE_FIXTURE:manifest,NEARLY_LISTING_TEST_ROOT:output}});
- for(const s of [child.stdout,child.stderr])s.on('data',d=>process.stdout.write(d));
- process.exitCode=await new Promise((r,j)=>{child.on('exit',r);child.on('error',j)});
+ process.exitCode=await runFixtureTest('listing_worker_', {NEARLY_PIPELINE_FIXTURE:manifest,NEARLY_LISTING_TEST_ROOT:output},output);
  for(const name of ['listing-staged-error','listing-staged-cancel']) {assert.equal(fixture.requestPaths.filter(e=>e.path.startsWith('/'+name+'/')&&['OPEN','MKDIR','REMOVE','RMDIR','RENAME','EXTENDED'].includes(e.operation)).length,0,'failed/cancelled fresh batch must not dispatch mutations: '+name);}
  fs.writeFileSync(path.join(output,'requests.json'),JSON.stringify(fixture.requestPaths,null,2));console.log('LISTING_RESULTS',output);
 } finally {clearInterval(control);await fixture.close();}

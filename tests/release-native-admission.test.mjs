@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {standardArgs} from '../scripts/native-parallel-test.mjs';
 const script=new URL('../scripts/release-native-admission.ps1',import.meta.url);
 const names=['ordinary_inherited_namespace_is_admitted_by_production_validation','generated_custom_root_payload_current_identity_and_namespace_guards'].map(n=>'install_root::native::tests::'+n);
 test('release retains all Rust tests and explicitly runs both standard-user admission tests',()=>{
  const workflow=fs.readFileSync(new URL('../.github/workflows/release-signed-windows.yml',import.meta.url),'utf8');
- for(const name of names)assert.ok(workflow.includes('--skip '+name),name);
+ assert.match(workflow,/run: node scripts\/native-parallel-test\.mjs/);
+ assert.deepEqual(standardArgs,['--skip',names[0],'--skip',names[1],'--test-threads=1']);
  assert.match(workflow,/name: Standard-user installation admission tests\s+working-directory: source\s+run: \.\/scripts\/release-native-admission\.ps1/);
 });
 test('native admission wrapper refuses other environments and demands each exact positive result',{skip:process.platform!=='win32'},()=>{

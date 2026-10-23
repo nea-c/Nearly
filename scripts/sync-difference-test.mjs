@@ -1,9 +1,9 @@
 import { createFixture } from './sftp-fixture.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import {fixtureDirectory,runFixtureTest} from './native-test-process.mjs';
 
-const output = path.resolve('test-results/sync-difference-' + Date.now());
+const output = fixtureDirectory('sync-difference');
 let disconnected = false;
 const readCalls = new Map();
 const fixture = await createFixture(output, {
@@ -63,13 +63,7 @@ fs.writeFileSync(manifest, JSON.stringify({ root: output, remote: fixture.remote
 try {
   const filter = process.argv[2] || 'sync_difference_generated_localhost';
   if (!['sync_difference_generated_localhost', 'directory_deletion_generated_localhost'].includes(filter)) throw Error('Unsupported generated-only test filter');
-  const child = spawn('cargo', ['test', '--offline', '--locked', '--manifest-path', 'src-tauri/Cargo.toml',
-    '--target-dir', process.env.CARGO_TARGET_DIR || path.resolve('src-tauri/target'), filter, '--', '--ignored', '--nocapture', '--test-threads=1'],
-  { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, NEARLY_DIRECTORY_FIXTURE: manifest } });
-  const log = fs.createWriteStream(path.join(output, 'native.log'));
-  for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { process.stdout.write(data); log.write(data); });
-  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
-  log.end();
+  const code = await runFixtureTest(filter, {NEARLY_DIRECTORY_FIXTURE: manifest}, output);
   const paths=fixture.requestPaths;
   if (paths.some(entry=>entry.operation==='OPENDIR' && entry.path.startsWith('/difference-shallow/'))) throw Error('Recursive-OFF must not inventory nested remote directories');
   if (paths.some(entry=>entry.operation==='OPENDIR' && entry.path.startsWith('/difference-real-link/link'))) throw Error('Remote symlink must never be traversed');

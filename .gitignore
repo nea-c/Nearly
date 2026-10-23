@@ -93,6 +93,9 @@ Thumbs.db
 !/docs/startup-updates.md
 !/docs/actions-signing.md
 /scripts/*
+!/scripts/ui-shard-test.mjs
+!/scripts/native-parallel-test.mjs
+!/scripts/native-test-process.mjs
 !/scripts/initial-scan-check.mjs
 !/scripts/installer-qa-standard-user.ps1
 !/scripts/installer-qa-standard-user.cs
