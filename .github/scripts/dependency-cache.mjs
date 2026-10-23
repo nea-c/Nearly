@@ -45,11 +45,18 @@ export function dependencyPathAllowed(relative,role,packages){
     return !!match&&targetNames.has(match[1]);
   }
   if(!['.fingerprint','build'].includes(parts[1])||parts.length<4)return false;
-  const owner=/^(.+)-[a-f0-9]{16}$/.exec(parts[2]);
+  const owner=/^(.+)-([a-f0-9]{16})$/.exec(parts[2]);
   if(!owner||!allowed.some(p=>p.name===owner[1]))return false;
   if(parts[1]==='.fingerprint')return parts.length===4&&/^[a-zA-Z0-9_.-]+$/.test(parts[3]);
   if(parts[3]==='out')return parts.length>4;
-  return parts.length===4&&/^(?:build[-_]script[-_]build(?:-[a-f0-9]{16})?\.(?:exe|pdb|d)|output|stderr|root-output|invoked\.timestamp)$/.test(parts[3]);
+  if(parts.length!==4)return false;
+  if(/^(?:output|stderr|root-output|invoked\.timestamp)$/.test(parts[3]))return true;
+  // Cargo derives custom-build names from the source stem (e.g. builder/main.rs).
+  // Bind executable names to this registry owner and its actual custom-build target.
+  const scripts=allowed.filter(p=>p.name===owner[1]).flatMap(p=>p.targets||[])
+    .filter(t=>t.kind?.includes('custom-build')&&t.crate_types?.includes('bin')&&/^[a-zA-Z0-9_-]+$/.test(t.name));
+  return scripts.some(t=>[t.name,t.name.replaceAll('-','_')].some(name=>
+    ['exe','pdb','d'].some(ext=>parts[3]===`${name}.${ext}`||parts[3]===`${name}-${owner[2]}.${ext}`)));
 }
 
 export const manifestDigest=manifest=>digest(manifest);
