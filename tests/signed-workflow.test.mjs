@@ -62,7 +62,7 @@ test('native verification is independent, secret-free and binds its exact source
   const native=w.jobs['native-tests'];assert.ok(native,'native verification job is required');
   assert.equal(native.needs,'policy');assert.equal(native.if,undefined);assert.equal(w.jobs['unsigned-build'].needs,'policy');
   assert.deepEqual(native.permissions,{contents:'read'});assert.equal(native.environment,undefined);
-  assert.doesNotMatch(JSON.stringify(native),/secrets\.|upload-artifact|download-artifact|actions\/cache/);
+  assert.doesNotMatch(JSON.stringify(native),/secrets\.|upload-artifact|download-artifact/);
   const source=native.steps.find(s=>s.with?.path==='source');
   assert.equal(source.with.ref,'${{ inputs.commit }}');assert.equal(source.with['fetch-depth'],'0');assert.equal(source.with['persist-credentials'],false);
   for(const job of [native,w.jobs['unsigned-build']]){
@@ -72,8 +72,8 @@ test('native verification is independent, secret-free and binds its exact source
     assert.match(commands,/cargo \+1\.97\.1 fetch --locked --manifest-path source\/src-tauri\/Cargo\.toml/);
     assert.equal(job.steps.find(s=>s.uses?.startsWith('actions/setup-node')).with['package-manager-cache'],false);
   }
-  const verified=native.steps.findIndex(s=>s.id==='verified');assert.equal(verified,native.steps.length-1);
-  for(const step of native.steps)assert.equal(step.if,undefined,'checks and their source binding cannot be conditionally omitted');
+  const verified=native.steps.findIndex(s=>s.id==='verified');assert.ok(native.steps.slice(verified+1).every(s=>s.id==='deps-export'||s.uses?.startsWith('actions/cache/save@')));
+  for(const step of native.steps.filter(s=>!s.id?.startsWith('deps-')&&!s.uses?.startsWith('actions/cache/')))assert.equal(step.if,undefined,'checks and their source binding cannot be conditionally omitted');
   assert.match(native.steps[verified].run,/signed-release\.mjs preflight source.*rev-parse HEAD.*-cne \$env:RELEASE_COMMIT.*source-commit=.*GITHUB_OUTPUT/s);
   assert.equal(native.outputs['source-commit'],'${{ steps.verified.outputs.source-commit }}');
   const ps=fs.readFileSync(path.join(root,'.github/scripts/prepare-windows.ps1'),'utf8');
@@ -91,6 +91,7 @@ test('parallelism keeps all native, localhost, installer and licensing checks',(
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json')));
   assert.match(pkg.scripts.test,/tests\/\*\.test\.mjs/);
   assert.ok(fs.existsSync(path.join(root,'tests/license.test.mjs')));
+  assert.equal(native.steps.find(s=>s.run?.includes('npm test')).env.NEARLY_CACHE_CARGO_FIXTURE,'1');
   assert.equal(fs.existsSync(path.join(root,'.github/workflows/parallel-release-validation.yml')),false);
 });
 
@@ -120,9 +121,9 @@ test('only one protected signing step maps Secrets, all prerequisites finish fir
   assert.match(w.jobs.sign.if,/mode == 'release'/);assert.match(w.jobs.publish.if,/mode == 'release'.*sign.result == 'success'/);
 });
 test('all action refs are pinned, downloaded IDs come only from dependencies, no target checkout or build in privileged jobs',()=>{
-  const pins={'actions/checkout':'d23441a48e516b6c34aea4fa41551a30e30af803','actions/setup-node':'249970729cb0ef3589644e2896645e5dc5ba9c38','actions/upload-artifact':'b7c566a772e6b6bfb58ed0dc250532a479d7789f','actions/download-artifact':'37930b1c2abaa49bbe596cd826c3c89aef350131'};
-  for(const[name,job]of Object.entries(w.jobs))for(const s of job.steps){if(s.uses){const[action,sha]=s.uses.split('@');assert.equal(sha,pins[action]);if(action==='actions/checkout'){assert.equal(s.with['persist-credentials'],false);if(['sign','publish','trusted-signer'].includes(name))assert.equal(s.with.ref,'${{ github.workflow_sha }}');}if(action==='actions/download-artifact'){assert.match(s.with['artifact-ids'],/^\$\{\{ needs\./);assert.equal(s.with.name,undefined);assert.equal(s.with['run-id'],undefined);}}assert.equal(s['continue-on-error'],undefined);assert.doesNotMatch(s.run||'',/\$\{\{\s*(?:inputs|secrets)\./);}
-  assert.doesNotMatch(text,/actions\/cache|pull_request_target|workflow_run:|id-token:|cancel-in-progress: true/);
+  const pins={'actions/checkout':'d23441a48e516b6c34aea4fa41551a30e30af803','actions/setup-node':'249970729cb0ef3589644e2896645e5dc5ba9c38','actions/upload-artifact':'b7c566a772e6b6bfb58ed0dc250532a479d7789f','actions/download-artifact':'37930b1c2abaa49bbe596cd826c3c89aef350131','actions/cache/restore':'caa296126883cff596d87d8935842f9db880ef25','actions/cache/save':'caa296126883cff596d87d8935842f9db880ef25'};
+  for(const[name,job]of Object.entries(w.jobs))for(const s of job.steps){if(s.uses){const[action,sha]=s.uses.split('@');assert.equal(sha,pins[action]);if(action==='actions/checkout'){assert.equal(s.with['persist-credentials'],false);if(['sign','publish','trusted-signer'].includes(name))assert.equal(s.with.ref,'${{ github.workflow_sha }}');}if(action==='actions/download-artifact'){assert.match(s.with['artifact-ids'],/^\$\{\{ needs\./);assert.equal(s.with.name,undefined);assert.equal(s.with['run-id'],undefined);}}assert.equal(s['continue-on-error'],s.id?.startsWith('deps-')||s.uses?.startsWith('actions/cache/')?true:undefined);assert.doesNotMatch(s.run||'',/\$\{\{\s*(?:inputs|secrets)\./);}
+  assert.doesNotMatch(text,/pull_request_target|workflow_run:|id-token:|cancel-in-progress: true/);
   for(const name of ['sign','publish'])for(const s of w.jobs[name].steps)assert.doesNotMatch(s.run||'',/npm|cargo|rustup|build:installer|working-directory: source/);
 });
 test('portable tools are pinned before use and the downloaded distribution is never launched',()=>{
@@ -135,4 +136,23 @@ test('runner paths are resolved only in permitted step contexts and both native 
   const native=w.jobs.sign.steps.filter(s=>s.run?.includes('nearly-updater-signer.exe'));
   assert.equal(native.length,2);
   for(const step of native)assert.equal(step.env.NEARLY_UPDATER_EXTRACTOR,'${{ runner.temp }}/nearly-tools/7z.exe');
+});
+
+
+test('dependency cache is exact-key optional acceleration only in the two secret-free build jobs',()=>{
+ const pin='caa296126883cff596d87d8935842f9db880ef25';
+ for(const [name,job]of Object.entries(w.jobs)){
+  const cache=job.steps.filter(s=>s.uses?.startsWith('actions/cache/'));
+  if(!['native-tests','unsigned-build'].includes(name)){assert.equal(cache.length,0,name);continue;}
+  assert.equal(cache.length,2,name);
+  assert.equal(job.env.CARGO_TERM_VERBOSE,'true','Fresh/compile evidence required for cold/warm comparison');
+  const restore=cache.find(s=>s.uses.startsWith('actions/cache/restore@')),save=cache.find(s=>s.uses.startsWith('actions/cache/save@'));
+  assert.ok(restore&&save);assert.equal(restore.uses,'actions/cache/restore@'+pin);assert.equal(save.uses,'actions/cache/save@'+pin);
+  assert.equal(restore.with['restore-keys'],undefined);assert.equal(restore['continue-on-error'],true);assert.equal(save['continue-on-error'],true);
+  assert.match(save.if,/success\(\)/);assert.match(save.if,/ready == 'true'/);
+  const prepare=job.steps.find(s=>s.id==='deps-context');assert.ok(prepare);assert.match(prepare.run,/dependency-cache.mjs prepare/);
+  const before=job.steps.findIndex(s=>s.run?.includes('cargo +1.97.1 fetch'));assert.ok(job.steps.indexOf(prepare)>before);
+  assert.ok(job.steps.find(s=>s.id==='deps-adopt').env.CACHE_MATCHED_KEY.includes('cache-matched-key'));
+  assert.ok(job.steps.findIndex(s=>s.id==='deps-export')>job.steps.findIndex(s=>['verified','package'].includes(s.id)));
+ }
 });
