@@ -4,6 +4,7 @@ pub enum NativeSyncState {
     Scanning,
     Working,
     CaughtUp,
+    DeletionRescanRequired,
     Error,
     Stopping,
     Stopped,
@@ -14,15 +15,18 @@ pub fn aggregate(states: impl IntoIterator<Item = NativeSyncState>, starts_pendi
     let mut working = starts_pending;
     let mut caught_up = false;
     let mut stopped = false;
+    let mut deletion_rescan = false;
     for state in states {
         match state {
             NativeSyncState::Error => return TaskbarState::Error,
             NativeSyncState::Scanning | NativeSyncState::Working | NativeSyncState::Stopping => working = true,
             NativeSyncState::CaughtUp => caught_up = true,
             NativeSyncState::Stopped => stopped = true,
+            NativeSyncState::DeletionRescanRequired => deletion_rescan = true,
         }
     }
     if working { TaskbarState::Working }
+    else if deletion_rescan { TaskbarState::Paused }
     else if caught_up { TaskbarState::CaughtUp }
     else if stopped { TaskbarState::Paused }
     else { TaskbarState::Idle }
@@ -79,6 +83,7 @@ mod tests {
 #[cfg(test)]
 mod activity_tests {
  use super::*;
+ #[test] fn deletion_rescan_is_not_completion_or_error_and_does_not_stop_work(){let mut a=Activity::new();a.scan_finished();a.set_deletion_rescan_required(true);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::DeletionRescanRequired);assert_eq!(aggregate([a.phase(),NativeSyncState::CaughtUp],false),TaskbarState::Paused);a.settle(2,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::Working);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::DeletionRescanRequired);a.settle(0,true,false,true,false);assert_eq!(a.phase(),NativeSyncState::Stopping);a.set_deletion_rescan_required(false);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::CaughtUp);}
  #[test] fn scanning_empty_queue_is_not_completion(){let mut a=Activity::new();a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::Scanning);}
  #[test] fn scan_then_idle_is_caught_up_and_new_work_revokes_it(){let mut a=Activity::new();a.scan_finished();a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::CaughtUp);a.mark_working();assert_eq!(a.phase(),NativeSyncState::Working);}
  #[test] fn in_flight_and_undrained_events_never_complete(){let mut a=Activity::new();a.scan_finished();for (pending,drained,flight)in [(1,true,false),(0,false,false),(0,true,true)]{a.settle(pending,drained,flight,false,false);assert_ne!(a.phase(),NativeSyncState::CaughtUp);}}
@@ -89,9 +94,10 @@ mod activity_tests {
 
 /// Worker-owned current activity. Historic error metrics remain separate.
 #[derive(Clone, Debug)]
-pub struct Activity { phase: NativeSyncState, scanned: bool, current_error: bool, hard_error: bool }
+pub struct Activity { phase: NativeSyncState, scanned: bool, current_error: bool, hard_error: bool, deletion_rescan_required: bool }
 impl Activity {
- pub fn new()->Self {Self{phase:NativeSyncState::Scanning,scanned:false,current_error:false,hard_error:false}}
+ pub fn new()->Self {Self{phase:NativeSyncState::Scanning,scanned:false,current_error:false,hard_error:false,deletion_rescan_required:false}}
+ pub fn set_deletion_rescan_required(&mut self,required:bool){self.deletion_rescan_required=required;}
  pub fn phase(&self)->NativeSyncState {self.phase}
  pub fn scan_finished(&mut self){self.scanned=true;}
  pub fn mark_working(&mut self){if !matches!(self.phase,NativeSyncState::Error|NativeSyncState::Stopping|NativeSyncState::Stopped){self.phase=NativeSyncState::Working;}}
@@ -102,6 +108,7 @@ impl Activity {
    else if blocked||self.hard_error {NativeSyncState::Error}
    else if !self.scanned {NativeSyncState::Scanning}
    else if pending>0||!events_drained||in_flight {if self.current_error {NativeSyncState::Error}else{NativeSyncState::Working}}
+   else if self.deletion_rescan_required {NativeSyncState::DeletionRescanRequired}
    else {self.current_error=false;NativeSyncState::CaughtUp};
  }
 }

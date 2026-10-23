@@ -1,3 +1,4 @@
+import { deletionRescanLabels } from "./sync-rescan.js";
 import { installInputPolicy } from "./input-policy.js";
 import { popupBarrier } from './popup-barrier.js';
 import { bindFileDrop } from "./file-drop.js";
@@ -2862,7 +2863,7 @@ function resumeSettingsMarkup(entry:RetainedSync){
   return html`<section class="resume-settings"><p>${tr("前回の設定を使います。")}</p><div class="sync-option-flags"><label><input type="checkbox" id="delete-removed" name="deleteRemoved" disabled ${entry.deleteRemoved?"checked":""}>ファイルを削除する</label><label><input type="checkbox" id="recursive-sync" name="recursive" disabled ${entry.recursive?"checked":""}>サブディレクトリを更新する</label></div>${entry.deleteRemoved?html`<p class="warning">${tr("前回と同じ削除設定を使います。開始時の比較と変更監視で、同期対象内のローカルにないリモート項目を削除します。元に戻せない可能性があります。")}</p>`:""}<details class="resume-exclusions"><summary>除外ルール</summary><pre>${esc(entry.exclusionRules||tr("なし"))}</pre></details></section>`;
 }
 function statusbar(t?: SyncTab) {
-  const state = t
+  const state = t?.status === 'running' && t.deletionRescanRequired ? deletionRescanLabels().title : t
     ? {
         running: tr("監視中"),
         failed: tr("失敗・再試行が必要"),
@@ -2970,7 +2971,7 @@ function paintPolledStatus() {
 function syncFailureMarkup(t?: SyncTab) {
   const labels=failureLabels(t?.stopComplete===true||t?.status==='stopped');
   const failure=t?.failure?failureDetails(t.failure):undefined;
-  if(!failure&&!t?.statusError)return '';
+  if(!failure&&!t?.statusError)return t?.status==='running' && t.deletionRescanRequired ? html`<div class="sync-rescan" role="status"><strong>${esc(deletionRescanLabels().title)}</strong><p>${esc(deletionRescanLabels().help)}</p></div>` : '';
   return html`<div class="sync-failure" role="alert"><strong>${esc(labels.title)}</strong>${failure?html`<dl><dt>${esc(labels.path)}</dt><dd>${esc(failure.path??'—')}</dd><dt>${esc(labels.operation)}</dt><dd>${esc(failure.operation)}</dd><dt>${esc(labels.reason)}</dt><dd>${esc(failure.reason)}</dd><dt>${esc(labels.pending)}</dt><dd>${failure.pending}</dd></dl><p>${esc(failure.commit)}</p>`:''}${t?.statusError?html`<p>${esc(labels.status)}: ${esc(tError(t.statusError))}</p>`:''}<p>${esc(labels.help)}</p></div>`;
 }
 function logDrawer(t?: SyncTab) {
@@ -4087,7 +4088,7 @@ try {
       }
       const retained = store.retainedSyncs.find(r => r.ownerTabId === descriptor.id && !r.ownerTabClosed &&
         (!runtime || (sameRetainedConnection(r.profile, runtime.profile as Profile) && r.local === runtime.local && r.remote === runtime.remote)));
-      const job = runtime ? Object.fromEntries(["id","profile","local","remote","status","sent","speed","latency","logs","pending","errorCount","failure","statusError","stopComplete","exclusionRules","deleteRemoved","recursive"].filter(key => Object.hasOwn(runtime,key)).map(key => [key,runtime[key]])) : undefined;
+      const job = runtime ? Object.fromEntries(["id","profile","local","remote","status","sent","speed","latency","logs","pending","errorCount","failure","statusError","stopComplete","deletionRescanRequired","exclusionRules","deleteRemoved","recursive"].filter(key => Object.hasOwn(runtime,key)).map(key => [key,runtime[key]])) : undefined;
       // A native stop can finish during reload; poll its existing ID to reconcile.
       const wasStopping = job?.status === "stopping";
       if (wasStopping && job) job.status = "running";

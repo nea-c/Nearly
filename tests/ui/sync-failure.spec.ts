@@ -39,6 +39,35 @@ async function fail(page:Page,stopComplete=false){
   await page.locator('#error-count').click();
 }
 
+test('suspended deletion basis is a rescan notice, keeps running and requires manual restart',async({page})=>{
+  await boot(page,'en');
+  await page.evaluate(()=>(window as any).syncFailureFixture.status.deletionRescanRequired=true);
+  await expect(page.locator('#sync-state')).toContainText('Deletion tracking needs a new scan');
+  await expect(page.locator('#error-count')).toContainText('0');
+  await page.locator('#toggle-logs').click();
+  await expect(page.locator('#sync-failure-details')).toContainText('Uploads can continue');
+  await expect(page.locator('#sync-failure-details')).toContainText('stop sync and start it again');
+  await expect(page.locator('#retry')).toBeDisabled();
+  const calls=await page.evaluate(()=>(window as any).syncFailureFixture.calls);
+  expect(calls.filter((c:any)=>c.cmd==='stop_sync'||c.cmd==='retry_sync')).toHaveLength(0);
+  expect(calls.filter((c:any)=>c.cmd==='start_sync')).toHaveLength(1);
+  await page.evaluate(()=>(window as any).syncFailureFixture.status.deletionRescanRequired=false);
+  await expect(page.locator('#sync-state')).not.toContainText('Deletion tracking needs a new scan');
+  await expect(page.locator('#sync-failure-details')).toBeEmpty();
+});
+
+test('Japanese deletion rescan notice explains manual full restart without an error',async({page})=>{
+  await boot(page,'ja');
+  await page.evaluate(()=>(window as any).syncFailureFixture.status.deletionRescanRequired=true);
+  await expect(page.locator('#sync-state')).toContainText('削除同期の再走査が必要');
+  await expect(page.locator('#error-count')).toContainText('0');
+  await page.locator('#toggle-logs').click();
+  await expect(page.locator('#sync-failure-details')).toContainText('アップロードは継続できます');
+  await expect(page.locator('#sync-failure-details')).toContainText('同期を停止してから再度開始');
+  await expect(page.locator('#sync-failure-details')).toContainText('自動で基準を更新することはありません');
+  await expect(page.locator('#retry')).toBeDisabled();
+});
+
 test('Japanese failure detail survives mixed logs, escapes paths and waits for confirmed stop',async({page})=>{
   await boot(page);await fail(page);
   const details=page.locator('#sync-failure-details');

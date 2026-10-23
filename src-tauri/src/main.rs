@@ -34,6 +34,7 @@ mod settings_location;
 mod settings_clients;
 mod sftp;
 mod source_change;
+mod listing_hint;
 mod unified_settings;
 mod split_settings;
 mod window_ownership;
@@ -2184,3 +2185,6 @@ mod input_policy_config_tests {
     }
 }
 
+
+#[cfg(test)] mod inventory_physical_fixture;
+#[cfg(test)] mod inventory_aba_fixture;

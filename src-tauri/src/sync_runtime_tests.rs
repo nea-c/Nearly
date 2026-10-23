@@ -31,6 +31,21 @@ fn stable_comparison_candidates(f:&Fixture){
  let t=std::time::UNIX_EPOCH+Duration::from_secs(1_700_000_000);
  for i in 0..8{let p=format!("nested/file{i}.txt");for base in [&root,&f.remote.join("upload/job")]{fs::write(base.join(&p),b"stable").unwrap();fs::File::options().write(true).open(base.join(&p)).unwrap().set_times(fs::FileTimes::new().set_modified(t)).unwrap();}}
 }
+fn changed_worker_comparison_candidates(f:&Fixture){
+ stable_comparison_candidates(f);
+ // These tests target fresh-comparison failure/cancel, not listing equality.
+ for i in 0..8{fs::write(f.root.join(format!("local/nested/file{i}.txt")),b"changed local requires fresh comparison").unwrap();}
+}
+
+#[test]
+fn listing_unchanged_intentionally_does_not_lookup_later_denied_child(){
+ let f=Fixture::start("compare-error-listed");stable_comparison_candidates(&f);
+ let e=Engine::default();f.start_job(&e,"listed",f.root.join("local"),"/upload/job",true);
+ let deadline=Instant::now()+Duration::from_secs(15);
+ loop{let s=e.status("listed").unwrap();assert_eq!(s.error_count,0);if s.pending==0&&s.logs.iter().filter(|line|line.contains("Skipped listed unchanged")).count()==8{break;}assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
+ assert!(!f.root.join("server/denied-child-lookup").exists());
+ assert!(f.metrics()["counts"]["WRITE"].is_null());e.stop("listed").unwrap();
+}
 
 #[test]
 fn independent_comparison_pipeline_preserves_results_and_request_count_on_one_session(){
@@ -57,7 +72,7 @@ fn independent_comparison_pipeline_preserves_results_and_request_count_on_one_se
 #[test]
 fn comparison_batch_error_prevents_any_upload_and_reports_the_failing_file(){
  for mirror in [false,true]{
- let f=Fixture::start(if mirror{"compare-error-mirror"}else{"compare-error"});let root=f.root.join("local");stable_comparison_candidates(&f);if mirror{fs::create_dir(root.join("owned")).unwrap();}
+ let f=Fixture::start(if mirror{"compare-error-mirror"}else{"compare-error"});let root=f.root.join("local");changed_worker_comparison_candidates(&f);if mirror{fs::create_dir(root.join("owned")).unwrap();}
  let e=Engine::default();f.start_job(&e,"batch-error",root.clone(),"/upload/job",mirror);
  let failed=f.wait_failed(&e,"batch-error");let path=PathBuf::from(failed["failure"]["relativePath"].as_str().unwrap());assert_eq!(path.parent(),Some(Path::new("nested")));assert!(path.file_name().unwrap().to_string_lossy().starts_with("file"));
  assert!(!f.remote.join("upload/job/a.txt").exists());
@@ -78,7 +93,7 @@ fn comparison_batch_cancel_discards_all_results_promptly(){
 }
 #[test]
 fn worker_cancel_during_comparison_batch_never_dispatches_followup_mutations(){
- let f=Fixture::start("compare-worker-cancel");let root=f.root.join("local");stable_comparison_candidates(&f);fs::create_dir(root.join("owned")).unwrap();
+ let f=Fixture::start("compare-worker-cancel");let root=f.root.join("local");changed_worker_comparison_candidates(&f);fs::create_dir(root.join("owned")).unwrap();
  let e=Engine::default();f.start_job(&e,"batch-cancel",root.clone(),"/upload/job",true);
  let start=Instant::now();while !f.root.join("server/compare-observed").exists(){if start.elapsed()>=Duration::from_secs(20){panic!("batch marker missing: status={}, metrics={}",serde_json::to_value(e.status("batch-cancel").unwrap()).unwrap(),f.metrics());}thread::sleep(Duration::from_millis(5));}
  e.stop("batch-cancel").unwrap();let before=f.metrics();assert!(!f.remote.join("upload/job/a.txt").exists());assert!(f.remote.join("upload/job/owned").is_dir());fs::remove_dir(root.join("owned")).unwrap();fs::write(root.join("later.txt"),b"after stop").unwrap();thread::sleep(Duration::from_millis(700));assert!(!f.remote.join("upload/job/later.txt").exists());assert!(f.remote.join("upload/job/owned").is_dir());let after=f.metrics_for("after");for op in ["WRITE","REMOVE","RMDIR","RENAME","EXTENDED"]{assert_eq!(before["counts"][op],after["counts"][op],"{op} advanced after manual stop");}

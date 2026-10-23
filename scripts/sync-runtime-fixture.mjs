@@ -39,6 +39,7 @@ const fixture=await createFixture(output,{
   }
  },
  async beforeStat(_op,target){
+  if(mode==='compare-error-listed'&&target.includes('/file')){fs.writeFileSync(path.join(output,'denied-child-lookup'),'generated');return 3;}
   if(mode.startsWith('compare')){
    inflight++;maxInflight=Math.max(maxInflight,inflight);const index=target.match(/file([0-3])\.txt$/);
    const workerBoundary=mode==='compare-worker-cancel'||mode.startsWith('compare-error');

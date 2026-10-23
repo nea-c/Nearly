@@ -141,6 +141,7 @@ export interface SyncFailure {
   requiresRescan: true;
 }
 export interface Status {
+  deletionRescanRequired?: boolean;
   stopComplete?: boolean;
   failure?: SyncFailure | null;
   statusError?: string;
