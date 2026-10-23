@@ -1030,6 +1030,12 @@ FunctionEnd
 
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
 !insertmacro MUI_PAGE_WELCOME
+; Nearly modification: retain project and third-party licenses in setup itself.
+; No additional installed payload or updater ownership rules are introduced.
+{{#if license}}
+!define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
+!insertmacro MUI_PAGE_LICENSE "{{license}}"
+{{/if}}
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlyDirectoryPre
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE NearlyDirectoryLeave
 !insertmacro MUI_PAGE_DIRECTORY

@@ -42,4 +42,4 @@ TypeScript・Tauri 2・Rustで構成されています。開発環境や検証�
 
 ## ライセンス
 
-本体のライセンスは未指定です。同梱する第三者コードのライセンスは各ファイルを参照してください：[russh-sftp（Apache-2.0）](src-tauri/vendor/russh-sftp/LICENSE) · [Tauri由来のインストーラーテンプレート（MIT）](src-tauri/windows/upstream/LICENSE-MIT)。
+Nearly 本体のコード・文書・アイコンは [Apache-2.0](LICENSE) です。第三者コードには各元のライセンスが適用されます。[第三者通知・ソース入手先](DISTRIBUTION-LICENSES.txt) · [適用範囲](LICENSING.md)。
