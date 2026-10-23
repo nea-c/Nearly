@@ -1,0 +1,51 @@
+name: One-shot npm native addon diagnosis
+run-name: npm native install diagnosis / ${{ github.sha }}
+on:
+  push:
+    branches: [codex/node-install-diagnostic]
+permissions: {}
+concurrency:
+  group: nearly-one-shot-node-install
+  cancel-in-progress: false
+jobs:
+  comparison:
+    if: github.repository == 'nea-c/Nearly' && github.event_name == 'push' && github.event.created == true && github.ref == 'refs/heads/codex/node-install-diagnostic'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: cc0a659d56a998ca69976955d986539b87f2da9a
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Exact source and diagnostic contracts
+        run: |
+          if ((git -C source rev-parse HEAD) -cne 'cc0a659d56a998ca69976955d986539b87f2da9a') { throw 'Source mismatch' }
+          node --test diagnostic/.github/scripts/node-install-diagnostic.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Baseline candidate candidate baseline with all install scripts enabled
+        run: node diagnostic/.github/scripts/node-install-diagnostic.mjs source diagnostic "$env:RUNNER_TEMP/node-install-results"
+      - name: Numeric phase traces and results only
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: node-install-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/node-install-results/result.json
+            ${{ runner.temp }}/node-install-results/trace.jsonl
+          if-no-files-found: warn
+          retention-days: 1
