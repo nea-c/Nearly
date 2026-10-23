@@ -178,6 +178,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/sync-difference-test.mjs directory_deletion_generated_localhost
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/listing-worker-test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/listing-existing-pipeline-test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Browser regression and production UI checks
         working-directory: source
         run: |

@@ -958,7 +958,19 @@ pub fn compare_files(s:&mut Connection,root:&Path,paths:&[std::path::PathBuf],re
 #[cfg(test)]
 #[path="listing_test_hooks.rs"]
 mod listing_test_hooks;
+pub(crate) struct ListingObservation { candidate:crate::listing_hint::Candidate, local:ObservedComparison }
+impl ListingObservation {
+    pub(crate) fn candidate(&self)->crate::listing_hint::Candidate {
+        finish_listing_candidate(match self.candidate {crate::listing_hint::Candidate::ListedUnchanged=>crate::listing_hint::Candidate::ListedUnchanged,crate::listing_hint::Candidate::FreshComparison=>crate::listing_hint::Candidate::FreshComparison,crate::listing_hint::Candidate::SourceChanged=>crate::listing_hint::Candidate::SourceChanged},&self.local.comparison)
+    }
+    pub(crate) fn revalidate(&mut self,stop:&AtomicBool)->Result<crate::listing_hint::Candidate,String>{
+        crate::file_ops::check(stop)?;self.local.revalidate()?;crate::file_ops::check(stop)?;Ok(self.candidate())
+    }
+}
 pub(crate) fn listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool)->Result<crate::listing_hint::Candidate,String>{
+    Ok(observe_listing_candidate(root,relative,hint,session,stop)?.candidate())
+}
+pub(crate) fn observe_listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool)->Result<ListingObservation,String>{
     crate::file_ops::check(stop)?;
     recorded_target("/",relative)?;
     let source=root.join(relative);
@@ -966,10 +978,22 @@ pub(crate) fn listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_h
     let snapshot=crate::source_change::Snapshot::capture(&input)?;
     #[cfg(test)] listing_test_hooks::after_capture(&source,stop)?;
     let candidate=hint.select(snapshot.length(),protocol_seconds(snapshot.modified()),session,false);
-    let mut observation=ObservedComparison{comparison:FileComparison::Upload{remote_newer:false},source,root:root.to_path_buf(),snapshot};
-    observation.revalidate()?;
-    crate::file_ops::check(stop)?;
-    Ok(finish_listing_candidate(candidate,&observation.comparison))
+    let mut observation=ListingObservation{candidate,local:ObservedComparison{comparison:FileComparison::Upload{remote_newer:false},source,root:root.to_path_buf(),snapshot}};
+    observation.revalidate(stop)?;
+    Ok(observation)
+}
+#[cfg(test)]
+#[test]
+fn staged_listing_observation_retains_subsecond_source_stamp_and_sticky_change(){
+    use crate::listing_hint::{Candidate,ListingHint};
+    let root=std::env::temp_dir().join(format!("nearly-staged-observation-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&root).unwrap();let root=root.canonicalize().unwrap();let source=root.join("generated.txt");
+    std::fs::write(&source,b"same").unwrap();let stamp=|nanos|{std::fs::File::options().write(true).open(&source).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+std::time::Duration::new(1700000000,nanos))).unwrap();};stamp(0);
+    let stop=AtomicBool::new(false);let hint=ListingHint::from_listing(4,Some(1700000000),1);
+    let mut observation=observe_listing_candidate(&root,std::path::Path::new("generated.txt"),&hint,1,&stop).unwrap();assert_eq!(observation.candidate(),Candidate::ListedUnchanged);
+    std::fs::write(&source,b"save").unwrap();stamp(500000000);assert_eq!(observation.revalidate(&stop).unwrap(),Candidate::SourceChanged);
+    std::fs::write(&source,b"back").unwrap();stamp(0);assert_eq!(observation.revalidate(&stop).unwrap(),Candidate::SourceChanged);
+    std::fs::remove_file(&source).unwrap();std::fs::remove_dir(&root).unwrap();
 }
 fn finish_listing_candidate(candidate:crate::listing_hint::Candidate,comparison:&FileComparison)->crate::listing_hint::Candidate {
     if matches!(comparison,FileComparison::SourceChanged){crate::listing_hint::Candidate::SourceChanged}else{candidate}
@@ -1087,14 +1111,32 @@ fn mirror_charge(counter: &std::cell::Cell<usize>, amount: usize, limit: usize, 
     if next>limit {return Err(error.into());}
     counter.set(next);Ok(())
 }
+// Inventory-only observation. Ancestors were observed in this traversal and are
+// inherited only from a successfully completed parent. This is NOT a mutation
+// guard: upload/delete/mkdir still use fresh full-chain directory_guard.
+async fn inventory_directory_guard(raw:&RawSftpSession,target:&str,parent:&RemoteDirectoryStamp)->Result<RemoteDirectoryStamp,String>{
+    let mut chain=parent.chain.as_ref().clone();
+    let last=chain.last().ok_or("Missing inventory parent observation")?.0.as_str();
+    if last==target {chain.pop();}
+    else if last!=target.rsplit_once('/').map(|(p,_)|if p.is_empty(){"/"}else{p}).unwrap_or("/") {
+        return Err("Inventory observation is not the immediate parent".into());
+    }
+    let attrs=raw.lstat(target.to_string()).await.map_err(|_|"Remote directory guard lookup failed; deletion refused")?.attrs;
+    if !attrs.file_type().is_dir()||attrs.is_symlink(){return Err("Remote directory/ancestor changed type or is a symlink; deletion refused".into());}
+    chain.push((target.to_string(),attrs.uid,attrs.gid,attrs.permissions.ok_or("Remote directory permissions unavailable")?));
+    let names=raw.realpath(target).await.map_err(|_|"Remote canonical directory lookup failed")?.files;
+    if names.len()!=1||names[0].filename!=target{return Err("Remote directory canonical path changed; deletion refused".into());}
+    Ok(RemoteDirectoryStamp{chain:Arc::new(chain)})
+}
 async fn mirror_directory(
     raw:&RawSftpSession, relative:std::path::PathBuf, absolute:String,
     rules:&crate::exclusion::Rules, recursive:bool, stop:&AtomicBool, budget:&MirrorBudget,
-) -> Result<(RemoteSnapshot,Vec<(std::path::PathBuf,String)>),String> {
+    parent:RemoteDirectoryStamp,
+) -> Result<(RemoteSnapshot,Vec<(std::path::PathBuf,String,RemoteDirectoryStamp)>),String> {
     crate::file_ops::check(stop)?;
     let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
     let mut children=Vec::new();
-    let guard=directory_guard(raw,&absolute).await?;
+    let guard=if relative.as_os_str().is_empty(){parent}else{inventory_directory_guard(raw,&absolute,&parent).await?};
     mirror_charge(&budget.bytes,guard.authority_bytes()+absolute.len()+relative.as_os_str().len()*2,16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
     if !relative.as_os_str().is_empty(){snapshot.directories.push((relative.clone(),guard.clone()));}
     let handle=raw.opendir(absolute.clone()).await.map_err(|_|"Remote mirror inventory open failed; deletion refused")?.handle;
@@ -1114,7 +1156,7 @@ async fn mirror_directory(
                 if rules.excludes(&child,dir)?||entry.attrs.is_symlink()||(!dir&&!entry.attrs.file_type().is_file())||(!recursive&&dir){snapshot.retained.retain(&relative)?;continue;}
                 if dir {
                     if child.components().count()>64{return Err("Remote mirror directory depth exceeds 64; deletion refused".into());}
-                    children.push((child,format!("{}/{}",absolute.trim_end_matches('/'),entry.filename)));
+                    children.push((child,format!("{}/{}",absolute.trim_end_matches('/'),entry.filename),guard.clone()));
                 }else if let Ok(mut stamp)=remote_stamp(&entry.attrs){stamp.parent=Some(guard.clone());snapshot.files.push((child,stamp));}
                 else{snapshot.retained.retain(&relative)?;}
             },
@@ -1123,7 +1165,7 @@ async fn mirror_directory(
         }
     }
     raw.close(handle).await.map_err(|_|"Remote mirror inventory close failed; deletion refused")?;
-    if directory_guard(raw,&absolute).await?!=guard{return Err("Remote mirror directory changed during inventory; deletion refused".into());}
+    if inventory_directory_guard(raw,&absolute,&guard).await?!=guard{return Err("Remote mirror directory changed during inventory; deletion refused".into());}
     Ok((snapshot,children))
 }
 // Build everything before publishing authority. A failed READDIR, budget or
@@ -1132,14 +1174,15 @@ pub fn mirror_snapshot(s: &mut Connection, remote: &str, rules: &crate::exclusio
     let remote=normalize(remote)?;
     s.run(stop,async {
         let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
-        let mut stack=vec![(std::path::PathBuf::new(),remote)];
+        let root_guard=directory_guard(&s.raw,&remote).await?;
+        let mut stack=vec![(std::path::PathBuf::new(),remote,root_guard)];
         let budget=MirrorBudget::default();
         while !stack.is_empty(){
             crate::file_ops::check(stop)?;
             let batch:Vec<_>=(0..4).filter_map(|_|stack.pop()).collect();
             // Only descendants of fully verified parents enter the next batch.
             // A failure drops sibling futures; Connection::run closes the channel.
-            let results=futures_util::future::try_join_all(batch.into_iter().map(|(relative,absolute)|mirror_directory(&s.raw,relative,absolute,rules,recursive,stop,&budget))).await?;
+            let results=futures_util::future::try_join_all(batch.into_iter().map(|(relative,absolute,parent)|mirror_directory(&s.raw,relative,absolute,rules,recursive,stop,&budget,parent))).await?;
             crate::file_ops::check(stop)?;
             for (mut partial,children) in results{
                 snapshot.files.append(&mut partial.files);

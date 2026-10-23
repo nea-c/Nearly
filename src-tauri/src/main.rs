@@ -2185,3 +2185,6 @@ mod input_policy_config_tests {
     }
 }
 
+
+#[cfg(test)] mod inventory_physical_fixture;
+#[cfg(test)] mod inventory_aba_fixture;

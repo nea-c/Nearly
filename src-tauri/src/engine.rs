@@ -477,9 +477,19 @@ struct Pending {
     force_upload: bool,
     batch_checked: bool,
 }
+fn ready_after_completed_work(completed:bool,queue:&HashMap<PathBuf,Pending>)->bool {
+    completed&&queue.values().any(|item|item.last.elapsed()>=Duration::from_millis(500))
+}
 #[cfg(test)]
 mod source_reschedule_tests {
     use super::*;
+    #[test]
+    fn ready_work_skips_throttle_but_idle_and_debounce_do_not() {
+        let mut q=HashMap::new();let now=Instant::now();enqueue_at(&mut q,PathBuf::from("ready"),now-Duration::from_secs(1)).unwrap();
+        assert!(!ready_after_completed_work(false,&q));assert!(ready_after_completed_work(true,&q));
+        q.get_mut(Path::new("ready")).unwrap().last=now+Duration::from_secs(1);
+        assert!(!ready_after_completed_work(true,&q));q.clear();assert!(!ready_after_completed_work(true,&q));
+    }
     #[test]
     fn old_watcher_events_cannot_rewind_a_source_change_debounce() {
         let mut q=HashMap::new();let path=PathBuf::from("source.txt");let now=Instant::now();
@@ -1341,6 +1351,7 @@ fn worker(
         fatal("Cannot monitor local folder; stop and restart".into());
         return;
     }
+    #[cfg(test)] startup_measure::mark("local_begin");
     let mut queue = HashMap::new();
     let mut directories: HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>> = HashMap::new();
     if let Err(error) = crate::initial_scan::walk(&root,&stop,&rules,options.recursive,options.delete_removed, |path,is_directory| {
@@ -1352,6 +1363,7 @@ fn worker(
         status.record_stopped_queue(queue.len());
         return;
     }
+    #[cfg(test)] startup_measure::mark("local_done");
     state.lock().unwrap().activity.scan_finished();
     state.lock().unwrap().log("Initial local scan completed");
     state.lock().unwrap().pending=queue.len();
@@ -1365,7 +1377,9 @@ fn worker(
     if let Err(error) = crate::file_ops::check(&stop).and_then(|()| {
         if local_root_identity(&root)? != root_identity { return Err("Local root changed during initial scan; deletion refused".into()); }
         if options.delete_removed {
+            #[cfg(test)] startup_measure::mark("mirror_begin");
             let snapshot = sftp::mirror_snapshot(connection.as_mut().unwrap(), &remote, &rules, options.recursive, &stop)?;
+            #[cfg(test)] startup_measure::mark("mirror_done");
             // Authority is published only after both scans have completed and the
             // original readable root still exists. Every removal rechecks absence.
             if local_root_identity(&root)? != root_identity { return Err("Local root changed during mirror inventory; deletion refused".into()); }
@@ -1405,7 +1419,8 @@ fn worker(
     let mut blocked = false;
     let mut rescan_required = false;
     let mut last_transfer = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
+    'worker: while !stop.load(Ordering::Relaxed) {
+        let mut completed_work=false;
         if state.lock().unwrap().failure.is_some() { break; }
         if overflow.swap(false, Ordering::Relaxed) {
             fatal("Watcher overflow: stop and restart for a full rescan".into());
@@ -1614,12 +1629,24 @@ fn worker(
                 .map(|(p,_)|p.clone()).take(4).collect();
             candidates.sort_by_key(|p|(p.components().count(),p.clone()));
             let mut files=Vec::new();let mut invalid=None;
+            let mut hinted=Vec::new();
             for path in candidates {
                 match local_transfer_action(&root,&path,&root_identity,delete_enabled&&inventory.contains_key(&path),&stop){
-                    Ok(LocalAction::Upload)=>files.push(path),Ok(_)=>(),Err(e)=>{invalid=Some((Some(path),e));break;}
+                    Ok(LocalAction::Upload)=>{
+                        if let Some(hint)=listing_hints.get(&path).copied() {
+                            match sftp::observe_listing_candidate(&root,&path,&hint,listing_session,&stop) {
+                                Ok(observation)=>match observation.candidate() {
+                                    Candidate::ListedUnchanged=>hinted.push((path,observation,false)),
+                                    Candidate::SourceChanged=>hinted.push((path,observation,true)),
+                                    Candidate::FreshComparison=>files.push(path),
+                                },
+                                Err(error)=>{invalid=Some((Some(path),error));break;}
+                            }
+                        }else{files.push(path);}
+                    },Ok(_)=>(),Err(e)=>{invalid=Some((Some(path),e));break;}
                 }
             }
-            // Fresh observations supersede all hints in the batch, including peers.
+            // Only actual fresh-comparison candidates consume their hints here.
             for path in &files {listing_hints.remove(path);}
             let batch=if let Some(error)=invalid {Err(error)} else if files.len()>1 {
                 sftp::compare_files(connection.as_mut().unwrap(),&root,&files,&remote,&stop)
@@ -1630,7 +1657,37 @@ fn worker(
                 },
                 Ok(results)=>{
                     if stop.load(Ordering::SeqCst){break;}
+                    // Hint decisions cannot survive a slow peer without local
+                    // revalidation. Initial dirtiness is sticky even when the
+                    // later size/whole-second mtime happens to match again.
+                    let mut decisions=Vec::new();let mut hint_error=None;
+                    for (path,mut observation,was_dirty) in hinted {
+                        match observation.revalidate(&stop) {
+                            Ok(candidate)=>decisions.push((path,was_dirty||candidate!=Candidate::ListedUnchanged)),
+                            Err(error)=>{hint_error=Some((path,error));break;}
+                        }
+                    }
+                    if let Some((path,error))=hint_error {
+                        state.lock().unwrap().failure_context(&error,Some(&path),"compare","not_committed",queue.len(),stop.load(Ordering::Relaxed));break;
+                    }
                     let mut consumed=false;let mut failed=false;
+                    {
+                        let mut status=state.lock().unwrap();
+                        for (path,dirty) in decisions {
+                            if stop.load(Ordering::SeqCst)||status.failure.is_some(){break 'worker;}
+                            listing_hints.remove(&path);
+                            if dirty {
+                                if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.last=Instant::now();}
+                                status.log(&format!("Local source changed; waiting to resend {}",path.display()));
+                            }else{
+                                queue.remove(&path);
+                                status.log(&format!("Skipped listed unchanged {}; deletion uses the complete-listing baseline",path.display()));
+                            }
+                            // A peer skip does not invalidate the selected work.
+                            consumed|=ready.as_ref()==Some(&path);
+                        }
+                        status.pending=queue.len();
+                    }
                     for (path,result) in files.into_iter().zip(results){
                         match result {
                             sftp::FileComparison::Unchanged(_stamp)=>{
@@ -1859,6 +1916,7 @@ fn worker(
                         } else { state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display())); }
                         continue;
                     }
+                    completed_work=true;
                     last_transfer = Instant::now();
                     let mut s = state.lock().unwrap();
                     if is_directory && action == LocalAction::Delete {
@@ -1908,7 +1966,12 @@ fn worker(
                 }
             }
         }
-        thread::sleep(Duration::from_millis(100));
+        if stop.load(Ordering::SeqCst)||state.lock().unwrap().failure.is_some(){break;}
+        if ready_after_completed_work(completed_work,&queue) {
+            // Re-enter event/stop/debounce/parent checks, without throttling
+            // already eligible work. A blocked next iteration still idle-waits.
+            thread::yield_now();
+        }else{thread::sleep(Duration::from_millis(100));}
     }
     let mut s = state.lock().unwrap();
     if s.failure.is_none() {
@@ -3568,3 +3631,6 @@ mod startup_pipeline_tests;
  #[test] fn upload_requires_preparation_preserves_early_cancel_and_shutdown(){let e=Engine::default();assert!(e.claim_prepared_upload("upload").is_err());e.prepare_operation("upload").unwrap();e.cancel_operation("upload").unwrap();let stop=e.claim_prepared_upload("upload").unwrap();assert!(stop.load(Ordering::SeqCst));assert!(e.claim_prepared_upload("upload").is_err());e.finish_operation("upload");e.prepare_operation("fresh").unwrap();let stop=e.claim_prepared_upload("fresh").unwrap();e.try_begin_close().unwrap();assert!(stop.load(Ordering::SeqCst));}
  #[test] fn upload_reservation_rejects_local_and_remote_sync_overlap(){let e=Engine::default();let root=PathBuf::from("C:\\generated\\upload");let job=super::tests::reserved_job(root.clone(),"/target");e.jobs.lock().unwrap().insert("sync".into(),job);e.prepare_operation("upload").unwrap();e.claim_prepared_upload("upload").unwrap();assert!(e.reserve_upload_operation("upload",vec![root.join("item")],vec![],String::new(),vec![]).is_err());assert!(e.reserve_upload_operation("upload",vec![],vec!["/target/child".into()],"host-key".into(),vec![]).is_err());assert!(e.reserve_upload_operation("upload",vec![],vec!["/target/child".into()],"alias".into(),vec!["127.0.0.1:2222".parse().unwrap()]).is_err());}
 }
+#[cfg(test)]
+#[path = "startup_measure_fixture.rs"]
+mod startup_measure;

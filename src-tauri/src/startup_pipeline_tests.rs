@@ -1,12 +1,13 @@
 //! Generated localhost worker regressions; never load user profiles/settings.
 use super::*;
 #[test]#[ignore="generated localhost listing fixture"]
-fn listing_worker_fresh_batch_supersedes_old_peer_hint(){
+fn listing_worker_batch_preserves_valid_unchanged_peer_hint(){
  let f=Fixture::load();let n="listing-batch";let(l,r)=f.tree(n);
  for root in [&l,&r]{for file in ["a.txt","deep/b.txt"]{write(root,file,b"same");std::fs::File::options().write(true).open(root.join(file)).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(1700000000))).unwrap();}}
  write(&l,"a.txt",b"changed local forces a fresh batch");
  let e=f.start(n,&l);caught(&e,n);
- assert_eq!(e.status(n).unwrap().sent,2,"fresh comparison Upload must not be overridden by a peer's old hint");
+ assert_eq!(e.status(n).unwrap().sent,1,"an unchanged listed peer must not be forced into fresh comparison");
+ assert!(e.status(n).unwrap().logs.iter().any(|line|line.contains("Skipped listed unchanged deep")));
  assert_eq!(std::fs::read(r.join("deep/b.txt")).unwrap(),b"same");
  e.stop(n).unwrap();stopped_marker(&f,n);
 }
@@ -161,4 +162,18 @@ fn startup_pipeline_source_change_during_inventory_sends_latest(){
  let f=Fixture::load();let n="pipeline-source-change";let(l,r)=f.tree(n);for i in 0..8{write(&l,&format!("d{i}/a.txt"),b"original");write(&r,&format!("d{i}/a.txt"),b"original");}
  let e=f.start(n,&l);wait(||f.root.join("source-inventory-held").exists());write(&l,"d0/a.txt",b"latest generated content saved during inventory");write(&l,"new-parent/new.txt",b"new generated file during inventory");caught(&e,n);
  assert_eq!(std::fs::read(r.join("d0/a.txt")).unwrap(),b"latest generated content saved during inventory");assert_eq!(std::fs::read(r.join("new-parent/new.txt")).unwrap(),b"new generated file during inventory");e.stop(n).unwrap();stopped_marker(&f,n);
+}
+
+#[test]#[ignore="generated localhost listing fixture"]
+fn listing_worker_staged_hint_revalidates_after_fresh_batch_and_stops_on_failure(){
+ for mode in ["save","error","cancel"] {
+  let f=Fixture::load();let n=format!("listing-staged-{mode}");let(l,r)=f.tree(&n);
+  for root in [&l,&r] {for name in ["a.txt","b.txt","deep/peer.txt"] {stamped(root,name,b"same",1700000000);}}
+  write(&l,"a.txt",b"fresh candidate a");write(&l,"b.txt",b"fresh candidate b");
+  let e=f.start(&n,&l);let observed=e.jobs.lock().unwrap().get(&n).unwrap().status.clone();
+  if mode=="save" {caught(&e,&n);let status=e.status(&n).unwrap();assert_eq!(status.sent,3);assert_eq!(std::fs::read(r.join("deep/peer.txt")).unwrap(),b"save");assert!(status.logs.iter().any(|line|line.contains("Local source changed; waiting to resend")));}
+  else {wait(||f.root.join(format!("{n}-batch-entered")).exists());if mode=="cancel" {e.stop(&n).unwrap();}else{wait(||e.status(&n).unwrap().stop_complete);assert!(e.status(&n).unwrap().error_count>0);}let status=observed.lock().unwrap().clone();assert_eq!(status.sent,0);if mode=="cancel"{assert_eq!(status.error_count,0);}assert!(!status.logs.iter().any(|line|line.contains("Skipped listed unchanged deep")));for name in ["a.txt","b.txt","deep/peer.txt"]{assert_eq!(std::fs::read(r.join(name)).unwrap(),b"same");}}
+  for dir in [&r,&r.join("deep")] {assert!(!std::fs::read_dir(dir).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().ends_with(".part")));}
+  if mode!="cancel"{e.stop(&n).unwrap();}stopped_marker(&f,&n);
+ }
 }

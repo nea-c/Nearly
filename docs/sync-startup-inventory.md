@@ -4,8 +4,11 @@ Deletion-enabled startup completes the local scan and remote inventory before
 publishing any deletion baseline. Remote directories are listed in independent
 batches of at most four on the existing authenticated session, sharing entry,
 depth, batch and memory budgets. Failure or cancellation discards the result.
-Each directory retains its before/after ancestor, type, permission and canonical
-path checks. No ancestor cache or new connection pool is introduced.
+The root receives an initial full ancestor check. Each directory then checks its
+own type, permission and canonical path before and after listing, inheriting the
+already observed parent chain. Children are scheduled only after their parent
+completes. Repeated fresh checks of every ancestor during inventory are removed;
+mutation-time guards remain fresh. No new connection pool is introduced.
 
 Complete listing attributes select initial transfer candidates. Listed unchanged
 files skip fresh per-file remote comparisons; initially existing directories
@@ -53,7 +56,8 @@ node scripts/sync-difference-test.mjs directory_deletion_generated_localhost
 
 The listing suite checks later deletion and empty-parent removal, missing-parent
 receipts, baseline mismatch/allowed return-to-same-metadata, read-only matches
-not rebasing, stale peer-hint invalidation, a source save during observation,
+not rebasing, valid peer-hint preservation, a source save during observation,
+high-precision source revalidation across a fresh batch, failed/cancelled batches,
 reconnect invalidation and manual full restart. Pipeline tests cover failures,
 cancel, invalid paths, hierarchy, shared limits and mutation stop barriers.
 Fixtures generate their own disposable loopback server, keys and files under
