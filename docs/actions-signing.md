@@ -93,7 +93,8 @@ panic/error output is redacted. The extractor child gets a cleared environment.
 Upstream minisign internal allocations are not guaranteed to be zeroized. Later
 steps do not inherit step-scoped secrets. No secret is written to args, GITHUB_ENV,
 outputs, summaries or files. GitHub masking is supplementary, not a security proof.
-No caches, tracing, dumps or workspace-wide artifact uploads are configured.
+No caches enter signing jobs. Tracing, dumps and workspace-wide artifact uploads
+are not configured. Optional build dependency caching is described below.
 
 prepare-signing-tools.ps1 downloads hash-pinned official 7-Zip26.04 and 7zr files
 in a secret-free job. After hash checks the bootstrap reader extracts only the
@@ -144,3 +145,34 @@ in the sole signing step; no key regeneration or Secret change is involved.
 This mode creates no GitHub Release. Public repository code, logs and nonsecret
 Actions artifacts may be viewed/downloaded by others. No real installer is executed,
 normal EXE replaced or installation gate enabled by this workflow.
+
+## Optional Rust dependency cache
+
+The secret-free native-test and unsigned-build jobs use separately keyed debug and
+release caches through SHA-pinned official `actions/cache/restore` and `save`.
+The trust boundary is the repository's existing main-branch build code, locked
+dependencies and Actions, not a cryptographic certification of a particular job.
+Cache keys are compatibility identifiers, not access-control rules. Other trusted
+main workflows share GitHub's cache scope; PR-merge caches are outside main's scope.
+No credentials are cached. A cache is never evidence that tests passed.
+
+Only registry dependency outputs, fingerprints and build-script outputs are staged.
+Workspace/path dependency outputs, app binaries, incremental state and installers
+are excluded. Compatibility includes compiler, build environment, Cargo dependencies,
+features/configuration, vendor content and reviewed build scripts. A root version
+change alone does not invalidate dependency reuse. There are no broad restore keys;
+the helper rejects nonexact matches. Cache corruption, unsupported layouts or I/O
+errors leave the normal cold build available. An immutable corrupt exact entry may
+remain a cold miss until eviction or a reviewed cache-key epoch change.
+
+Every app build, test and final payload audit still runs. Cache save follows the
+producing job's successful checks; failure in another job cannot authorize signing.
+The existing all-job/source-SHA signing gate and owner Environment approval remain
+unchanged. Trusted signing tools, sign and publish jobs never restore these caches.
+
+After separately authorized integration, run main-only `validate` twice on the same
+source/controller: first seed, then warm reuse. Record cache bytes, exact hit, export/
+restore time, Cargo Fresh/compile counts, every job's duration/results and total time.
+Confirm unchanged source bindings, sign/publish skipped and existing releases intact.
+Local offline qualification proves reuse for a small dependency fixture; full Nearly
+Fresh rates, build-script/proc-macro reuse and net CI savings require those CI runs.

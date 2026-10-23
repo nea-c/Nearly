@@ -164,6 +164,7 @@ jobs:
       source-commit: ${{ steps.verified.outputs.source-commit }}
     env:
       RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_TERM_VERBOSE: 'true'
     defaults:
       run:
         shell: pwsh
@@ -198,11 +199,32 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 fetch --locked --manifest-path source/src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Optional dependency reuse never skips checks or source binding.
+      - id: deps-context
+        name: Prepare optional native-debug dependency cache identity
+        continue-on-error: true
+        run: node control/.github/scripts/dependency-cache.mjs prepare native-debug source/src-tauri
+      - id: deps-restore
+        if: steps.deps-context.outputs.enabled == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        continue-on-error: true
+        with:
+          path: ${{ steps.deps-context.outputs.path }}
+          key: ${{ steps.deps-context.outputs.key }}
+      - id: deps-adopt
+        if: steps.deps-context.outputs.enabled == 'true'
+        name: Validate exact cache hit or keep the normal cold build
+        continue-on-error: true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.deps-restore.outputs.cache-matched-key }}
+        run: node control/.github/scripts/dependency-cache.mjs restore native-debug
       - name: Test trusted release controller with existing locked test dependencies
         env:
           NEARLY_TEST_DEPENDENCY_ROOT: ${{ github.workspace }}/source
         run: node --test control/tests/manual-release.test.mjs control/tests/manual-release-workflow.test.mjs control/tests/signed-*.test.mjs
       - name: Model, TypeScript and installer compile contracts
+        env:
+          NEARLY_CACHE_CARGO_FIXTURE: '1'
         working-directory: source
         run: |
           npm test
@@ -238,6 +260,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($sourceCommit -cne $env:RELEASE_COMMIT) { throw 'Native test source commit mismatch' }
           "source-commit=$sourceCommit" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: deps-export
+        if: success() && steps.deps-context.outputs.enabled == 'true' && steps.deps-restore.outputs.cache-hit != 'true'
+        name: Stage third-party dependencies after successful native-tests
+        continue-on-error: true
+        run: node control/.github/scripts/dependency-cache.mjs save native-debug
+      - if: success() && steps.deps-export.outputs.ready == 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        continue-on-error: true
+        with:
+          path: ${{ steps.deps-context.outputs.path }}
+          key: ${{ steps.deps-context.outputs.key }}
 
   unsigned-build:
     needs: policy
@@ -252,6 +285,7 @@ jobs:
       manifest-sha256: ${{ steps.package.outputs.manifest-sha256 }}
     env:
       RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_TERM_VERBOSE: 'true'
     defaults:
       run:
         shell: pwsh
@@ -286,6 +320,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 fetch --locked --manifest-path source/src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Optional dependency reuse never skips checks or source binding.
+      - id: deps-context
+        name: Prepare optional unsigned-release dependency cache identity
+        continue-on-error: true
+        run: node control/.github/scripts/dependency-cache.mjs prepare unsigned-release source/src-tauri
+      - id: deps-restore
+        if: steps.deps-context.outputs.enabled == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        continue-on-error: true
+        with:
+          path: ${{ steps.deps-context.outputs.path }}
+          key: ${{ steps.deps-context.outputs.key }}
+      - id: deps-adopt
+        if: steps.deps-context.outputs.enabled == 'true'
+        name: Validate exact cache hit or keep the normal cold build
+        continue-on-error: true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.deps-restore.outputs.cache-matched-key }}
+        run: node control/.github/scripts/dependency-cache.mjs restore unsigned-release
       - name: Build production NSIS without running setup
         working-directory: source
         run: npm run build:installer -- --offline --locked
@@ -298,6 +351,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($sourceCommit -cne $env:RELEASE_COMMIT) { throw 'Build source commit mismatch' }
           "source-commit=$sourceCommit" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: deps-export
+        if: success() && steps.deps-context.outputs.enabled == 'true' && steps.deps-restore.outputs.cache-hit != 'true'
+        name: Stage third-party dependencies after successful unsigned-build
+        continue-on-error: true
+        run: node control/.github/scripts/dependency-cache.mjs save unsigned-release
+      - if: success() && steps.deps-export.outputs.ready == 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        continue-on-error: true
+        with:
+          path: ${{ steps.deps-context.outputs.path }}
+          key: ${{ steps.deps-context.outputs.key }}
       - id: upload
         if: inputs.mode == 'verify-signature' || inputs.mode == 'release'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
