@@ -616,7 +616,8 @@ test("native reload associates reordered profile fields with its retained runnin
   await source.locator("#prepare").click();
   await source.locator("#start-form .primary").click();
   await expect(source.locator("#start-form")).toHaveCount(0);
-  await expect(source.locator("#sync-state")).toHaveText("Watching");
+  await expect(source.locator("#pending-count")).toContainText("7");
+  await expect(source.locator("#sync-state")).toHaveText("Syncing");
   await expect.poll(() => native.jobs.size).toBe(1);
   const [jobId, job] = [...native.jobs][0],
     before = effects(native.calls);
@@ -635,7 +636,8 @@ test("native reload associates reordered profile fields with its retained runnin
     "data-retained-open",
     "record-0",
   );
-  await expect(source.locator("#sync-state")).toHaveText("Watching");
+  await expect(source.locator("#pending-count")).toContainText("7");
+  await expect(source.locator("#sync-state")).toHaveText("Syncing");
   await expect(source.locator("#sent-count")).toContainText("1234");
   await expect(source.locator("#retained-resume")).toHaveCount(0);
   expect(effects(native.calls)).toEqual(before);
