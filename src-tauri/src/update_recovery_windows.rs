@@ -598,15 +598,7 @@ impl RecoveryTransaction {
                 .as_deref()
                 != Some(&self.target_version)
             || self.source_version.len() > 32
-            || crate::version::release_version(&format!(
-                "r{}",
-                self.source_version
-                    .strip_suffix(".0")
-                    .ok_or(Error::Invalid)?
-            ))
-            .map(|v| v.to_string())
-            .as_deref()
-                != Some(&self.source_version)
+            || semver::Version::parse(&self.source_version).ok().filter(|v| crate::version::distribution_version(&crate::version::display_label(v)).as_ref()==Some(v)).is_none()
             || self.settings_sha256.as_ref().is_some_and(|s| !hex(s, 64))
             || [
                 Some(&self.parent),
@@ -1958,8 +1950,11 @@ fn validate_registration_invariants(root: &PinnedRoot, key: &RegistryKey) -> Res
     Ok(())
 }
 fn validate_static_registration(root: &PinnedRoot, key: &RegistryKey) -> Result<()> {
-    validate_registration_invariants(root, key)?;
-    let source = env!("CARGO_PKG_VERSION");
+    validate_static_registration_for_version(root,key,env!("CARGO_PKG_VERSION"))
+}
+// The caller supplies native current-process version, never persisted or renderer input.
+fn validate_static_registration_for_version(root:&PinnedRoot,key:&RegistryKey,source:&str)->Result<()> {
+    validate_registration_invariants(root,key)?;
     let internal = key.read(1)?;
     if internal.present && internal != RawValue::string(source) {
         return Err(Error::Unsafe);

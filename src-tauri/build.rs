@@ -13,10 +13,8 @@ fn main() {
     let source = include_str!("../version.json");
     let canonical: String = source.chars().filter(|c| !c.is_whitespace()).collect();
     let version = env!("CARGO_PKG_VERSION");
-    let parts: Vec<_> = version.split('.').collect();
-    assert!(parts.len() == 3 && parts[2] == "0" && parts[..2].iter().all(|part|
-        part.parse::<u16>().is_ok_and(|value| value.to_string() == *part)),
-        "Release versions must be canonical X.Y.0 with Windows-compatible components");
+    let parsed=semver::Version::parse(version).expect("Canonical version");
+    assert_eq!(version::distribution_version(&version::display_label(&parsed)),Some(parsed),"Canonical milestone or pre.N required");
     assert_eq!(canonical, format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")),
         "Cargo version differs from version.json; run npm run version:sync");
     tauri_build::build();

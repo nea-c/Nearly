@@ -21,6 +21,11 @@ SetCompressor /SOLID "{{compression}}"
 !define VERSIONWITHBUILD "{{version_with_build}}"
 !searchparse "${VERSION}" "" VERSIONMAJOR "." VERSIONMINOR "." VERSIONPATCH
 !define PUBLICVERSION "r${VERSIONMAJOR}.${VERSIONMINOR}"
+!searchparse /noerrors "${VERSION}" "-" VERSIONPRE
+!ifdef VERSIONPRE
+  !undef PUBLICVERSION
+  !define PUBLICVERSION "r${VERSIONMAJOR}.${VERSIONMINOR}-${VERSIONPRE}"
+!endif
 !define MANUFACTURER "{{manufacturer}}"
 !define COPYRIGHT "{{copyright}}"
 !define ARCH "{{arch}}"
@@ -1330,6 +1335,7 @@ Function NearlyReadInstalledVersion
   ReadRegStr $0 HKCU "${UNINSTKEY}" "DisplayVersion"
   StrCmp $0 "" nearly_version_done
 nearly_version_validate:
+  StrCpy $7 0
   StrCpy $1 0
   StrCpy $2 0
   StrCpy $3 0
@@ -1337,6 +1343,7 @@ nearly_version_validate:
 nearly_version_character:
   StrCpy $4 $0 1 $1
   StrCmp $4 "" nearly_version_finish
+  StrCmp $4 "-" nearly_version_pre
   StrCmp $4 "." nearly_version_dot
   StrCmp $4 "0" nearly_version_digit
   StrCmp $4 "1" nearly_version_digit
@@ -1362,6 +1369,7 @@ nearly_version_accumulate:
   IntOp $6 $6 + $4
   IntCmp $6 65535 nearly_version_advance nearly_version_advance nearly_version_invalid
 nearly_version_dot:
+  StrCmp $7 0 0 nearly_version_invalid
   StrCmp $3 0 nearly_version_invalid
   IntOp $2 $2 + 1
   StrCpy $3 0
@@ -1369,7 +1377,21 @@ nearly_version_dot:
 nearly_version_advance:
   IntOp $1 $1 + 1
   Goto nearly_version_character
+nearly_version_pre:
+  StrCmp $7 0 0 nearly_version_invalid
+  StrCmp $2 2 0 nearly_version_invalid
+  StrCmp $3 0 nearly_version_invalid
+  StrCmp $6 0 0 nearly_version_invalid
+  StrCpy $4 $0 5 $1
+  StrCmp $4 "-pre." 0 nearly_version_invalid
+  IntOp $1 $1 + 5
+  StrCpy $7 1
+  StrCpy $3 0
+  StrCpy $6 0
+  Goto nearly_version_character
 nearly_version_finish:
+  StrCmp $7 1 0 +2
+    StrCmp $6 0 nearly_version_invalid
   StrCmp $2 2 0 nearly_version_invalid
   StrCmp $3 0 nearly_version_invalid nearly_version_done
 nearly_version_invalid:

@@ -25,7 +25,7 @@ export function resolveBuild(rows,root,target,runtime,environment=process.env) {
   // Cargo executes each harness from its package root and supplies these variables.
   const packageInfo=fs.readFileSync(path.join(root,'Cargo.toml'),'utf8');
   const version=packageInfo.match(/^version\s*=\s*"([^"]+)"/m)?.[1]??'';
-  const [major,minor,patchPre]=version.split('.');const [patch,pre='']=String(patchPre).split('-');
+  const [numeric,pre='']=version.split('-');const [major,minor,patch]=numeric.split('.');
   const env={...environment,CARGO_MANIFEST_DIR:root,CARGO_MANIFEST_PATH:path.join(root,'Cargo.toml'),CARGO_PKG_NAME:'nearly',CARGO_PKG_VERSION:version,CARGO_PKG_VERSION_MAJOR:major??'',CARGO_PKG_VERSION_MINOR:minor??'',CARGO_PKG_VERSION_PATCH:patch??'',CARGO_PKG_VERSION_PRE:pre,CARGO_PKG_AUTHORS:'',CARGO_PKG_DESCRIPTION:'',CARGO_PKG_HOMEPAGE:'',CARGO_PKG_REPOSITORY:'',CARGO_PKG_LICENSE:'Apache-2.0',CARGO_PKG_LICENSE_FILE:'',CARGO_PKG_RUST_VERSION:'',PATH:[...new Set(runtimePaths),environment.PATH??environment.Path??''].join(path.delimiter)};
   // Windows environment keys are case-insensitive; Node otherwise picks one alphabetically.
   for(const key of Object.keys(env))if(key.toUpperCase()==='PATH' && key!=='PATH')delete env[key];

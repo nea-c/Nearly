@@ -25,7 +25,7 @@ function checksum(result,name){if(!result[1].data.equals(Buffer.from(`${result[0
 export function parseSignedRequest(env){
   // Keep the historical unsigned controller's accepted modes unchanged.
   const verification=env.RELEASE_MODE==='verify-signature';
-  const r=parseRequest(verification?{...env,RELEASE_MODE:'validate'}:env);
+  const r=parseRequest(verification?{...env,RELEASE_MODE:'validate'}:env,{allowPrerelease:true});
   if(verification&&env.RELEASE_CONFIRM!==`verify-signature ${r.tag} ${r.commit}`)fail('Exact verification/version/commit confirmation required');
   if(!identity(env.GITHUB_RUN_ATTEMPT)||env.GITHUB_WORKFLOW_REF!=='nea-c/Nearly/.github/workflows/release-signed-windows.yml@refs/heads/main')fail('Exact signed workflow and run attempt required');
   return {...r,mode:verification?'verify-signature':r.mode,runAttempt:env.GITHUB_RUN_ATTEMPT};

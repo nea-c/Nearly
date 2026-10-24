@@ -22,6 +22,14 @@ const profile = {
   keyFile: "C:\\key",
   hostKey: "",
 };
+test('display phase transfers as a bounded enum and is not a setting',()=>{
+ const {store,w}=fixture();store.tabs[0].syncPhase='working';
+ const dto=snapshotWorkspaceTransfer(store,w.id);assert.equal(dto.job.syncPhase,'working');
+ const target=new Store({profiles:[profile]});hydrateWorkspaceTransfer(target,dto,w.id);assert.equal(target.tabs[0].syncPhase,'working');
+ const invalid=structuredClone(dto);invalid.job.syncPhase={phase:'working'};assert.throws(()=>validateWorkspaceTransfer(invalid));
+ const unknown=structuredClone(dto);unknown.job.syncPhase='invented';assert.throws(()=>validateWorkspaceTransfer(unknown));
+ assert.equal(JSON.stringify(store.serialize()).includes('syncPhase'),false);
+});
 test("deletion rescan warning survives workspace transfer without changing running status", () => {
   const {store,w}=fixture();store.tabs[0].deletionRescanRequired=true;
   const dto=snapshotWorkspaceTransfer(store,w.id);

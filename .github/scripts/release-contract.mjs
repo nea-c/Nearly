@@ -1,3 +1,4 @@
+import {internalVersion} from '../../scripts/version.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
@@ -10,15 +11,16 @@ const exact = (re, value) => typeof value === 'string' && re.exec(value)?.[0] ==
 const oid = value => exact(/[a-f0-9]{40}/, value);
 const digest = value => exact(/[a-f0-9]{64}/, value);
 const fail = message => {throw Error(message);};
-export function parseRequest(env) {
+export function parseRequest(env, {allowPrerelease=false}={}) {
   if (env.GITHUB_REPOSITORY !== repository || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' || env.GITHUB_REF !== 'refs/heads/main') fail('Only a main-branch manual dispatch in the official repository is accepted');
   if (!oid(env.RELEASE_COMMIT) || !oid(env.GITHUB_WORKFLOW_SHA) || !exact(/[1-9][0-9]*/, env.GITHUB_RUN_ID)) fail('Exact lowercase commit SHA and workflow/run identity required');
-  const tag = env.RELEASE_TAG, m = typeof tag === 'string' && /r(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)/.exec(tag);
-  if (!m || m[0] !== tag || !m.slice(1).every(n => Number.isSafeInteger(+n) && +n <= 65535)) fail('Canonical Windows-compatible rX.Y required');
+  const tag=env.RELEASE_TAG;
+  let version;try{version=internalVersion(tag);}catch{fail('Canonical Windows-compatible release required');}
+  if(!allowPrerelease && version.includes('-'))fail('Legacy controller only accepts stable releases');
   const mode = env.RELEASE_MODE || 'validate';
   if (!['validate', 'release'].includes(mode)) fail('Unknown release mode');
   if (mode === 'release' && env.RELEASE_CONFIRM !== `release ${tag} ${env.RELEASE_COMMIT}`) fail('Exact release/version/commit confirmation required');
-  return {repository, commit: env.RELEASE_COMMIT, tag, version: `${m[1]}.${m[2]}.0`, mode, workflowCommit: env.GITHUB_WORKFLOW_SHA, runId: env.GITHUB_RUN_ID};
+  return {repository, commit: env.RELEASE_COMMIT, tag, version, mode, workflowCommit: env.GITHUB_WORKFLOW_SHA, runId: env.GITHUB_RUN_ID};
 }
 
 export function auditBytes(bytes, prefixes = [], reviewedExamples = []) {

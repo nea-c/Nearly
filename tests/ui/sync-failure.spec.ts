@@ -38,6 +38,46 @@ async function fail(page:Page,stopComplete=false){
   await expect(page.locator('#error-count')).toContainText('1');
   await page.locator('#error-count').click();
 }
+for(const theme of ['light','dark'])for(const language of ['ja','en'] as const){
+ test(`completed paths and actual activity are clear in ${theme} ${language}`,async({page},testInfo)=>{
+  await boot(page,language);
+  const path='generated/deep/'.repeat(12)+'日本語 <img src=x> $&.txt';
+  await page.evaluate(({theme,path})=>{document.documentElement.dataset.theme=theme;Object.assign((window as any).syncFailureFixture.status,{syncPhase:'scanning',pending:0,logs:['Uploaded '+path,'Skipped unchanged keep.txt','Created remote directory generated']});},{theme,path});
+  await expect(page.locator('.status-summary .dot')).toHaveClass(/sync-active/);
+  await expect(page.locator('.tab .dot')).toHaveClass(/sync-active/);
+  await expect(page.locator('#sync-state')).toHaveText(language==='ja'?'走査中':'Scanning');
+  await page.locator('#toggle-logs').click();
+  const success=page.locator('.logs .log-upload');await expect(success).toHaveCount(1);
+  await expect(success.locator('strong')).toHaveText(language==='ja'?'アップロード完了':'Upload complete');
+  await expect(success.locator('code')).toHaveText(path);await expect(success.locator('code')).toHaveAttribute('title',path);await expect(success.locator('img')).toHaveCount(0);
+  expect(await success.locator('code').evaluate(e=>getComputedStyle(e).overflowWrap)).toBe('anywhere');
+  const labelStyle=await success.locator('strong').evaluate(e=>{
+   const fg=getComputedStyle(e).color;let parent=e.parentElement,bg='';
+   while(parent){const c=getComputedStyle(parent).backgroundColor;if(c!=='transparent'&&c!=='rgba(0, 0, 0, 0)'){bg=c;break;}parent=parent.parentElement;}
+   const lum=(s:string)=>{const channels=s.match(/[\d.]+/g)!.slice(0,3).map(Number).map(v=>{const n=v/255;return n<=0.04045?n/12.92:((n+0.055)/1.055)**2.4;});return channels[0]*0.2126+channels[1]*0.7152+channels[2]*0.0722;};
+   const a=lum(fg),b=lum(bg);return {color:fg,background:bg,contrast:(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05)};
+  });
+  // Dark uses the existing semantic success token; light uses its readable fallback.
+  expect(labelStyle.color).toBe(theme==='dark'?'rgb(142, 213, 181)':'rgb(19, 115, 51)');
+  expect(labelStyle.contrast).toBeGreaterThanOrEqual(4.5);
+  expect(await success.locator('code').evaluate(e=>getComputedStyle(e).color)).not.toBe(labelStyle.color);
+  expect(await success.locator('code').evaluate(e=>getComputedStyle(e).userSelect)).toBe('text');
+  await testInfo.attach('success-label-contrast',{body:JSON.stringify({theme,language,...labelStyle}),contentType:'application/json'});
+  const color=await page.locator('.status-summary .dot').evaluate(e=>getComputedStyle(e).backgroundColor);
+  expect(color).toBe(theme==='dark'?'rgb(0, 255, 76)':'rgb(0, 230, 63)');
+  await page.screenshot({path:testInfo.outputPath(`sync-${theme}-${language}.png`)});
+  await page.evaluate(()=>{Object.assign((window as any).syncFailureFixture.status,{syncPhase:'working',pending:2});});
+  await expect(page.locator('#sync-state')).toHaveText(language==='ja'?'同期中':'Syncing');
+  await page.evaluate(()=>{Object.assign((window as any).syncFailureFixture.status,{syncPhase:'caught_up',pending:0});});
+  await expect(page.locator('.status-summary .dot')).toHaveClass(/sync-complete/);
+  await expect(page.locator('.tab .dot')).toHaveClass(/sync-complete/);
+  await expect(page.locator('#sync-state')).toHaveText(language==='ja'?'同期済み・監視中':'Up to date · watching');
+  await page.evaluate(()=>{Object.assign((window as any).syncFailureFixture.status,{syncPhase:'stopping',status:'stopping'});});
+  await expect(page.locator('.status-summary .dot')).toHaveClass(/sync-paused/);
+  await page.evaluate(()=>{Object.assign((window as any).syncFailureFixture.status,{syncPhase:'stopped',status:'stopped'});});
+  await expect(page.locator('.status-summary .dot')).toHaveClass(/off/);
+ });
+}
 
 test('suspended deletion basis is a rescan notice, keeps running and requires manual restart',async({page})=>{
   await boot(page,'en');

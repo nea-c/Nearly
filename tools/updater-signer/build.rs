@@ -34,7 +34,7 @@ use base64::{{engine::general_purpose::STANDARD, Engine}};
 use blake2::{{Blake2b512, Digest}};
 pub const MAX_METADATA{constants}
 struct ReleaseCandidate {{version:semver::Version,arch:Architecture,size:usize}}
-impl ReleaseCandidate {{fn display_version(&self)->String{{format!("r{{}}.{{}}",self.version.major,self.version.minor)}} fn version(&self)->String{{self.version.to_string()}}}}
+impl ReleaseCandidate {{fn display_version(&self)->String{{crate::version::display_label(&self.version)}} fn version(&self)->String{{self.version.to_string()}}}}
 /// Only native embedded configuration{verification}
 fn verify_pe({pe}
 pub fn check(bytes:&[u8],signature:&[u8],public:&[u8],version:&str,arch:&str,payload:&str)->bool {{

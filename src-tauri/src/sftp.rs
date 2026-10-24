@@ -618,6 +618,13 @@ fn remote_error(operation: &str) -> String {
     )
 }
 pub(crate) async fn checked_directory(raw: &RawSftpSession, path: &str, create: bool) -> Result<(), String> {
+    checked_directory_created(raw,path,create,None).await.map(|_| ())
+}
+// A creation receipt comes from the successful MKDIR, never an earlier lookup.
+// A protected sync root and all its ancestors must already exist. Only its
+// descendants may be created; the full fresh walk still precedes every MKDIR.
+async fn checked_directory_created(raw:&RawSftpSession,path:&str,create:bool,protected_root:Option<&str>)->Result<bool,String> {
+    let mut target_created=false;
     let root = raw
         .lstat("/")
         .await
@@ -631,10 +638,12 @@ pub(crate) async fn checked_directory(raw: &RawSftpSession, path: &str, create: 
         current.push_str(component);
         let attrs = match raw.lstat(current.clone()).await {
             Ok(a) => a.attrs,
-            Err(SftpError::Status(s)) if s.status_code == StatusCode::NoSuchFile && create => {
+            Err(SftpError::Status(s)) if s.status_code == StatusCode::NoSuchFile && create
+                && protected_root.is_none_or(|root| current!=root && current.starts_with(&format!("{}/",root.trim_end_matches('/')))) => {
                 raw.mkdir(current.clone(), FileAttributes::empty())
                     .await
                     .map_err(|_| remote_error("mkdir"))?;
+                if current==path {target_created=true;}
                 raw.lstat(current.clone())
                     .await
                     .map_err(|_| remote_error("directory verification"))?
@@ -646,7 +655,7 @@ pub(crate) async fn checked_directory(raw: &RawSftpSession, path: &str, create: 
             return Err("Remote path contains a symlink or non-directory".into());
         }
     }
-    Ok(())
+    Ok(target_created)
 }
 pub fn normalize(p: &str) -> Result<String, String> {
     if !p.starts_with('/') || p.contains('\\') || p.chars().any(|c| c.is_control()) {
@@ -1097,6 +1106,7 @@ pub struct RemoteSnapshot {
     pub files: Vec<(std::path::PathBuf, RemoteStamp)>,
     pub directories: Vec<(std::path::PathBuf, RemoteDirectoryStamp)>,
     pub retained: RetainedDirectories,
+    pub(crate) coverage:crate::listing_absence::ListingCoverage,
 }
 // These futures are polled together on the same runtime thread (never spawned).
 // One shared budget includes provisional results from every in-flight directory.
@@ -1134,7 +1144,8 @@ async fn mirror_directory(
     parent:RemoteDirectoryStamp,
 ) -> Result<(RemoteSnapshot,Vec<(std::path::PathBuf,String,RemoteDirectoryStamp)>),String> {
     crate::file_ops::check(stop)?;
-    let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
+    let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default(),coverage:Default::default()};
+    let mut listed_entries=std::collections::HashMap::new();let mut opaque=false;
     let mut children=Vec::new();
     let guard=if relative.as_os_str().is_empty(){parent}else{inventory_directory_guard(raw,&absolute,&parent).await?};
     mirror_charge(&budget.bytes,guard.authority_bytes()+absolute.len()+relative.as_os_str().len()*2,16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
@@ -1149,8 +1160,10 @@ async fn mirror_directory(
                 if entry.filename=="."||entry.filename==".."{continue;}
                 mirror_charge(&budget.entries,1,10000,"Remote mirror inventory exceeds 10,000 entries; deletion refused")?;
                 if !seen.insert(entry.filename.to_lowercase()){return Err("Duplicate or case-ambiguous remote mirror entry; deletion refused".into());}
-                if crate::file_ops::validate_creation_name(&entry.filename,crate::file_ops::Side::Local).is_err(){snapshot.retained.retain(&relative)?;continue;}
+                if crate::file_ops::validate_creation_name(&entry.filename,crate::file_ops::Side::Local).is_err(){opaque=true;snapshot.retained.retain(&relative)?;continue;}
                 let child=relative.join(&entry.filename);
+                mirror_charge(&budget.bytes,child.as_os_str().len()*2+entry.filename.len()+64,16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
+                listed_entries.insert(entry.filename.to_lowercase(),child.clone());
                 mirror_charge(&budget.bytes,child.as_os_str().len()*4+entry.filename.len(),16*1024*1024,"Remote mirror authority memory limit reached; deletion refused")?;
                 let dir=entry.attrs.file_type().is_dir()&&!entry.attrs.is_symlink();
                 if rules.excludes(&child,dir)?||entry.attrs.is_symlink()||(!dir&&!entry.attrs.file_type().is_file())||(!recursive&&dir){snapshot.retained.retain(&relative)?;continue;}
@@ -1166,6 +1179,7 @@ async fn mirror_directory(
     }
     raw.close(handle).await.map_err(|_|"Remote mirror inventory close failed; deletion refused")?;
     if inventory_directory_guard(raw,&absolute,&guard).await?!=guard{return Err("Remote mirror directory changed during inventory; deletion refused".into());}
+    snapshot.coverage.record_complete_directory(relative,listed_entries,opaque);
     Ok((snapshot,children))
 }
 // Build everything before publishing authority. A failed READDIR, budget or
@@ -1173,7 +1187,7 @@ async fn mirror_directory(
 pub fn mirror_snapshot(s: &mut Connection, remote: &str, rules: &crate::exclusion::Rules, recursive: bool, stop: &AtomicBool) -> Result<RemoteSnapshot, String> {
     let remote=normalize(remote)?;
     s.run(stop,async {
-        let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default()};
+        let mut snapshot=RemoteSnapshot{files:Vec::new(),directories:Vec::new(),retained:Default::default(),coverage:Default::default()};
         let root_guard=directory_guard(&s.raw,&remote).await?;
         let mut stack=vec![(std::path::PathBuf::new(),remote,root_guard)];
         let budget=MirrorBudget::default();
@@ -1185,6 +1199,7 @@ pub fn mirror_snapshot(s: &mut Connection, remote: &str, rules: &crate::exclusio
             let results=futures_util::future::try_join_all(batch.into_iter().map(|(relative,absolute,parent)|mirror_directory(&s.raw,relative,absolute,rules,recursive,stop,&budget,parent))).await?;
             crate::file_ops::check(stop)?;
             for (mut partial,children) in results{
+                snapshot.coverage.append(partial.coverage);
                 snapshot.files.append(&mut partial.files);
                 snapshot.directories.append(&mut partial.directories);
                 for retained in partial.retained.paths{snapshot.retained.retain(&retained)?;}
@@ -1300,13 +1315,8 @@ pub fn authorize_directory_observed(
     let root = normalize(remote)?;
     s.run(stop, async {
         verify_local()?;
-        checked_directory(&s.raw, &root, false).await?;
-        let created = match s.raw.lstat(target.clone()).await {
-            Ok(_) => false,
-            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => true,
-            Err(_) => return Err("Remote directory lookup failed".into()),
-        };
-        checked_directory(&s.raw, &target, true).await?;
+        crate::file_ops::check(stop)?;
+        let created=checked_directory_created(&s.raw,&target,true,Some(&root)).await?;
         let stamp = directory_guard(&s.raw, &target).await?;
         verify_local()?;
         crate::file_ops::check(stop)?;

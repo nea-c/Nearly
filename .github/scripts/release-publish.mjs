@@ -1,3 +1,4 @@
+import {internalVersion} from '../../scripts/version.mjs';
 import {repository, sha256, auditBytes} from './release-contract.mjs';
 import {verifyUpdaterProof} from './updater-proof.mjs';
 import {publicKeySha256} from './release-trust.mjs';
@@ -30,6 +31,9 @@ export async function publishSignedRelease(args) {
 }
 async function publishCore({request, bundle, notes, api, download},assetCount,markerName) {
   if (request.mode !== 'release') fail('Validation mode cannot publish');
+  const pre=request.tag.includes('-pre.');
+  if(internalVersion(request.tag)!==request.version || (pre && markerName!=='nearly-signed-release'))fail('Invalid release channel identity');
+  const latest=pre?'false':'true';
   const m = bundle.manifest;
   if (['repository','commit','tag','version','workflowCommit','runId'].some(k => m[k] !== request[k]) || bundle.assets.length !== assetCount || bundle.assets.some((a,i) => a.name !== m.assets[i]?.name || a.sha256 !== m.assets[i]?.sha256 || a.bytes !== m.assets[i]?.bytes || a.bytes !== a.data.length || sha256(a.data) !== a.sha256)) fail('Publish request/artifact binding mismatch');
   auditBytes(Buffer.from(notes));
@@ -40,6 +44,8 @@ async function publishCore({request, bundle, notes, api, download},assetCount,ma
   if (source.sha !== request.commit || source.tree?.sha !== m.tree || version.encoding !== 'base64' || JSON.parse(Buffer.from(version.content, 'base64')).version !== request.version) fail('GitHub source/version differs from tested artifact');
   const marker = `<!-- ${markerName} ${JSON.stringify(m)} -->`;
   const body = `${notes.trim()}\n\n${marker}\n`;
+  const stableLatest=pre ? await api.get('/releases/latest') : null;
+  if(pre && (!Number.isSafeInteger(stableLatest?.id)||stableLatest.id<=0||stableLatest.draft||stableLatest.prerelease||!/^r[0-9]+\.[0-9]+$/.test(stableLatest.tag_name)))fail('Stable Latest identity required before prerelease publication');
   const name = `Nearly ${request.tag}`;
   let release;
   for (let page = 1; page <= 10; page++) {
@@ -55,17 +61,17 @@ async function publishCore({request, bundle, notes, api, download},assetCount,ma
   const tag = await api.get(`/git/ref/tags/${request.tag}`);
   checkTag(tag, request);
   if (release) {
-    if (release.body !== body || release.name !== name || release.prerelease !== false || !tag) fail('Existing release is not this exact run/artifact; preserve it');
+    if (release.body !== body || release.name !== name || release.prerelease !== pre || !tag) fail('Existing release is not this exact run/artifact; preserve it');
     checkAssets(release, bundle.assets, !release.draft);
   }
   // Every write has a preceding state read. Never retry network writes here.
   if (!tag) await api.create('/git/refs', {ref: `refs/tags/${request.tag}`, sha: request.commit});
-  if (!release) release = await api.create('/releases', {tag_name: request.tag, target_commitish: request.commit, name, body, draft: true, prerelease: false, generate_release_notes: false});
+  if (!release) release = await api.create('/releases', {tag_name: request.tag, target_commitish: request.commit, name, body, draft: true, prerelease: pre, ...(pre ? {make_latest: 'false'} : {}), generate_release_notes: false});
   const id = release.id;
   if (release.draft) {
     for (const asset of bundle.assets) {
       release = await api.get(releasePath(id));
-      if (!release.draft || release.body !== body || release.tag_name !== request.tag || release.prerelease !== false) fail('Draft changed during publication');
+      if (!release.draft || release.body !== body || release.tag_name !== request.tag || release.prerelease !== pre) fail('Draft changed during publication');
       checkAssets(release, bundle.assets);
       if (!release.assets.some(a => a.name === asset.name)) {
         const uploaded = await api.upload(release, asset);
@@ -73,21 +79,22 @@ async function publishCore({request, bundle, notes, api, download},assetCount,ma
       }
     }
     release = await api.get(releasePath(id));
-    if (!release.draft || release.body !== body || release.tag_name !== request.tag || release.prerelease !== false) fail('Draft changed before publication');
+    if (!release.draft || release.body !== body || release.tag_name !== request.tag || release.prerelease !== pre) fail('Draft changed before publication');
     checkAssets(release, bundle.assets, true);
     const beforePublishTag = await api.get(`/git/ref/tags/${request.tag}`);
     if (!beforePublishTag) fail('Tag disappeared before publication; retain the draft');
     checkTag(beforePublishTag, request);
-    release = await api.patch(releasePath(id), {draft: false, prerelease: false, make_latest: 'true'});
+    release = await api.patch(releasePath(id), {draft: false, prerelease: pre, make_latest: latest});
   }
   release = await api.get(releasePath(id));
-  if (release.draft || release.prerelease || release.tag_name !== request.tag || release.body !== body) fail('Stable publication not confirmed; inspect remote state');
+  if (release.draft || release.prerelease !== pre || release.tag_name !== request.tag || release.body !== body) fail('Stable publication not confirmed; inspect remote state');
   checkAssets(release, bundle.assets, true);
   const finalTag = await api.get(`/git/ref/tags/${request.tag}`); if (!finalTag) fail('Published tag missing'); checkTag(finalTag, request);
   for (const asset of release.assets) {
     const data = await download(asset);
     if (data.length !== asset.size || sha256(data) !== bundle.assets.find(a => a.name === asset.name).sha256) fail('Public downloaded bytes differ; inspect release, never overwrite');
   }
+  if(pre){const after=await api.get('/releases/latest');if(after?.id!==stableLatest.id||after.tag_name!==stableLatest.tag_name||after.draft||after.prerelease)fail('Stable Latest changed; inspect publication without overwriting');}
   return {url: `https://github.com/${repository}/releases/tag/${request.tag}`, commit: request.commit};
 }
 

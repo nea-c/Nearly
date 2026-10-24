@@ -464,7 +464,8 @@ fn real_native_lock_exhaustion_retains_exact_installer_backup_and_settings(){
 }
 #[test]
 fn authenticated_signature_never_substitutes_for_the_running_image(){
- let fixture=Fixture::new();let context=fixture.context();let(mut stage,candidate,key)=crate::update_package::fixture_stage(&fixture.root,env!("CARGO_PKG_VERSION"),context.installed_image_sha256());let snapshot=stage.transaction_snapshot(&candidate,&key).unwrap();let transaction=prepare_transaction(&context,&snapshot).unwrap();let record=transaction.store.recovery_hint().unwrap().unwrap();let proof=authenticate_record(&context,&record,&key).unwrap();
+ let fixture=Fixture::new();let context=fixture.context();let mut target=semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();target.pre=semver::Prerelease::EMPTY;
+ let(mut stage,candidate,key)=crate::update_package::fixture_stage(&fixture.root,&target.to_string(),context.installed_image_sha256());let snapshot=stage.transaction_snapshot(&candidate,&key).unwrap();let transaction=prepare_transaction(&context,&snapshot).unwrap();let record=transaction.store.recovery_hint().unwrap().unwrap();let proof=authenticate_record(&context,&record,&key).unwrap();
  assert!(verify_running_payload(&context,&proof).is_err(),"fixture bytes/path are not this native running process");
  let mut forged=record.clone();forged.package_signature="c2lnbmVkLWZpeHR1cmU=".into();forged.receipt.binding.release.signature_proof_digest=sha256(forged.package_signature.as_bytes());assert!(authenticate_record(&context,&forged,&key).is_err());fixture.sentinels_unchanged();
 }
@@ -536,4 +537,16 @@ fn never_spawned_proof_cannot_abandon_another_nonce_or_a_committed_or_stale_reco
     assert!(prepared.abandon_never_spawned(&failure).is_err());
     assert_eq!(prepared.store.recovery_hint().unwrap().unwrap(),durable);
     assert!(prepare_transaction(&context,&snapshot).is_err());fixture.sentinels_unchanged();
+}
+
+#[test]
+fn prerelease_source_can_transition_to_formal_same_milestone_without_accepting_aliases() {
+    let f=Fixture::new();let context=f.context();let mut record=f.record(&context);
+    record.old_image.source_version="1.1.0-pre.1".into();assert!(record.validate().is_ok());
+    for invalid in ["1.1.0-pre.0","1.1.0-pre.01","1.1.1-pre.1","1.1.0+build","1.1.0-beta.1"]{record.old_image.source_version=invalid.into();assert!(record.validate().is_err());}
+    record.old_image.source_version="1.1.0-pre.1".into();
+    record.receipt.binding.release.internal_version="1.1.0-pre.1".into();
+    record.receipt.binding.release.public_tag="r1.1-pre.1".into();
+    record.receipt.binding.release.download_asset="Nearly_r1.1-pre.1_x64-setup.exe".into();
+    assert!(codec::encode(&record.receipt).is_err(),"pre is not an authorized incoming update target");
 }

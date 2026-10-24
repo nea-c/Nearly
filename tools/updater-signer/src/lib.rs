@@ -1,3 +1,5 @@
+#[path = "../../../src-tauri/src/version.rs"]
+mod version;
 use base64::{engine::general_purpose::STANDARD, Engine};
 pub type Result<T> = std::result::Result<T, &'static str>;
 #[allow(dead_code)]
@@ -95,18 +97,10 @@ impl Manifest {
     }
     pub fn validate(&self, installer: &[u8], payload: &[u8]) -> Result<()> {
         let v = semver::Version::parse(&self.version).map_err(|_| "invalid version")?;
-        if v.to_string() != self.version
-            || v.patch != 0
-            || !v.pre.is_empty()
-            || !v.build.is_empty()
-            || v.major > 65535
-            || v.minor > 65535
-        {
-            return Err("noncanonical version");
-        }
+        if v.to_string()!=self.version || version::distribution_version(&version::display_label(&v)).as_ref()!=Some(&v) { return Err("noncanonical version"); }
         if self.updater_protocol != 3
             || !matches!(self.arch.as_str(), "x64" | "arm64")
-            || self.file != format!("Nearly_r{}.{}_{}-setup.exe", v.major, v.minor, self.arch)
+            || self.file != format!("Nearly_{}_{}-setup.exe", version::display_label(&v), self.arch)
         {
             return Err("invalid package identity");
         }
@@ -507,6 +501,15 @@ mod tests {
             m.archive_member = name.into();
             assert!(m.validate(&installer, &payload).is_err(), "{name}");
         }
+    }
+    #[test]
+    fn prerelease_signatures_bind_exact_pre_version_and_name() {
+        let (installer,payload,mut m)=fixture();m.version="3.7.0-pre.1".into();m.file="Nearly_r3.7-pre.1_x64-setup.exe".into();
+        let pair=minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signature=sign_bytes(&installer,&payload,&m,&pair.pk,&pair.sk).unwrap();
+        assert!(verify_signature(&installer,&signature,&m,&pair.pk));
+        m.version="3.7.0".into();assert!(!verify_signature(&installer,&signature,&m,&pair.pk));
+        m.version="3.7.0-pre.01".into();assert!(m.validate(&installer,&payload).is_err());
     }
     #[test]
     fn signatures_interoperate_with_exact_native_verifier_and_reject_tampering() {

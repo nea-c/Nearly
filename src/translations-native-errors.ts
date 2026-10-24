@@ -1296,6 +1296,7 @@ export const nativeErrorLiterals: ReadonlyArray<readonly [string, string]> = [
 ];
 
 export const nativeErrorTemplates: ReadonlyArray<readonly [string, string]> = [
+  ["アップロード完了: {0}","Uploaded {0}"],
   ["ローカルファイルが更新されたため、最新版の再送を待っています: {0}","Local source changed; waiting to resend {0}"],
   ["変更のないファイルを省略しました: {0}","Skipped unchanged {0}"],
   ["リモートの方が新しいため、ローカル優先で上書きします: {0}","Remote newer; source-authoritative overwrite {0}"],
@@ -1303,6 +1304,7 @@ export const nativeErrorTemplates: ReadonlyArray<readonly [string, string]> = [
   ["除外または非対応の項目があるリモートフォルダーを保持しました: {0}","Retained remote directory with excluded or unsupported entries {0}"],
   ["空ではないリモートフォルダーを保持しました: {0}","Retained nonempty remote directory {0}"],
   // Whole log messages: filenames remain opaque captured data.
+  ["リモートのフォルダーを作成しました: {0}","Created remote directory {0}"],
   ["ローカルとリモートのフォルダーを確認しました: {0}","Verified local/remote directory {0}"],
   ["空であることを確認したフォルダーを削除しました: {0}","Deleted verified empty directory {0}"],
   ["この同期でアップロードしたファイルを削除しました: {0}","Deleted previously uploaded file {0}"],

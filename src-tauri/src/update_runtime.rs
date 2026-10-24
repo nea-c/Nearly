@@ -629,18 +629,24 @@ mod native_fixture_tests {
         )
         .unwrap();
         let context = NativeContext::fixture_context(root).unwrap();
+        let current_version=semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let mut stable_target=current_version.clone();stable_target.pre=semver::Prerelease::EMPTY;
         let (mut stage, candidate, key) = crate::update_package::fixture_stage(
             root,
-            env!("CARGO_PKG_VERSION"),
+            &stable_target.to_string(),
             context.installed_image_sha256(),
         );
         let snapshot = stage.transaction_snapshot(&candidate, &key).unwrap();
         let transaction = prepare_transaction(&context, &snapshot).unwrap();
         let record = transaction.store.recovery_hint().unwrap().unwrap();
         let proof = authenticate_record(&context, &record, &key).unwrap();
-        verify_running_payload(&context, &proof).expect(
-            "authenticated actual running test payload/version/architecture/path must match",
-        );
+        if current_version.pre.is_empty() {
+            verify_running_payload(&context,&proof).expect("authenticated actual stable running payload must match");
+        } else {
+            assert!(verify_running_payload(&context,&proof).is_err(),"actual pre image cannot claim formal stable restart health");
+            assert_eq!(record.old_image.source_version,current_version.to_string());
+            assert_eq!(record.receipt.binding.release.internal_version,stable_target.to_string());
+        }
         assert_eq!(proof.payload_sha256(), context.installed_image_sha256());
         assert_eq!(
             fs::read(root.join(&record.old_image.basename)).unwrap(),

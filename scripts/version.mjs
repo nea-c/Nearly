@@ -1,28 +1,24 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const component = '(0|[1-9][0-9]*)';
-const internalPattern = new RegExp(`^${component}\\.${component}\\.0$`);
-const tagPattern = new RegExp(`^r${component}\\.${component}$`);
-
+const suffix = '(?:-pre\\.([1-9][0-9]*))?';
+const internalPattern = new RegExp('^'+component+'\\.'+component+'\\.0'+suffix+'$');
+const tagPattern = new RegExp('^r'+component+'\\.'+component+suffix+'$');
 export function displayVersion(version) {
-  const match = internalPattern.exec(version);
-  if (typeof version !== 'string' || !match || match[0] !== version || !match.slice(1).every(n => Number.isSafeInteger(Number(n)) && Number(n) <= 65535))
-    throw Error('Version must be canonical X.Y.0 with Windows-compatible components (0–65535)');
-  return `r${match[1]}.${match[2]}`;
+ const m=typeof version==='string' && internalPattern.exec(version);
+ if(!m || m[0]!==version || !m.slice(1).filter(x=>x!==undefined).every(x=>Number.isSafeInteger(+x)&&+x<=65535))throw Error('Version must be canonical X.Y.0 or X.Y.0-pre.N (N1..65535)');
+ return 'r'+m[1]+'.'+m[2]+(m[3]?'-pre.'+m[3]:'');
 }
 export function internalVersion(tag) {
-  const match = tagPattern.exec(tag);
-  if (typeof tag !== 'string' || !match || match[0] !== tag) throw Error('Release tag must be canonical rX.Y');
-  const version = `${match[1]}.${match[2]}.0`;
-  displayVersion(version);
-  return version;
+ const m=typeof tag==='string' && tagPattern.exec(tag);
+ if(!m || m[0]!==tag)throw Error('Release tag must be canonical rX.Y or rX.Y-pre.N');
+ const version=m[1]+'.'+m[2]+'.0'+(m[3]?'-pre.'+m[3]:'');displayVersion(version);return version;
 }
-export function compareReleaseTags(left, right) {
-  const a = internalVersion(left).split('.').map(Number), b = internalVersion(right).split('.').map(Number);
-  return Math.sign(a[0] - b[0] || a[1] - b[1]);
+export function compareReleaseTags(left,right) {
+ const parts=tag=>{const m=internalPattern.exec(internalVersion(tag));return [+m[1],+m[2],m[3]?+m[3]:65536];};
+ const a=parts(left),b=parts(right);return Math.sign(a[0]-b[0]||a[1]-b[1]||a[2]-b[2]);
 }
 export async function readVersion(root = projectRoot) {
   const source = JSON.parse(await fs.readFile(path.join(root, 'version.json'), 'utf8'));

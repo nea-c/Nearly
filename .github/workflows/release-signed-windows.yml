@@ -14,11 +14,11 @@ on:
         type: string
         required: true
       version:
-        description: Exact canonical rX.Y already present in the source
+        description: Exact canonical rX.Y or rX.Y-pre.N already present in the source
         type: string
         required: true
       confirmation:
-        description: For signing, type verify-signature rX.Y SHA or release rX.Y SHA exactly
+        description: For signing, type verify-signature TAG SHA or release TAG SHA exactly
         type: string
         default: ''
         required: false

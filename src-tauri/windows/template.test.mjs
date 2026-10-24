@@ -190,7 +190,7 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   const data = {
     compression: "lzma", product_name: "Nearly", main_binary_name: "Nearly", main_binary_path: payload,
     license: path.join(root, 'DISTRIBUTION-LICENSES.txt'),
-    bundle_id: "local.nearly.compile.only", version: internalVersion, version_with_build: `${internalVersion}.0`,
+    bundle_id: "local.nearly.compile.only", version: internalVersion, version_with_build: `${internalVersion.split("-")[0]}.0`,
     manufacturer: "Nearly", copyright: "Nearly contributors", arch: "x64",
     installer_icon: path.join(root, "src-tauri", "icons", "icon.ico"),
     uninstaller_icon: path.join(root, "src-tauri", "icons", "uninstall.ico"),
@@ -225,6 +225,11 @@ test("cached NSIS compiles both installer and automatic uninstaller without exec
   for (const pe of [bytes,fs.readFileSync(capturedUninstaller)]) {
     const version=peResources(pe).find(resource=>resource.ids[0]===16)?.bytes;
     assert.ok(version,'Compiled PE version resource');
+    const fixed=version.indexOf(Buffer.from([0xbd,0x04,0xef,0xfe]));assert.ok(fixed>=0,'VS_FIXEDFILEINFO');
+    const [major,minor]=internalVersion.split('-')[0].split('.').map(Number);
+    assert.equal(version.readUInt32LE(fixed+8),major*65536+minor);assert.equal(version.readUInt32LE(fixed+12),0);
+    const expectedLabel='r'+major+'.'+minor+(internalVersion.includes('-')?'-'+internalVersion.split('-')[1]:'');
+    assert.ok(version.includes(Buffer.from(expectedLabel+'\0','utf16le')),'pre suffix retained in displayed version');
     const key=Buffer.from('CompanyName\0','utf16le'), offset=version.indexOf(key);
     assert.ok(offset>=6,'Compiled CompanyName');
     assert.equal(version.readUInt16LE(offset-2),1,'CompanyName is a string');
@@ -264,4 +269,9 @@ test('actual registered root resolution locks owned upgrades and rejects migrati
   [{NearlyOwner:'local.nearly.compile.only',InstallLocation:custom,UninstallString:`"${custom}\\uninstall.exe"`},{...base,NearlyRootMissing:1}],
  ])assert.equal(runDecision('NearlyResolveRegistration',{registry,variables}).aborted,true,JSON.stringify({registry,variables}));
  assert.equal(runDecision('NearlyResolveRegistration',{variables:base}).aborted,false,'no registration leaves fresh root selectable');
+});
+
+test('installed canonical pre milestones are accepted before stable semver upgrade comparison',()=>{
+ for(const n of ['1','65535']){const value='3.7.0-pre.'+n,result=runDecision('NearlyReadInstalledVersion',{registry:{NearlyInternalVersion:value,DisplayVersion:'r3.7-pre.'+n}});assert.equal(result.aborted,false,value);assert.equal(result.variables['0'],value);}
+ for(const value of ['3.7.0-pre.0','3.7.0-pre.01','3.7.0-pre.65536','3.7.0-pre.1.2','3.7.1-pre.1','3.7.0-beta.1','3.7.0-pre.1+meta'])assert.equal(runDecision('NearlyReadInstalledVersion',{registry:{NearlyInternalVersion:value}}).aborted,true,value);
 });

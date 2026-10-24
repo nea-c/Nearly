@@ -159,3 +159,4 @@ Thumbs.db
 !/docs/sync-startup-inventory.md
 !/scripts/listing-worker-test.mjs
 !/scripts/listing-existing-pipeline-test.mjs
+!/scripts/empty-remote-safety-test.mjs
