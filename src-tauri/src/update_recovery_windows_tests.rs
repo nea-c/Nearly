@@ -118,12 +118,14 @@ fn cleanup_exclusive_store_lease_rejects_double_start() {
     assert!(RecoveryStore::open(&root, "Local\\NearlyCleanupSecondFixture").is_err());
 }
 
+// Generated image/registry fixtures use a stable target, independently of the test binary distribution.
+const CLEANUP_FIXTURE_TARGET: &str = "3.7.0";
 fn cleanup_signed_fixture() -> (Fixture, PinnedRoot, FixtureTransaction, crate::update_package::TrustedKey) {
     let f = Fixture::new();
     let root = PinnedRoot::fixture(&f.0).unwrap();
     let mut tx = FixtureTransaction::prepare(&root).unwrap();
     tx.apply_with_fault(usize::MAX).unwrap();
-    let version = env!("CARGO_PKG_VERSION");
+    let version = CLEANUP_FIXTURE_TARGET;
     let label = crate::version::display_label(&semver::Version::parse(version).unwrap());
     let (mut stage, candidate, key) = crate::update_package::fixture_stage(root.path(), version, &sha256(b"new image"));
     let snapshot = stage.transaction_snapshot(&candidate, &key).unwrap();
@@ -157,7 +159,7 @@ fn cleanup_admission_authenticates_protocol3_signature_running_identity_and_regi
     let (_f, root, mut tx, key) = cleanup_signed_fixture();
     let current = root.path().join("Nearly.exe");
     let record = tx.session.record.clone();
-    let result = cleanup::fixture_admit(&root, &record, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry);
+    let result = cleanup::fixture_admit(&root, &record, &key, &current, CLEANUP_FIXTURE_TARGET, &tx.session.registry);
     assert!(result.is_ok(), "signed admission: {result:?}");
     for kind in 0..5 {
         let mut changed = record.clone();
@@ -168,17 +170,17 @@ fn cleanup_admission_authenticates_protocol3_signature_running_identity_and_regi
             3 => changed.new_values[0] = RawValue::string("r999.0"),
             _ => changed.helper = Some(current_process_identity().unwrap()),
         }
-        assert!(cleanup::fixture_admit(&root, &changed, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err(), "case {kind}");
+        assert!(cleanup::fixture_admit(&root, &changed, &key, &current, CLEANUP_FIXTURE_TARGET, &tx.session.registry).is_err(), "case {kind}");
         assert!(tx.backup_path(0).exists());
     }
     assert!(cleanup::fixture_admit(&root, &record, &key, &current, "3.0.0", &tx.session.registry).is_err());
     let outside = Fixture::new();
-    assert!(cleanup::fixture_admit(&root, &record, &key, &outside.0.join("Nearly.exe"), env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err());
+    assert!(cleanup::fixture_admit(&root, &record, &key, &outside.0.join("Nearly.exe"), CLEANUP_FIXTURE_TARGET, &tx.session.registry).is_err());
     // Deferral before any deletion gets a durable diagnostic without changing
     // success. Repeating it does not consume a publication slot unnecessarily.
     tx.session.record.helper = Some(current_process_identity().unwrap()); tx.session.publish().unwrap();
     let pending = tx.session.record.clone();
-    assert!(cleanup::fixture_admitted_run(&mut tx.session.store, pending, &key, &current, env!("CARGO_PKG_VERSION"), &tx.session.registry).is_err());
+    assert!(cleanup::fixture_admitted_run(&mut tx.session.store, pending, &key, &current, CLEANUP_FIXTURE_TARGET, &tx.session.registry).is_err());
     let durable = tx.session.store.read().unwrap().unwrap();
     assert_eq!(durable.engine.phase, RecoveryPhase::Succeeded);
     let json = serde_json::to_value(&durable).unwrap();
@@ -194,7 +196,7 @@ fn cleanup_final_setup_absence_only_finalizes_journal_and_never_deletes_more() {
     let setup = root.path().join(&tx.session.record.installer_name);
     std::fs::remove_file(&setup).unwrap();
     let record = tx.session.record.clone();
-    cleanup::fixture_admitted_run(&mut tx.session.store, record, &key, &root.path().join("Nearly.exe"), env!("CARGO_PKG_VERSION"), &tx.session.registry).unwrap();
+    cleanup::fixture_admitted_run(&mut tx.session.store, record, &key, &root.path().join("Nearly.exe"), CLEANUP_FIXTURE_TARGET, &tx.session.registry).unwrap();
     assert!(tx.session.store.read().unwrap().unwrap().cleanup.as_ref().unwrap().finished());
     assert!(tx.backup_path(0).exists());
     assert!(tx.backup_path(1).exists());

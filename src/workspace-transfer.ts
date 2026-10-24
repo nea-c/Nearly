@@ -50,6 +50,7 @@ const jobFields = [
   "logs",
 ];
 const jobOptional = [
+  "syncPhase",
   "retainedId",
   "pending",
   "errorCount",
@@ -311,6 +312,7 @@ function checked(input: unknown, project = false): WorkspaceTransfer {
     for (const k of ["deleteRemoved", "recursive"])
       if (Object.hasOwn(j, k)) bool(j[k]);
     j.logs = array(j.logs, 100).map((value) => str(value, 16384));
+    if(Object.hasOwn(j,'syncPhase')&&!['scanning','working','caught_up','deletion_rescan_required','error','stopping','stopped'].includes(str(j.syncPhase,64,false)))fail();
     if(Object.hasOwn(j,'statusError'))str(j.statusError,16384);
     if(Object.hasOwn(j,'stopComplete'))bool(j.stopComplete);
     if(Object.hasOwn(j,'deletionRescanRequired'))bool(j.deletionRescanRequired);

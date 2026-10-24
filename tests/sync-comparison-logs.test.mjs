@@ -5,6 +5,7 @@ import {localizeNativeError} from '../.test-build/native-errors.js';
 test('comparison logs distinguish skip, overwrite and delete while preserving opaque paths',()=>{
  const name='資料/Uploaded <img src=x> $& 設定.txt';
  for(const [source,expected] of [
+  [`Created remote directory ${name}`,`リモートのフォルダーを作成しました: ${name}`],
   [`Local source changed; waiting to resend ${name}`,`ローカルファイルが更新されたため、最新版の再送を待っています: ${name}`],
   [`Skipped unchanged ${name}`,`変更のないファイルを省略しました: ${name}`],
   [`Remote newer; source-authoritative overwrite ${name}`,`リモートの方が新しいため、ローカル優先で上書きします: ${name}`],

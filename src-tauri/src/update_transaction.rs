@@ -82,14 +82,7 @@ impl TransactionRecord {
             || !lower_hex(&self.old_image.source_identity.file_id, 32)
             || self.old_image.length == 0
             || self.old_image.length > crate::update_package::MAX_PACKAGE as u64
-            || crate::version::release_version(&format!(
-                "r{}",
-                self.old_image
-                    .source_version
-                    .strip_suffix(".0")
-                    .ok_or(Error::Invalid)?
-            ))
-            .is_none()
+            || semver::Version::parse(&self.old_image.source_version).ok().filter(|v| crate::version::distribution_version(&crate::version::display_label(v)).as_ref()==Some(v)).is_none()
             || [&self.installer_process, &self.restart_process]
                 .iter()
                 .any(|p| p.as_ref().is_some_and(|p| p.pid == 0 || p.created == 0))

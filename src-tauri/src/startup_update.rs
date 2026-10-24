@@ -145,6 +145,12 @@ fn evaluate(body:&[u8],current:&str)->Report{
 #[cfg(test)]mod tests{
     use super::*;
     fn release(tag:&str,draft:bool,pre:bool)->Vec<u8>{serde_json::to_vec(&serde_json::json!({"tag_name":tag,"draft":draft,"prerelease":pre,"html_url":format!("https://github.com/nea-c/Nearly/releases/tag/{tag}")})).unwrap()}
+    #[test]fn pre_is_never_stable_and_formal_milestone_is_upgrade() {
+        assert_eq!(evaluate(&release("r3.7-pre.1",false,true),"3.6.0").state,"noStableRelease");
+        assert_eq!(evaluate(&release("r3.7-pre.1",false,false),"3.6.0").state,"invalidMetadata");
+        assert_eq!(evaluate(&release("r3.6",false,false),"3.7.0-pre.1").state,"current");
+        assert_eq!(evaluate(&release("r3.7",false,false),"3.7.0-pre.1").latest_version.as_deref(),Some("r3.7"));
+    }
     #[test]fn public_release_tags_compare_numerically_and_reject_aliases(){
         for (tag,current,expected) in [("r1.0","1.0.0","current"),("r1.10","1.9.0","signingNotConfigured"),("r2.0","1.10.0","signingNotConfigured"),("r1.9","1.10.0","current")] {
             let result=evaluate(&release(tag,false,false),current);

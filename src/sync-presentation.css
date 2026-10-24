@@ -1,0 +1,12 @@
+/* Active work has a bright centre and a contrasting outline in light themes. */
+:root[data-theme] .dot.sync-active { background:#00e63f; border:1px solid #007c28; box-sizing:content-box; box-shadow:0 0 0 2px #00c83c25; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .dot.sync-active { background:#00ff4c; border-color:#00c83c; box-shadow:0 0 5px #00ff4c65; }
+:root[data-theme] .dot.sync-complete { background:#538198; box-shadow:none; }
+:root[data-theme] .dot.sync-watching { background:#718790; box-shadow:none; }
+:root[data-theme] .dot.sync-paused { background:#a56a00; box-shadow:none; }
+:root[data-theme] .log-drawer .logs .log-upload { display:flex; align-items:baseline; gap:8px; padding:3px 0; }
+:root[data-theme] .log-upload strong { flex:none; color:var(--success-text,#137333); font-size:11px; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .log-upload strong { color:var(--success-text,#6fdb91); }
+:root[data-theme] .log-upload code { min-width:0; font-size:12px; color:var(--text-main,inherit); white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
+@media(max-width:600px) { :root[data-theme] .log-drawer .logs .log-upload { display:block; } :root[data-theme] .log-upload code { display:block; } }
+@media(forced-colors:active) { :root[data-theme] .dot.sync-active { background:Highlight; border-color:CanvasText; box-shadow:none; } :root[data-theme] .log-upload strong { color:CanvasText; } }

@@ -329,7 +329,7 @@ pub struct SyncFailure {
 }
 #[derive(Clone, Serialize)]
 pub struct Status {
-    #[serde(skip)]
+    #[serde(rename="syncPhase",serialize_with="serialize_sync_phase")]
     activity: crate::taskbar_status::Activity,
     #[serde(skip)]
     stop_summary: StopSummary,
@@ -348,6 +348,10 @@ pub struct Status {
     pub stop_complete: bool,
     #[serde(rename = "deletionRescanRequired")]
     pub deletion_rescan_required: bool,
+}
+fn serialize_sync_phase<S:serde::Serializer>(activity:&crate::taskbar_status::Activity,serializer:S)->Result<S::Ok,S::Error>{
+    use crate::taskbar_status::NativeSyncState::*;
+    serializer.serialize_str(match activity.phase(){Scanning=>"scanning",Working=>"working",CaughtUp=>"caught_up",DeletionRescanRequired=>"deletion_rescan_required",Error=>"error",Stopping=>"stopping",Stopped=>"stopped"})
 }
 impl Status {
     fn new() -> Self {
@@ -1370,6 +1374,7 @@ fn worker(
     let mut connection = Some(initial);
     let mut inventory: HashMap<PathBuf, DeletionBasis<sftp::RemoteStamp>> = HashMap::new();
     let mut listing_hints: HashMap<PathBuf,ListingHint> = HashMap::new();
+    let mut absent_candidates:HashMap<PathBuf,crate::listing_absence::ListedAbsence>=HashMap::new();
     let mut listing_session=1u64;
     let mut file_authority_bytes = 0usize;
     let mut retained_directories = sftp::RetainedDirectories::default();
@@ -1384,6 +1389,17 @@ fn worker(
             // original readable root still exists. Every removal rechecks absence.
             if local_root_identity(&root)? != root_identity { return Err("Local root changed during mirror inventory; deletion refused".into()); }
             for entry in std::fs::read_dir(&root).map_err(|_| "Local root unreadable after mirror inventory")? { entry.map_err(|_| "Local root entry unreadable after mirror inventory")?; }
+            // Only the initial, locally eligible queue can acquire absence hints.
+            // Complete-listing coverage proves absence; missing map entries alone
+            // do not. These tokens contain no stamp or deletion authority.
+            let mut candidate_bytes=0usize;
+            for path in queue.keys().filter(|p|!directories.contains_key(*p)) {
+                if !rules.excludes(path,false)? {
+                    if let Some(candidate)=snapshot.coverage.candidate(path,listing_session){
+                        if crate::listing_absence::reserve_candidate(&mut candidate_bytes,path.as_os_str().len()){absent_candidates.insert(path.clone(),candidate);}
+                    }
+                }
+            }
             for (path, stamp) in snapshot.files {
                 listing_hints.insert(path.clone(),ListingHint::from_listing(stamp.size,Some(stamp.mtime),listing_session));
                 remember_file(&mut inventory,path.clone(),stamp.clone(),&mut file_authority_bytes)?;
@@ -1451,6 +1467,13 @@ fn worker(
                         continue;
                     }
                     for path in e.paths {
+                        if let Ok(relative)=path.strip_prefix(&root) {
+                            // Reading a directory can report Modify(Any) on
+                            // Windows. Remote absence is unaffected by local
+                            // directory metadata; fresh local guards still run.
+                            let structural=matches!(e.kind,notify::EventKind::Create(_)|notify::EventKind::Remove(_)|notify::EventKind::Modify(notify::event::ModifyKind::Name(_)));
+                            crate::listing_absence::invalidate_path(&mut absent_candidates,relative,directories.contains_key(relative),structural);
+                        }
                         let result = match std::fs::symlink_metadata(&path) {
                             Ok(meta) if reparse(&meta) => Ok(()),
                             Ok(meta) if meta.is_dir() => {
@@ -1561,6 +1584,10 @@ fn worker(
                 }
             }
         }
+        let absent_candidate=ready.as_ref().filter(|p|!directories.contains_key(*p)
+            && queue.get(*p).is_some_and(|v|!v.force_upload)
+            && connection.as_ref().is_some_and(|c|!c.needs_recycle()))
+            .and_then(|p|absent_candidates.remove(p)).filter(|c|c.matches(listing_session));
         // Hints classify once and never publish a deletion permit. The separate
         // complete-inventory baseline is checked freshly at the actual mutation.
         if let Some(path)=ready.as_ref().filter(|p|!directories.contains_key(*p)
@@ -1621,10 +1648,10 @@ fn worker(
         // Compare at most four independent files on the existing authenticated
         // session. Publish no authority/skip result until the entire batch has
         // succeeded. Upload/delete paths retain their fresh mutation guards.
-        if ready.as_ref().is_some_and(|p|!directories.contains_key(p)&&queue.get(p).is_some_and(|v|!v.force_upload&&!v.batch_checked))
+        if absent_candidate.is_none() && ready.as_ref().is_some_and(|p|!directories.contains_key(p)&&queue.get(p).is_some_and(|v|!v.force_upload&&!v.batch_checked))
             && connection.as_ref().is_some_and(|c|!c.needs_recycle()) {
             let mut candidates:Vec<_>=queue.iter().filter(|(p,v)|!directories.contains_key(*p)
-                && !v.force_upload && !v.batch_checked && v.last.elapsed()>=Duration::from_millis(500)
+                && !absent_candidates.contains_key(*p) && !v.force_upload && !v.batch_checked && v.last.elapsed()>=Duration::from_millis(500)
                 && !rules.excludes(p,false).unwrap_or(true) && (options.recursive||p.components().count()==1))
                 .map(|(p,_)|p.clone()).take(4).collect();
             candidates.sort_by_key(|p|(p.components().count(),p.clone()));
@@ -1742,6 +1769,7 @@ fn worker(
             }
             let start = Instant::now();
             if connection.as_ref().is_some_and(|c| c.needs_recycle()) {
+                absent_candidates.clear();
                 listing_hints.clear();
                 listing_session=listing_session.saturating_add(1);
                 for basis in inventory.values_mut(){basis.suspend();}
@@ -1841,7 +1869,7 @@ fn worker(
                     &stop,
                 )?;
                 let connection = connection.as_mut().unwrap();
-                if action == LocalAction::Upload && !item.force_upload {
+                if action == LocalAction::Upload && !item.force_upload && !absent_candidate.as_ref().is_some_and(|c|c.matches(listing_session)) {
                     match sftp::compare_file(connection,&root,&path,&remote,&stop)? {
                         sftp::FileComparison::SourceChanged => { source_changed=true; return Ok((0,None,LocalAction::Skip,false)); },
                         sftp::FileComparison::Unchanged(_stamp) => return Ok((0,None,LocalAction::Skip,false)),
@@ -1909,10 +1937,9 @@ fn worker(
                             let mut status = state.lock().unwrap();
                             if changed { status.committed_remote_change(&remote, &path); }
                             status.pending = queue.len();
-                            status.log(&format!(
-                                "Verified local/remote directory {}",
-                                path.display()
-                            ));
+                            let message=if changed {format!("Created remote directory {}",path.display())}
+                                else {format!("Verified local/remote directory {}",path.display())};
+                            status.log(&message);
                         } else { state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display())); }
                         continue;
                     }
@@ -3622,6 +3649,13 @@ mod startup_pipeline_tests;
 
 #[cfg(test)] mod taskbar_integration_tests {
  use super::*; use crate::taskbar_status::{TaskbarState as T,NativeSyncState as N};
+ #[test] fn phase_is_display_only_and_internal_activity_stays_private(){
+  let mut s=Status::new();
+  let phase=|s:&Status,expected:&str|{let json=serde_json::to_value(s).unwrap();assert_eq!(json["syncPhase"],expected);assert!(json.get("activity").is_none());assert!(json.get("hard_error").is_none());};
+  phase(&s,"scanning");s.activity.mark_working();phase(&s,"working");s.activity.scan_finished();s.activity.settle(0,true,false,false,false);phase(&s,"caught_up");
+  s.activity.set_deletion_rescan_required(true);s.activity.settle(0,true,false,false,false);phase(&s,"deletion_rescan_required");
+  s.activity.failure(true);phase(&s,"error");s.activity.settle(0,true,false,true,false);phase(&s,"stopping");s.activity.stopped();phase(&s,"stopped");
+ }
  #[test] fn native_activity_is_not_frontend_or_settings_data(){let status=Status::new();assert_eq!(status.activity.phase(),N::Scanning);let json=serde_json::to_value(status).unwrap();assert!(json.get("activity").is_none());}
  #[test] fn prepared_start_failure_and_cancel_are_truthful(){let e=Engine::default();assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.prepare("one".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.record_start_failure("one");e.discard_prepared_start("one");assert_eq!(e.taskbar_state().unwrap(),T::Error);e.prepare("two".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.stop("two").unwrap();e.record_start_failure("two");e.discard_prepared_start("two");assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.record_start_failure("unknown");assert_eq!(e.taskbar_state().unwrap(),T::Idle);}
  #[test] fn terminal_failure_never_automatically_recovers(){let mut s=Status::new();s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Scanning);s.activity.scan_finished();s.failure("transient",false);s.activity.settle(1,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);assert_eq!(s.error_count,1);s.activity.settle(0,true,false,true,false);assert_eq!(s.activity.phase(),N::Stopping);}
@@ -3634,3 +3668,7 @@ mod startup_pipeline_tests;
 #[cfg(test)]
 #[path = "startup_measure_fixture.rs"]
 mod startup_measure;
+
+#[cfg(test)]
+#[path = "empty_remote_tests.rs"]
+mod empty_remote_tests;

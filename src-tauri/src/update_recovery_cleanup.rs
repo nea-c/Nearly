@@ -123,7 +123,7 @@ fn admit(root: &PinnedRoot, record: &RecoveryTransaction, key: &crate::update_pa
     let (uninstaller_pin, uninstaller) = FileProof::open(&root.path().join(LIVE_NAMES[1]), false)?;
     if running.sha256 != package.payload_sha256() || record.files[0].candidate.as_ref() != Some(&running)
         || record.files[1].candidate.as_ref() != Some(&uninstaller) { return Err(Error::Unsafe); }
-    validate_static_registration(root, registry)?;
+    validate_static_registration_for_version(root, registry, version)?;
     if registry.snapshot()? != record.new_values { return Err(Error::Unsafe); }
     // setup read pin closes here. Live pins remain through the file/journal run.
     Ok((running_pin, uninstaller_pin))

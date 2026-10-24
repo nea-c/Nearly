@@ -1,3 +1,4 @@
+import {displayVersion} from '../../scripts/version.mjs';
 import {createPublicKey,verify,createHash} from 'node:crypto';
 const fail=()=>{throw Error('Invalid updater signature proof');};
 function decode(text){if(typeof text!=='string'||!text||!/^[A-Za-z0-9+/]*={0,2}$/.test(text))fail();const bytes=Buffer.from(text,'base64');if(bytes.toString('base64')!==text)fail();return bytes;}
@@ -14,7 +15,7 @@ export function verifyUpdaterProof(installer,signature,publicRaw,expected) {
   const algorithm=record.subarray(0,2).toString();
   const message=algorithm==='ED'?createHash('blake2b512').update(installer).digest():algorithm==='Ed'?installer:null;
   if(!message||!verify(null,message,key,record.subarray(10))||!verify(null,Buffer.concat([record.subarray(10),Buffer.from(comment)]),key,global))fail();
-  if(!/^[0-9]+\.[0-9]+\.0$/.test(expected?.version)||!/^Nearly_r[0-9]+\.[0-9]+_x64-setup\.exe$/.test(expected?.file)||!/^[a-f0-9]{64}$/.test(expected?.payloadSha256)||comment!==`version:${expected.version}\tfile:${expected.file}\tpayload-sha256:${expected.payloadSha256}\tupdater-protocol:3`)fail();
+  if(!expected || expected.file!==`Nearly_${displayVersion(expected.version)}_x64-setup.exe`||!/^[a-f0-9]{64}$/.test(expected?.payloadSha256)||comment!==`version:${expected.version}\tfile:${expected.file}\tpayload-sha256:${expected.payloadSha256}\tupdater-protocol:3`)fail();
   const offset=installer.readUInt32LE(0x3c);
   if(installer.readUInt16LE(0)!==0x5a4d||offset<64||offset+6>installer.length||installer.readUInt32LE(offset)!==0x4550||installer.readUInt16LE(offset+4)!==0x14c)fail();
   return true;

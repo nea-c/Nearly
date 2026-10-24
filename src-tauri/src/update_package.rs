@@ -364,6 +364,16 @@ mod tests {
         (stage,candidate,key)
     }
     #[test]
+    fn prerelease_incoming_target_is_rejected_even_when_flag_is_false_but_formal_updates_pre_source() {
+        for flag in [false,true] {
+            let mut meta=metadata();meta["prerelease"]=flag.into();
+            let body=serde_json::to_string(&meta).unwrap().replace("r0.3","r3.7-pre.1");
+            assert!(ReleaseCandidate::from_github_metadata(body.as_bytes(),"3.6.0",Architecture::X64).is_err());
+        }
+        let body=serde_json::to_string(&metadata()).unwrap().replace("r0.3","r3.7");
+        assert_eq!(ReleaseCandidate::from_github_metadata(body.as_bytes(),"3.7.0-pre.1",Architecture::X64).unwrap().unwrap().version(),"3.7.0");
+    }
+    #[test]
     fn public_tag_binds_internal_asset_version_and_orders_numerically() {
         for (tag,version,current) in [("r1.0","1.0.0","0.2.0"),("r1.10","1.10.0","1.9.0"),("r2.0","2.0.0","1.10.0")] {
             let body=serde_json::to_string(&metadata()).unwrap().replace("r0.3",tag).replace("0.3.0",version);

@@ -1,4 +1,5 @@
 import { deletionRescanLabels } from "./sync-rescan.js";
+import {syncLogMarkup,syncIndicatorClass,syncActivityLabel} from './sync-presentation.js';
 import { installInputPolicy } from "./input-policy.js";
 import { popupBarrier } from './popup-barrier.js';
 import { bindFileDrop } from "./file-drop.js";
@@ -2863,7 +2864,7 @@ function resumeSettingsMarkup(entry:RetainedSync){
   return html`<section class="resume-settings"><p>${tr("前回の設定を使います。")}</p><div class="sync-option-flags"><label><input type="checkbox" id="delete-removed" name="deleteRemoved" disabled ${entry.deleteRemoved?"checked":""}>ファイルを削除する</label><label><input type="checkbox" id="recursive-sync" name="recursive" disabled ${entry.recursive?"checked":""}>サブディレクトリを更新する</label></div>${entry.deleteRemoved?html`<p class="warning">${tr("前回と同じ削除設定を使います。開始時の比較と変更監視で、同期対象内のローカルにないリモート項目を削除します。元に戻せない可能性があります。")}</p>`:""}<details class="resume-exclusions"><summary>除外ルール</summary><pre>${esc(entry.exclusionRules||tr("なし"))}</pre></details></section>`;
 }
 function statusbar(t?: SyncTab) {
-  const state = t?.status === 'running' && t.deletionRescanRequired ? deletionRescanLabels().title : t
+  const state = t?.status === 'running' && t.deletionRescanRequired ? deletionRescanLabels().title : syncActivityLabel(t,getLanguage()) ?? (t
     ? {
         running: tr("監視中"),
         failed: tr("失敗・再試行が必要"),
@@ -2874,12 +2875,12 @@ function statusbar(t?: SyncTab) {
       ? tr("接続中…")
       : workspace().connection
         ? tr("接続済み")
-        : tr("未接続");
+        : tr("未接続"));
   const errors = t?.errorCount ?? (t?.status === "failed" ? 1 : 0);
   return html`<footer class="statusbar">
     <div class="status-summary">
       <span
-        class="dot ${!t || t.status === "stopped" ? "off" : t.status === "failed" ? "error" : ""}"
+        class="dot ${syncIndicatorClass(t)}" aria-hidden="true"
       ></span
       ><span id="sync-state">${state}</span
       ><span id="pending-count">待機 ${t?.pending ?? t?.queue.size ?? 0}</span
@@ -2946,7 +2947,7 @@ function paintPolledStatus() {
     const dot = document.querySelector<HTMLElement>(
       `[data-tab="${CSS.escape(workspace.id)}"] .dot`,
     );
-    const className = `dot ${!job || job.status === "stopped" ? "off" : job.status === "failed" ? "error" : ""}`;
+    const className = `dot ${syncIndicatorClass(job)}`;
     if (dot && dot.className !== className) dot.className = className;
   }
   const retry = document.querySelector<HTMLButtonElement>("#retry");
@@ -2959,7 +2960,7 @@ function paintPolledStatus() {
       (t?.logs ?? [])
         .slice(-100)
         .reverse()
-        .map((line) => html`<li>${esc(tError(line))}</li>`)
+        .map((line) => syncLogMarkup(line,getLanguage(),tError(line)))
         .join("") || html`<li>まだログはありません</li>`;
     if (logs.innerHTML !== contents) {
       const top = logs.scrollTop;
@@ -2998,7 +2999,7 @@ function logDrawer(t?: SyncTab) {
         (t?.logs ?? [])
           .slice(-100)
           .reverse()
-          .map((l) => html`<li>${esc(tError(l))}</li>`)
+          .map((l) => syncLogMarkup(l,getLanguage(),tError(l)))
           .join("") || html`<li>まだログはありません</li>`
       }
     </ul>
