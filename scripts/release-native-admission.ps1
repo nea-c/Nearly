@@ -7,7 +7,7 @@ function Assert-ReleaseNativeContext {
     if($Context[$item[0]] -cne $item[1]) { throw 'Exact hosted release environment required' }
   }
   $sha=$Context.GITHUB_SHA
-  if($sha -cnotmatch '\A[a-f0-9]{40}\z' -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or $Context.RELEASE_COMMIT -cne $sha -or $Context.RELEASE_MODE -cnotin @('validate','verify-signature','release') -or $Context.RELEASE_TAG -cnotmatch '\Ar[1-9][0-9]*\.[0-9]+\z' -or $Context.GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $Context.GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z') { throw 'Exact hosted release identity required' }
+  if($sha -cnotmatch '\A[a-f0-9]{40}\z' -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or $Context.RELEASE_COMMIT -cne $sha -or $Context.RELEASE_MODE -cnotin @('validate','verify-signature','release') -or $Context.RELEASE_TAG -cnotmatch '\Ar[1-9][0-9]*\.[0-9]+(?:-pre\.[1-9][0-9]*)?\z' -or $Context.GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]*\z' -or $Context.GITHUB_RUN_ATTEMPT -cnotmatch '\A[1-9][0-9]*\z') { throw 'Exact hosted release identity required' }
   if($Context.RELEASE_MODE -ceq 'validate') { if($Context.RELEASE_CONFIRM) { throw 'Validation confirmation must be empty' } }
   elseif($Context.RELEASE_CONFIRM -cne "$($Context.RELEASE_MODE) $($Context.RELEASE_TAG) $sha") { throw 'Exact release confirmation required' }
 }
