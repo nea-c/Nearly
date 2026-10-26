@@ -34,24 +34,29 @@ pub fn apply(window: &tauri::WebviewWindow, state: TaskbarState) -> tauri::Resul
         TaskbarState::Error => (ProgressBarStatus::Error, Some(100)),
     };
     // Clear stale completion before applying the new progress state.
-    window.set_overlay_icon(overlay(state))?;
+    // Shell overlays have an OS-controlled position. Full composites preserve
+    // the approved top-right placement without adding a second badge.
+    window.set_overlay_icon(None)?;
+    let index=match state {TaskbarState::Idle=>0,TaskbarState::Working=>1,TaskbarState::CaughtUp=>2,TaskbarState::Error=>3,TaskbarState::Paused=>4};
+    crate::status_icon_native::apply(windows::Win32::Foundation::HWND(window.hwnd()?.0),index,[BASE,SYNC,DONE,ERROR,PAUSED]).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
     window.set_progress_bar(ProgressBarState { status: Some(status), progress })
 }
 
-// Decode the supplied PNGs at compile time. Each transition borrows fixed RGBA
+// Decode full composites at compile time. Each transition borrows fixed RGBA
 // pixels; no runtime image decoder or growing artwork cache is needed.
+const BASE: Image<'static> = tauri::include_image!("./icons/icon-source.png");
 const SYNC: Image<'static> = tauri::include_image!("./icons/badges/sync.png");
 const DONE: Image<'static> = tauri::include_image!("./icons/badges/done.png");
 const ERROR: Image<'static> = tauri::include_image!("./icons/badges/error.png");
 const PAUSED: Image<'static> = tauri::include_image!("./icons/badges/paused.png");
 
-fn overlay(state: TaskbarState) -> Option<Image<'static>> {
+fn artwork(state: TaskbarState) -> Image<'static> {
     match state {
-        TaskbarState::Idle => None,
-        TaskbarState::Working => Some(SYNC),
-        TaskbarState::CaughtUp => Some(DONE),
-        TaskbarState::Error => Some(ERROR),
-        TaskbarState::Paused => Some(PAUSED),
+        TaskbarState::Idle => BASE,
+        TaskbarState::Working => SYNC,
+        TaskbarState::CaughtUp => DONE,
+        TaskbarState::Error => ERROR,
+        TaskbarState::Paused => PAUSED,
     }
 }
 #[cfg(test)]
@@ -61,25 +66,25 @@ mod artwork_tests {
     #[test]
     fn supplied_badge_pixels_are_preserved_for_each_visible_state() {
         for (state, expected) in [
-            (TaskbarState::Working, "4df5b0ee82021db9e8e0ce45015f2d2ce2153e954ee893c7b1c150a426732038"),
-            (TaskbarState::CaughtUp, "f0d89cdfa24d9b45866d9f2a5208fb8eb2ed0982dd4f8efd2e0bead0f775ec97"),
-            (TaskbarState::Error, "d6cc61120bfceebaa83b5cce2c3f13c91cf5267adc4e5c9c73d8917ec900d7f9"),
-            (TaskbarState::Paused, "857fcc00b77853979f40d0b42aedd44c1e0a3afdcbbf93ea5196cc2a2bac5657"),
+            (TaskbarState::Working, "51594a02ee74c330d1e7b686d137cabb66afaaa272d88ae551bb7065cf5da8ba"),
+            (TaskbarState::CaughtUp, "dc00b71650a126936549f87ee9975c2cb7905639dbcc7766d6a35f011a8b668c"),
+            (TaskbarState::Error, "3bbc99411c59c9ece45317af04f83aa47405fde0e397a302bec3a73cb063b347"),
+            (TaskbarState::Paused, "e1d61dc21d222a0a5a6ea2cf72ccdb54ebe8742cfe7e8168e45238e7ff9f2655"),
         ] {
-            let image=overlay(state).expect("live state has its supplied artwork");
-            assert_eq!((image.width(),image.height()),(16,16));
+            let image=artwork(state);
+            assert_eq!((image.width(),image.height()),(32,32));
             assert_eq!(Sha256::digest(image.rgba()).iter().map(|b|format!("{b:02x}")).collect::<String>(),expected);
             assert!(image.rgba().chunks_exact(4).any(|pixel|pixel[3]==0));
             assert!(image.rgba().chunks_exact(4).any(|pixel|pixel[3]>0));
         }
-        assert!(overlay(TaskbarState::Idle).is_none());
+        assert_eq!(artwork(TaskbarState::Idle).rgba(), BASE.rgba());
     }
     #[test]
     fn repeated_image_selection_borrows_fixed_pixels_without_growing_a_cache() {
         for state in [TaskbarState::Working,TaskbarState::CaughtUp,TaskbarState::Error,TaskbarState::Paused] {
-            let first=overlay(state).unwrap();
+            let first=artwork(state);
             for _ in 0..4096 {
-                let next=overlay(state).unwrap();
+                let next=artwork(state);
                 assert_eq!(first.rgba().as_ptr(),next.rgba().as_ptr(),"embedded pixels must be shared rather than decoded or allocated per transition");
             }
         }

@@ -191,6 +191,7 @@ export interface Workspace {
   starting?: boolean;
   connection?: Readonly<Profile>;
   connecting?: boolean;
+  connectionFailed?: boolean;
   logsOpen: boolean;
 }
 export function remotePath(p: string): string {

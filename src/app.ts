@@ -1,3 +1,5 @@
+import {ErrorAttention} from './error-attention.js';
+import {workspaceIndicator,statusIcon} from './status-indicator.js';
 import { deletionRescanLabels } from "./sync-rescan.js";
 import {syncLogMarkup,syncIndicatorClass,syncActivityLabel} from './sync-presentation.js';
 import { installInputPolicy } from "./input-policy.js";
@@ -19,6 +21,8 @@ import { transferText } from "./window-transfer-ui.js";
 import { initializeNativeTabDrag, publishTabStrip, reorderTabNodes, detachedPreviewReady } from "./native-tab-drag.js";
 import { applyPersistentSettings } from "./shared-settings.js";
 import { registerWorkspace, type WindowRegistration, type WindowTransferRecord, type TabDragStatus } from "./api.js";
+const errorAttention=new ErrorAttention(active=>native?invoke('request_error_attention',{active}):Promise.resolve());
+window.addEventListener('focus',()=>errorAttention.focus());
 const rawError = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 import {
@@ -2636,7 +2640,7 @@ function render() {
             : html`<div id="connection-slot"></div>`
         }${notice ? html`<div class="notice" role="alert">${esc(localizedNotice(notice))}<button id="dismiss" aria-label="通知を閉じる">×</button></div>` : ""}
       </main>
-      ${p ? statusbar(t) : html`<footer class="statusbar connection-status">${w.connecting ? tr("接続中…") : tr("接続先を選択してください")}</footer>`}`;
+      ${statusbar(t)}`;
   if (!p) {
     let view = connectionViews.get(w.id);
     if (!view) {
@@ -2864,6 +2868,7 @@ function resumeSettingsMarkup(entry:RetainedSync){
   return html`<section class="resume-settings"><p>${tr("前回の設定を使います。")}</p><div class="sync-option-flags"><label><input type="checkbox" id="delete-removed" name="deleteRemoved" disabled ${entry.deleteRemoved?"checked":""}>ファイルを削除する</label><label><input type="checkbox" id="recursive-sync" name="recursive" disabled ${entry.recursive?"checked":""}>サブディレクトリを更新する</label></div>${entry.deleteRemoved?html`<p class="warning">${tr("前回と同じ削除設定を使います。開始時の比較と変更監視で、同期対象内のローカルにないリモート項目を削除します。元に戻せない可能性があります。")}</p>`:""}<details class="resume-exclusions"><summary>除外ルール</summary><pre>${esc(entry.exclusionRules||tr("なし"))}</pre></details></section>`;
 }
 function statusbar(t?: SyncTab) {
+  const indicator=workspaceIndicator(workspace(),t,getLanguage());
   const state = t?.status === 'running' && t.deletionRescanRequired ? deletionRescanLabels().title : syncActivityLabel(t,getLanguage()) ?? (t
     ? {
         running: tr("監視中"),
@@ -2871,18 +2876,12 @@ function statusbar(t?: SyncTab) {
         stopped: tr("停止済み"),
         stopping: tr("停止中"),
       }[t.status]
-    : workspace().connecting
-      ? tr("接続中…")
-      : workspace().connection
-        ? tr("接続済み")
-        : tr("未接続"));
+    : indicator.label);
+  if(!workspace().connection&&!t)return html`<footer class="statusbar connection-status"><div class="status-summary">${statusIcon(indicator,syncIndicatorClass(t))}<span id="sync-state">${state}</span></div></footer>`;
   const errors = t?.errorCount ?? (t?.status === "failed" ? 1 : 0);
   return html`<footer class="statusbar">
     <div class="status-summary">
-      <span
-        class="dot ${syncIndicatorClass(t)}" aria-hidden="true"
-      ></span
-      ><span id="sync-state">${state}</span
+      ${statusIcon(indicator,syncIndicatorClass(t))}<span id="sync-state">${state}</span
       ><span id="pending-count">待機 ${t?.pending ?? t?.queue.size ?? 0}</span
       ><button
         id="error-count"
@@ -2925,12 +2924,13 @@ function paintPolledStatus() {
     if (label !== null && to.getAttribute("aria-label") !== label)
       to.setAttribute("aria-label", label);
   };
+  const currentIcon=document.querySelector(".status-summary .dot"),nextIcon=template.content.querySelector(".status-summary .dot");
+  if(currentIcon&&nextIcon&&currentIcon.outerHTML!==nextIcon.outerHTML)currentIcon.replaceWith(nextIcon);
   for (const selector of [
     "#sync-state",
     "#pending-count",
     "#error-count",
     "#sent-count",
-    ".status-summary .dot",
   ])
     copy(selector);
   document
@@ -2947,8 +2947,18 @@ function paintPolledStatus() {
     const dot = document.querySelector<HTMLElement>(
       `[data-tab="${CSS.escape(workspace.id)}"] .dot`,
     );
-    const className = `dot ${syncIndicatorClass(job)}`;
-    if (dot && dot.className !== className) dot.className = className;
+    const indicator=workspaceIndicator(workspace,job,getLanguage());
+    const markup=statusIcon(indicator,syncIndicatorClass(job));
+    const iconClass=`dot status-icon state-${indicator.kind} ${syncIndicatorClass(job)}`;
+    if(dot&&(dot.dataset.state!==indicator.kind||dot.className!==iconClass))dot.outerHTML=markup;
+    const button=document.querySelector<HTMLElement>(`[data-tab="${CSS.escape(workspace.id)}"]`);
+    if(button){
+      const p=workspace.connection??store.ownRetainedForWorkspace?.(workspace.id)?.profile;
+      const name=(p?.name||tr("新しいタブ"))+(job?' / '+(job.remote.split('/').pop()||'/'):'');
+      const endpoint=p?`${p.user}@${p.host}:${p.port}`:tr("未接続");
+      button.setAttribute('aria-label',name+' — '+indicator.label);
+      button.title=name+' — '+endpoint+' — '+indicator.label;
+    }
   }
   const retry = document.querySelector<HTMLButtonElement>("#retry");
   if (retry) retry.disabled = t?.status !== "failed" || retrying.has(t.id);
@@ -3707,6 +3717,7 @@ function renderDialog() {
     $("#cancel")!.disabled = true;
     const startingWorkspace = workspace();
     let retainedId=d.retained?.id;
+    let nativeStartAttempted=false;
     let cancelled=false;
     startingWorkspace.starting = true;
     updatePrimaryState();
@@ -3758,6 +3769,7 @@ function renderDialog() {
             $(".form-error")!.textContent = tError(error);
           }
         };
+        nativeStartAttempted=true;
         await invoke("start_sync", {
           id,
           profile: d.p,
@@ -3803,6 +3815,7 @@ function renderDialog() {
       dialog = null;
       render();
     } catch (e) {
+      if(nativeStartAttempted&&!cancelled)errorAttention.error();
       if(retainedId){startingRetained.delete(retainedId);if(!cancelled)retainedFailures.set(retainedId,rawError(e));}
       startingWorkspace.starting = false;
       paintRetainedSyncs();
@@ -3906,6 +3919,7 @@ setInterval(async () => {
                   directoryCache(w, "remote").invalidate();
             }
             consumeRemoteChanges(t,status.remoteChanges);
+            errorAttention.sync(t,status);
             Object.assign(t, status);
           }
         } catch (e) {
@@ -3914,7 +3928,11 @@ setInterval(async () => {
             store.tabs.includes(t)
           ) {
             if(t.status === "stopping" && rawError(e) === "Job not found")t.status="stopped";
-            else if(await stopAfterStatusFailure(t,e,()=>invoke("stop_sync",{id:t.id})))statusFailureStopped.add(t.id);
+            else {const previous={status:t.status,syncPhase:t.syncPhase,errorCount:t.errorCount};
+              const stopping=stopAfterStatusFailure(t,e,()=>invoke("stop_sync",{id:t.id}));
+              errorAttention.sync(previous,t);
+              if(await stopping)statusFailureStopped.add(t.id);
+            }
           }
         }
         continue;
@@ -4274,6 +4292,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       cancelHostKeyApproval();
       if (w.connecting || connectionMutationPending) return;
       clearKeyError();
+      if(d.nodeId!==id)w.connectionFailed=false;
       d.nodeId = id;
       const node = store.connectionTree.nodes.find((n) => n.id === id);
       d.profileId = node?.kind === "profile" ? node.profileId : "";
@@ -4281,6 +4300,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       if (active === w.id) selected = d.profileId;
       if (store.selectSavedProfile(d.profileId)) void persist().catch(message);
       renderConnection(root, d);
+      paintPolledStatus();
       root
         .querySelector<HTMLButtonElement>(
           `[data-connection-select="${CSS.escape(id)}"]`,
@@ -4300,14 +4320,17 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
     },
     mutate: mutateConnections,
     refresh: (id) => {
+      w.connectionFailed=false;
       if (id !== undefined) {
         d.nodeId = id;
         const node = store.connectionTree.nodes.find((n) => n.id === id);
         d.profileId = node?.kind === "profile" ? node.profileId : "";
         w.profileId = d.profileId;
       }
-      if (!w.connection && !w.connecting && store.workspaces.includes(w))
+      if (!w.connection && !w.connecting && store.workspaces.includes(w)){
         renderConnection(root, d);
+        paintPolledStatus();
+      }
     },
     busy: () =>
       w.connecting ||
@@ -4374,7 +4397,9 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       });
       return;
     }
+    w.connectionFailed=false;
     w.connecting = true;
+    paintPolledStatus();
     let cancelled = false;
     let passphrase = takeSecret(form);
     root
@@ -4451,6 +4476,9 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
         (d.nodeId ?? d.profileId) === snapshot.id &&
         sameConnectionProfile(store.profiles.find((p) => p.id === snapshot.id), snapshot);
       if (!ownsForm) return;
+      if(!cancelled)errorAttention.error();
+      w.connectionFailed=!cancelled;
+      paintPolledStatus();
       const failure = connectionError(error);
       const inline = !cancelled && failure.kind === "keyUnlockFailed" && !!keyErrorNode;
       if (inline) {

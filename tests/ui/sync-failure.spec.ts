@@ -63,8 +63,8 @@ for(const theme of ['light','dark'])for(const language of ['ja','en'] as const){
   expect(await success.locator('code').evaluate(e=>getComputedStyle(e).color)).not.toBe(labelStyle.color);
   expect(await success.locator('code').evaluate(e=>getComputedStyle(e).userSelect)).toBe('text');
   await testInfo.attach('success-label-contrast',{body:JSON.stringify({theme,language,...labelStyle}),contentType:'application/json'});
-  const color=await page.locator('.status-summary .dot').evaluate(e=>getComputedStyle(e).backgroundColor);
-  expect(color).toBe(theme==='dark'?'rgb(0, 255, 76)':'rgb(0, 230, 63)');
+  const color=await page.locator('.status-summary .dot').evaluate(e=>getComputedStyle(e).color);
+  expect(color).toBe(theme==='dark'?'rgb(85, 214, 250)':'rgb(0, 124, 170)');
   await page.screenshot({path:testInfo.outputPath(`sync-${theme}-${language}.png`)});
   await page.evaluate(()=>{Object.assign((window as any).syncFailureFixture.status,{syncPhase:'working',pending:2});});
   await expect(page.locator('#sync-state')).toHaveText(language==='ja'?'同期中':'Syncing');

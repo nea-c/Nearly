@@ -11,8 +11,11 @@ mod initial_scan;
 mod sync_runtime_tests;
 mod local_watch;
 mod taskbar_status;
+mod error_attention;
 #[cfg(windows)]
 mod taskbar_adapter;
+#[cfg(windows)]
+mod status_icon_native;
 mod exclusion;
 mod explorer_preferences;
 mod side_bookmarks;
@@ -1661,6 +1664,13 @@ impl Drop for NativeOperation {fn drop(&mut self){if let Ok(mut r)=self.registry
     #[test]fn failed_native_destroy_and_failed_restore_report_both_and_leave_window_usable(){let(state,fixture,ids)=close_fixture();let path=fixture.path();let error=destroy_with_retained_cleanup(&state,"main",Some(&path),&ids,||{let backup=path.with_extension("backup.json");std::fs::remove_file(&backup).unwrap();std::fs::create_dir(&backup).unwrap();Err("Injected destroy failure".into())},|_|{}).unwrap_err();assert!(error.contains("Injected destroy failure"));assert!(error.contains("context could not be restored"));assert!(error.contains("This window remains open"));assert!(ensure_settings_window_open(&state,"main").is_ok());assert!(state.ownership.lock().unwrap().owner("main","own-tab").is_ok());assert!(unified_settings::Document::read(&path).unwrap().settings().retained_syncs.is_empty());}
 }
 #[tauri::command]
+fn request_error_attention(window:tauri::WebviewWindow,state:tauri::State<AppState>,active:bool)->Result<(),String>{
+    // The target is the invoking window, never a renderer-supplied label.
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    let focused=if active{window.is_focused().map_err(|e|e.to_string())?}else{false};
+    error_attention::apply(active,focused,|request|window.request_user_attention(if request{Some(tauri::UserAttentionType::Critical)}else{None})).map_err(|e|e.to_string())
+}
+#[tauri::command]
 fn register_window(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<window_ownership::Bootstrap,String>{
     let mut bootstrap=state.ownership.lock().map_err(|_|"Ownership lock failed")?.bootstrap(window.label())?;
     for id in &bootstrap.owned_workspace_ids{bootstrap.workspaces.push(serde_json::json!({"id":id,"connection":state.sessions.connected_profile(id)?}));}
@@ -2080,7 +2090,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            register_window, register_workspace, unregister_workspace, workspace_transfer_ready, workspace_drag_preview_ready, close_empty_window, check_startup_update, startup_update_status, prepare_startup_update, cancel_startup_update, dismiss_startup_update, ack_startup_update, install_startup_update,
+            request_error_attention, register_window, register_workspace, unregister_workspace, workspace_transfer_ready, workspace_drag_preview_ready, close_empty_window, check_startup_update, startup_update_status, prepare_startup_update, cancel_startup_update, dismiss_startup_update, ack_startup_update, install_startup_update,
             tab_drag::register_tab_strip, tab_drag::begin_tab_drag, tab_drag::cancel_tab_drag, tab_drag::tab_drag_status,
             workspace_transfer_status, abort_workspace_transfer, window_taskbar_status,
             load_settings, update_restart_status, ack_update_restart_ready,
@@ -2125,6 +2135,10 @@ fn main() {
             }
         })
         .on_window_event(move |window, event| {
+            if matches!(event,tauri::WindowEvent::Focused(true)) {
+                // Attention acknowledgement never clears errors or overlay badges.
+                let _=window.request_user_attention(None);
+            }
             // A window-content WebView is surfaced as a synthesized window event.
             if let tauri::WindowEvent::DragDrop(event) = event {
                 if let Some(payload) = native_download_drag::tagged_drop(event) {

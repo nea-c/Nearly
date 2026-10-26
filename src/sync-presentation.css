@@ -10,3 +10,15 @@
 :root[data-theme] .log-upload code { min-width:0; font-size:12px; color:var(--text-main,inherit); white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
 @media(max-width:600px) { :root[data-theme] .log-drawer .logs .log-upload { display:block; } :root[data-theme] .log-upload code { display:block; } }
 @media(forced-colors:active) { :root[data-theme] .dot.sync-active { background:Highlight; border-color:CanvasText; box-shadow:none; } :root[data-theme] .log-upload strong { color:CanvasText; } }
+/* Fixed footprint: changing observed state never moves adjacent text. */
+:root[data-theme] .dot.status-icon { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; min-width:14px; flex:0 0 14px; padding:0; margin:0; border:0; border-radius:0; background:transparent; box-shadow:none; box-sizing:border-box; vertical-align:middle; color:#64748b; }
+:root[data-theme] .status-icon svg { display:block; width:14px; height:14px; flex:none; }
+:root[data-theme] .status-icon.state-connected { color:#16803d; }
+:root[data-theme] .status-icon.state-sync { color:#007caa; }
+:root[data-theme] .status-icon.state-error { color:#c92a32; }
+:root[data-theme] .status-icon.state-stopping { color:#996000; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .status-icon.state-connected { color:#4ade80; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .status-icon.state-sync { color:#55d6fa; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .status-icon.state-error { color:#ff7780; }
+:root:is([data-theme="dark"],[data-theme="midnight"],[data-theme="forest"]) .status-icon.state-stopping { color:#f1c369; }
+@media(forced-colors:active) { :root[data-theme] .dot.status-icon { color:CanvasText; } }
