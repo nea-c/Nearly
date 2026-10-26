@@ -2,6 +2,8 @@ import { t, text, html } from "./i18n.js";
 import type { Store } from "./core.js";
 import { native, windowIcon, windowMaximized } from "./api.js";
 import {syncIndicatorClass} from './sync-presentation.js';
+import {workspaceIndicator,statusIcon} from './status-indicator.js';
+import {getLanguage} from './i18n.js';
 const esc = (value: unknown) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -20,8 +22,9 @@ export function titlebar(store: Store, active: string, settingsOpen: boolean) {
       const name =
         (p?.name || t("新しいタブ")) +
         (job ? " / " + (job.remote.split("/").pop() || "/") : "");
+      const indicator=workspaceIndicator(w,job,getLanguage());
       const endpoint = p ? `${p.user}@${p.host}:${p.port}` : t("未接続");
-      return html`<div class="tab ${active === w.id ? "active" : ""}"><button role="tab" aria-selected="${active === w.id}" data-tab="${esc(w.id)}" title="${esc(name + " — " + endpoint)}"><span class="dot ${syncIndicatorClass(job)}"></span><span>${esc(name)}</span></button><button data-close="${esc(w.id)}" aria-label="${esc(text`${p?.name || t("作業")} のタブを閉じる`)}" ${w.starting ? "disabled" : ""}>×</button></div>`;
+      return html`<div class="tab ${active === w.id ? "active" : ""}"><button role="tab" aria-selected="${active === w.id}" data-tab="${esc(w.id)}" aria-label="${esc(name + " — " + indicator.label)}" title="${esc(name + " — " + endpoint + " — " + indicator.label)}">${statusIcon(indicator,syncIndicatorClass(job))}<span>${esc(name)}</span></button><button data-close="${esc(w.id)}" aria-label="${esc(text`${p?.name || t("作業")} のタブを閉じる`)}" ${w.starting ? "disabled" : ""}>×</button></div>`;
     })
     .join(
       "",

@@ -17,7 +17,7 @@ test('single build retains root resource harness and Cargo runtime environment',
  rows.push({reason:'build-script-executed',linked_paths:['native='+deps]},{reason:'build-finished',success:true});
  const result=resolveBuild(rows,root,target,deps,{PATH:'original'});
  assert.deepEqual(result.executables,[main,resource]);assert.equal(result.mainExecutable,main);
- assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.1');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
+ assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.2');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
  assert.equal(result.cwd,root);assert.equal(result.env.CARGO_MANIFEST_DIR,root);
  assert.ok(result.env.PATH.includes(deps));assert.ok(result.env.PATH.endsWith('original'));
  assert.throws(()=>resolveBuild(rows.slice(0,-1),root,target,deps,{}),/successful/i);

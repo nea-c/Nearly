@@ -42,3 +42,24 @@ For a generated actual uninstaller, static verification is also available with:
 ```powershell
 node scripts/inspect-pe-icons.mjs <uninstall.exe> src-tauri/icons/uninstall.ico
 ```
+
+## Runtime state badges (adopted A)
+
+`icons/badges/{sync,done,error,paused}.png` are full 32px icon composites,
+not shell overlay-only images. Each keeps the original `icon-source.png` and
+places the same half-width badge in its upper-right corner. Bright backgrounds
+and bold dark symbols are shared across themes; sync points clockwise.
+
+Regenerate with `node scripts/generate-status-badges.mjs` (optional output
+folder). It uses the same existing-browser/`NEARLY_ICON_BROWSER` policy as the
+uninstaller generator. No downloads or changes to the base icon/installer ICO.
+Browser rasterizer versions can affect antialiasing; inspect regenerated images
+and update the explicit RGBA hashes in the Rust artwork tests when intentional.
+
+Windows chooses shell overlay placement, so the adapter clears that old overlay
+and sets both the small and taskbar window icon slots to the composite. Five
+native HICONs are shared for the process lifetime; state changes allocate no new
+handles. Idle restores the original icon. Job aggregation and progress color
+are unchanged. Attention acknowledgement does not erase an error badge.
+Pinned/grouped taskbar rendering and DPI scaling still require OS visual
+qualification; generated previews do not prove shell rendering.

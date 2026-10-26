@@ -75,6 +75,7 @@ export interface UploadOutcome { status: "completed" | "partial" | "cancelled"; 
 export type NativeFileDrop = {type: "enter" | "over" | "drop" | "leave"; ownOutbound?: boolean; paths?: string[]; position?: {x:number;y:number}};
 export interface RemoteDragOutcome extends UploadOutcome { internalPosition?: {x:number;y:number} | null }
 interface Commands {
+  request_error_attention: { args: {active:boolean}; result:void };
   file_transfer_prompt: {args:{id:string};result:TransferPrompt|null};
   choose_file_transfer: {args:{id:string;decision:{token:string;action:'overwrite'|'skip'|'keepboth'|'cancel';applyAll:boolean}};result:void};
   run_upload: {args: {request: UploadRequest}; result: UploadOutcome};

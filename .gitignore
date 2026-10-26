@@ -160,3 +160,5 @@ Thumbs.db
 !/scripts/listing-worker-test.mjs
 !/scripts/listing-existing-pipeline-test.mjs
 !/scripts/empty-remote-safety-test.mjs
+!/scripts/status-badge-artwork.mjs
+!/scripts/generate-status-badges.mjs
