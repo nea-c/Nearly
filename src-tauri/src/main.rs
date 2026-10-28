@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod bookmark_tree;
+mod folder_shortcut;
 mod input_policy;
 mod browse_preferences;
 mod browse_transport;
@@ -1083,6 +1084,18 @@ fn check_listing_drive(path: &str) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
+async fn resolve_local_folder_shortcut(path: String) -> Result<String, String> {
+    let permit = listing_permit()?;
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        folder_shortcut::resolve(&path)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+        .await
+        .map_err(|_| "Folder shortcut resolution timed out")?
+        .map_err(|_| "Folder shortcut could not be read")?
+}
+#[tauri::command]
 async fn list_local(path: String) -> Result<Vec<sftp::Entry>, String> {
     check_listing_drive(&path)?;
     let permit = listing_permit()?;
@@ -2102,6 +2115,7 @@ fn main() {
             pick_key_file,
             default_folder,
             list_local,
+              resolve_local_folder_shortcut,
             list_drives,
             list_remote,
             prepare_session,

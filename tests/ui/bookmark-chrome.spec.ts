@@ -48,7 +48,9 @@ for(const mode of ['light','dark'])test(`bookmark context has ordered concise ac
     await context(page,id);
     expect(await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.slice(0,3).map(e=>e.getAttribute('data-bookmark-action')))).toEqual(['register','create','history']);
     await expect(page.locator('[data-bookmark-action=create]')).toHaveText('フォルダを追加');
-    await expect(page.locator('[data-bookmark-action=move],[data-bookmark-action=edit]')).toHaveCount(0);
+    await expect(page.locator('[data-bookmark-action=move]')).toHaveCount(0);
+    await expect(page.locator('[data-bookmark-action=edit]')).toHaveCount(id==='one'?1:0);
+    expect(await page.locator('#bookmark-tree-context [data-bookmark-action]').evaluateAll(es=>es.slice(3).map(e=>e.getAttribute('data-bookmark-action')))).toEqual(id==='one'?['edit','rename','delete']:['rename','delete']);
     await expect(page.locator('[data-bookmark-action=rename]')).toBeVisible();
     const deletion=page.locator('[data-bookmark-action=delete]');
     const color=await deletion.evaluate(e=>getComputedStyle(e).color);
