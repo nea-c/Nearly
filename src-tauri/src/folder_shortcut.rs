@@ -137,13 +137,20 @@ mod tests {
     }
     impl Drop for Fixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
 
+    fn assert_same_folder(actual: &std::path::Path, expected: &std::path::Path) {
+      // ShellLink may expand a runner's 8.3 TEMP path to its long spelling.
+      // Require the exact existing directory, rather than an identical path spelling.
+      assert!(std::fs::metadata(actual).unwrap().is_dir());
+      assert_eq!(std::fs::canonicalize(actual).unwrap(), std::fs::canonicalize(expected).unwrap());
+    }
+
     #[test]
     fn real_lnk_returns_local_directory_without_changing_link_or_classification() {
       let f = Fixture::new(); let target = f.0.join("日本語 folder"); std::fs::create_dir(&target).unwrap();
       let link = f.link("folder.LNK", Some(&target), None);
       let before = std::fs::read(&link).unwrap();
       assert!(!std::fs::metadata(&link).unwrap().is_dir());
-      assert_eq!(PathBuf::from(resolve(link.to_str().unwrap()).unwrap()), target);
+      assert_same_folder(&PathBuf::from(resolve(link.to_str().unwrap()).unwrap()), &target);
       assert_eq!(std::fs::read(link).unwrap(), before);
     }
     #[test]
@@ -153,8 +160,23 @@ mod tests {
       let target = f.0.join("target"); std::fs::create_dir(&target).unwrap();
       let link = f.link("mta.lnk", Some(&target), None);
       unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().unwrap();
-      assert_eq!(PathBuf::from(resolve(link.to_str().unwrap()).unwrap()), target);
+      assert_same_folder(&PathBuf::from(resolve(link.to_str().unwrap()).unwrap()), &target);
       unsafe { CoUninitialize() };
+    }
+    #[test]
+    fn short_path_aliases_still_identify_the_exact_fixture_directory() {
+      use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+      let short = |path: &std::path::Path| {
+        let input: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+        let mut buffer = [0u16; 32768];
+        let length = unsafe { GetShortPathNameW(PCWSTR(input.as_ptr()), Some(&mut buffer)) } as usize;
+        assert!(length > 0 && length < buffer.len());
+        PathBuf::from(String::from_utf16(&buffer[..length]).unwrap())
+      };
+      let f = Fixture::new(); let target = f.0.join("folder with spaces"); std::fs::create_dir(&target).unwrap();
+      let link = f.link("alias-link.lnk", Some(&short(&target)), None);
+      let resolved = resolve(short(&link).to_str().unwrap()).unwrap();
+      assert_same_folder(&PathBuf::from(resolved), &target);
     }
     #[test]
     fn broken_empty_file_executable_argument_and_malformed_targets_are_not_opened() {
