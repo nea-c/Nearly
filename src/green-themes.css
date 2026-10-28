@@ -327,9 +327,9 @@
 :root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):hover { border-color: var(--focus-ring); background: var(--surface-hover); }
 :root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):active { background: var(--surface-active); }
 :root:is([data-theme="forest"], [data-theme="mint"]) .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
-:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: var(--danger-text); }
-:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: var(--danger-text); background: var(--danger-subtle); }
-:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline-color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove) { color: var(--danger-text); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):is(:hover,:focus-visible) { color: var(--danger-text); background: var(--danger-subtle); }
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):focus-visible { outline-color: var(--danger-text); }
 :root:is([data-theme="forest"], [data-theme="mint"]) :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
 :root:is([data-theme="forest"], [data-theme="mint"]) .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { background: var(--surface-selected); }
 :root:is([data-theme="forest"], [data-theme="mint"]) .pane .path .path-navigation:disabled,

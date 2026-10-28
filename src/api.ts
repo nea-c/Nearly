@@ -139,6 +139,7 @@ interface Commands {
   load_settings: { args: undefined; result: Settings };
   save_settings: { args: { data: Settings }; result: number };
   list_local: { args: { path: string }; result: Entry[] };
+  resolve_local_folder_shortcut: { args: { path: string }; result: string };
   list_drives: {
     args: undefined;
     result: { path: string; name: string; kind?: string }[];

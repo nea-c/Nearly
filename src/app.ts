@@ -1,4 +1,5 @@
 import {ErrorAttention} from './error-attention.js';
+import { entryOpenTarget } from './entry-open.js';
 import {workspaceIndicator,statusIcon} from './status-indicator.js';
 import { deletionRescanLabels } from "./sync-rescan.js";
 import {syncLogMarkup,syncIndicatorClass,syncActivityLabel} from './sync-presentation.js';
@@ -3302,16 +3303,30 @@ function renderSettings() {
   });
 }
 
+const entryOpenRequests = new WeakMap<Workspace, Record<Side, number>>();
 function bindEntryOpen(scope: ParentNode = document) {
   scope.querySelectorAll<HTMLElement>("[data-entry]").forEach((el) => {
-    const open = () => {
+    const open = async () => {
       const [side, i] = el.dataset.entry!.split(":") as [Side, string];
       const f = entries[side][+i];
-      if (!f?.dir || !supportedName(f.name)) return;
-      navigateFolder(
-        side,
-        childPath(side, side === "local" ? localBrowse : remoteBrowse, f.name),
-      );
+      const w = workspace(), path = side === 'local' ? w.localBrowse : w.remoteBrowse,
+        generation = w.generation[side], epoch = fileActionViewEpoch, connection = w.connection;
+      if (!f || w.loading[side]) return;
+      const requests = entryOpenRequests.get(w) ?? { local: 0, remote: 0 };
+      entryOpenRequests.set(w, requests);
+      const request = ++requests[side];
+      const current = () => active === w.id && store.workspaces.includes(w) &&
+        requests[side] === request && !closingWorkspaces.has(w.id) &&
+        w.connection === connection && fileActionViewEpoch === epoch &&
+        w.generation[side] === generation && !w.loading[side] &&
+        (side === 'local' ? w.localBrowse : w.remoteBrowse) === path;
+      try {
+        const target = await entryOpenTarget(side, path, f, shortcut =>
+          invoke('resolve_local_folder_shortcut', { path: shortcut }));
+        if (target && current()) navigateFolder(side, target);
+      } catch (error) {
+        if (current()) message(error);
+      }
     };
     el.ondblclick = open;
     el.onkeydown = (e) => {

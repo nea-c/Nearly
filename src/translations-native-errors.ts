@@ -1,4 +1,11 @@
 export const uploadErrorLiterals: ReadonlyArray<readonly [string, string]> = [
+['フォルダーのショートカットを読み取れませんでした','Folder shortcut could not be read'],
+['ショートカットのリンク先が見つからないか、フォルダーではありません','Folder shortcut target is unavailable or is not a folder'],
+['ネットワーク先のショートカットには対応していません。接続は行っていません','Network shortcut targets are unsupported; no connection was attempted'],
+['リンクや再解析ポイントを通るショートカットには対応していません','Folder shortcut paths through links or reparse points are unsupported'],
+['引数付きのショートカットには対応していません','Folder shortcuts with arguments are unsupported'],
+['フォルダーのショートカットはWindowsのみ対応しています','Folder shortcuts are only supported on Windows'],
+['フォルダーのショートカットの読み取りがタイムアウトしました','Folder shortcut resolution timed out'],
 ['アップロード元フォルダーの一覧を取得できません','Cannot inventory source folder'],
 ['アップロード元を変更から保護できません','Cannot lock source against mutation'],
 ['アップロード元の親を置換から保護できません','Cannot lock source parent against replacement'],

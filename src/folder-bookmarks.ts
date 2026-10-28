@@ -110,9 +110,12 @@ export function bindBookmarks(
       root.querySelector<HTMLElement>(".form-error")!.textContent = tError(e);
     };
     const saveForm = (pair: Pair, existing?: FolderBookmark) => {
+      const paths = existing
+        ? html`<label>ローカル<input id="bookmark-local" name="local" maxlength="4096" required value="${esc(pair.local)}"></label><label>リモート<input id="bookmark-remote" name="remote" maxlength="4096" required value="${esc(pair.remote)}"></label>`
+        : html`<div class="bookmark-paths"><span>ローカル</span><code title="${esc(pair.local)}">${esc(pair.local)}</code><span>リモート</span><code title="${esc(pair.remote)}">${esc(pair.remote)}</code></div>`;
       frame(
         existing ? t("ブックマークを編集") : t("フォルダの組み合わせを登録"),
-        html`<form id="bookmark-form"><label>名前<input id="bookmark-name" name="name" maxlength="100" required value="${esc(existing?.name ?? "")}" placeholder="例：Webサイト"></label><div class="bookmark-paths"><span>ローカル</span><code title="${esc(pair.local)}">${esc(pair.local)}</code><span>リモート</span><code title="${esc(pair.remote)}">${esc(pair.remote)}</code></div><p class="subtle">この接続先の閲覧位置として保存します。同期先は変更しません。</p><div class="actions">${existing ? html`<button type="button" id="bookmark-delete">削除</button>` : ""}<button type="button" id="bookmark-cancel">戻る</button><button id="bookmark-save" class="primary">保存</button></div></form>`,
+        html`<form id="bookmark-form"><label>名前<input id="bookmark-name" name="name" maxlength="100" required value="${esc(existing?.name ?? "")}" placeholder="例：Webサイト"></label>${paths}<p class="subtle">この接続先の閲覧位置として保存します。同期先は変更しません。</p><div class="actions">${existing ? html`<button type="button" id="bookmark-delete">削除</button>` : ""}<button type="button" id="bookmark-cancel">戻る</button><button id="bookmark-save" class="primary">保存</button></div></form>`,
       );
       root.querySelector<HTMLElement>("#bookmark-cancel")!.onclick = closeOwned;
       const form = root.querySelector<HTMLFormElement>("form")!;
@@ -125,16 +128,17 @@ export function bindBookmarks(
         }
         mutationPending = true;
         form.dataset.busy = "true";
-        const name =
-          root.querySelector<HTMLInputElement>("#bookmark-name")!.value;
+        const name = root.querySelector<HTMLInputElement>("#bookmark-name")!.value,
+          local = existing ? root.querySelector<HTMLInputElement>("#bookmark-local")!.value : pair.local,
+          remote = existing ? root.querySelector<HTMLInputElement>("#bookmark-remote")!.value : pair.remote;
         form
           .querySelectorAll<HTMLInputElement>("input,button")
           .forEach((e) => (e.disabled = true));
         try {
           await mutate((candidate) => {
             const saved = candidate.saveFolderBookmark(profile, {
-              local: pair.local,
-              remote: pair.remote,
+              local,
+              remote,
               name,
               ...(existing ? { id: existing.id } : {}),
             });
@@ -257,6 +261,7 @@ export function bindBookmarks(
       owner: w.id,
       busy: () => mutationPending || w.loading.local || w.loading.remote,
       open: (bookmark) => void openPair(bookmark).catch(report),
+      edit: (bookmark) => show("save", bookmark, bookmark),
       register: (parentId) => show("save", undefined, undefined, parentId),
       history: () => show("history"),
       report,

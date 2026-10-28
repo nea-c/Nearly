@@ -1823,9 +1823,9 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 .statusbar :is(#error-count,#toggle-logs):hover { border-color: #8ca3bd; background: #e8eef6; }
 .statusbar :is(#error-count,#toggle-logs):active { background: #d9e4f1; }
 .statusbar :is(#error-count,#toggle-logs):focus-visible { outline: 2px solid #315e91; outline-offset: -2px; }
-:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #b3261e; }
-:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #b3261e; background: #fce8e6; }
-:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline: 2px solid #b3261e; outline-offset: -2px; }
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove) { color: #b3261e; }
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):is(:hover,:focus-visible) { color: #b3261e; background: #fce8e6; }
+:is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):focus-visible { outline: 2px solid #b3261e; outline-offset: -2px; }
 :root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item,
 :root[data-theme=dark] :is(.bookmark-bar,.side-bookmark-bar) [data-bookmark-overflow],
 :root[data-theme=dark] .bookmark-tree-menu > .bookmark-tree-item,
@@ -1848,9 +1848,9 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):hover { border-color: var(--border-hover); background: var(--surface-hover); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):active { background: var(--surface-active); }
 :root[data-theme=dark] .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
-:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #ffb4ab; }
-:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
-:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline-color: #ffb4ab; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove) { color: #ffb4ab; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
+:root[data-theme=dark] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):focus-visible { outline-color: #ffb4ab; }
 /* Drop feedback must remain stronger than flat-button hover/pressed feedback. */
 :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=before] { box-shadow: inset 3px 0 #2468c9; }
 :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=after] { box-shadow: inset -3px 0 #2468c9; }
@@ -2170,9 +2170,9 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):hover { border-color: #90a9c5; background: var(--surface-hover); }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):active { background: #354960; }
 :root[data-theme="midnight"] .statusbar :is(#error-count,#toggle-logs):focus-visible { outline-color: var(--focus-ring); }
-:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]) { color: #ffb4ab; }
-:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
-:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete]):focus-visible { outline-color: #ffb4ab; }
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove) { color: #ffb4ab; }
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):is(:hover,:focus-visible) { color: #ffdad6; background: #63332f; }
+:root[data-theme="midnight"] :is(#bookmark-tree-context [data-bookmark-action=delete], #side-bookmark-context [data-side-action=delete], #bookmark-delete, #side-bookmark-remove):focus-visible { outline-color: #ffb4ab; }
 :root[data-theme="midnight"] :is(.bookmark-bar,.side-bookmark-bar) .bookmark-items > .bookmark-tree-item[data-bookmark-drop=inside],
 :root[data-theme="midnight"] .bookmark-tree-menu > .bookmark-tree-item[data-bookmark-drop=inside] { background: #294e75; }
 :root[data-theme="midnight"] .pane .path .path-navigation:disabled,
