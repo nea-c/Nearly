@@ -101,6 +101,7 @@ async function boot(
               workspaces: s.retainedSyncs.filter(r=>r.ownerTabId&&!r.ownerTabClosed).map(r=>({id:r.ownerTabId})),
             };
           }
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return JSON.parse(localStorage.getItem("retained-fixture"));
           if (cmd === "save_settings") {

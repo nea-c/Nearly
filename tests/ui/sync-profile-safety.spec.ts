@@ -59,7 +59,8 @@ async function boot(page, language) {
             window.calls.push({ cmd, args });
             // This focused fixture intentionally has no multiwindow coordinator.
             if (cmd === "register_window") return undefined;
-            if (cmd === "load_settings")
+            if(cmd === 'request_text_editor_origin_close') return true;
+          if (cmd === "load_settings")
               return JSON.parse(localStorage.getItem("profile-safety"));
             if (cmd === "save_settings") {
               if (window.holdSave)
