@@ -9,7 +9,8 @@ async function boot(page){
   window.refreshFixture={calls:[],local:{'C:\\root':entries(),'C:\\root\\folder':[{name:'new-path.txt',dir:false,size:1}],'C:\\':[{name:'root',dir:true,size:0}]},remote:{'/':entries(),'/folder':[]},watch:undefined,holdLocal:false,releaseLocal:undefined,journal:{revision:0,records:[],truncated:false},sent:0};
   window.__TAURI__={core:{invoke:async(cmd,args={})=>{
    const f=window.refreshFixture;f.calls.push({cmd,args});
-   if(cmd==='load_settings')return{version:1,settingsRevision:0,language:'en',profiles:[profile],history:{}};
+   if(cmd === 'request_text_editor_origin_close') return true;
+          if(cmd==='load_settings')return{version:1,settingsRevision:0,language:'en',profiles:[profile],history:{}};
    if(cmd==='save_settings')return{...args.data,settingsRevision:(args.data.settingsRevision??0)+1};
    if(cmd==='default_folder')return'C:\\root';
    if(cmd==='list_drives')return[{path:'C:\\',name:'C:'}];

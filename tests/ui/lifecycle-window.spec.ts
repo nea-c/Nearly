@@ -96,7 +96,8 @@ async function registry(
             ? { pendingTransfer: clone(transfer) }
             : {}),
         };
-      if (cmd === "load_settings") return clone(settings);
+      if(cmd === 'request_text_editor_origin_close') return true;
+          if (cmd === "load_settings") return clone(settings);
       if (cmd === "save_settings") {
         settings = {
           ...clone(args.data),

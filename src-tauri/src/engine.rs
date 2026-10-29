@@ -416,6 +416,7 @@ impl Status {
     }
     // Call only after a successful final SFTP result, never after staging writes.
     fn committed_remote_change(&mut self, remote: &str, relative: &Path) {
+        self.activity.applied_change();
         let parent = relative.parent().and_then(Path::to_str).unwrap_or("").replace('\\', "/");
         let path = if parent.is_empty() { remote.to_owned() }
             else { format!("{}/{parent}", remote.trim_end_matches('/')) };
@@ -458,13 +459,19 @@ pub struct Engine {
     failed_starts: Mutex<std::collections::HashSet<String>>,
     // The epoch outlives individual reservations: a completed mutation must
     // still invalidate roots validated by an in-flight start.
-    mutation_gate: Mutex<u64>,
-    operations: Mutex<HashMap<String, Operation>>,
+    mutation_gate: Arc<Mutex<u64>>,
+    operations: Arc<Mutex<HashMap<String, Operation>>>,
     jobs: Mutex<HashMap<String, Job>>,
     starts: Mutex<HashMap<String, (Arc<AtomicBool>, bool)>>,
     closing: AtomicBool,
 }
+#[derive(Clone)]
 struct Operation {
+    editor: bool,
+    editor_local: Vec<PathBuf>,
+    document: Option<String>,
+    persistent: bool,
+    progress: Arc<crate::operation_progress::Progress>,
     stop: Arc<AtomicBool>,
     claimed: bool,
     archive: bool,
@@ -481,18 +488,28 @@ struct Pending {
     force_upload: bool,
     batch_checked: bool,
 }
-fn ready_after_completed_work(completed:bool,queue:&HashMap<PathBuf,Pending>)->bool {
-    completed&&queue.values().any(|item|item.last.elapsed()>=Duration::from_millis(500))
+pub struct EditorReservation{key:String,operations:Arc<Mutex<HashMap<String,Operation>>>,gate:Arc<Mutex<u64>>}
+impl Drop for EditorReservation{fn drop(&mut self){if let Ok(mut epoch)=self.gate.lock(){if let Ok(mut ops)=self.operations.lock(){if ops.remove(&self.key).is_some(){*epoch=epoch.saturating_add(1);}}}}}
+fn ready_after_completed_work(completed:bool,queue:&HashMap<PathBuf,Pending>,watcher_pending:bool)->bool {
+    completed&&(watcher_pending||queue.values().any(|item|item.last.elapsed()>=Duration::from_millis(500)))
 }
+#[cfg(test)] #[path="new_file_wait_tests.rs"] mod new_file_wait_tests;
 #[cfg(test)]
 mod source_reschedule_tests {
     use super::*;
     #[test]
+    fn completed_transfer_rechecks_unconsumed_watcher_events_without_idle_throttle() {
+        let q=HashMap::new();
+        assert!(ready_after_completed_work(true,&q,true));
+        assert!(!ready_after_completed_work(false,&q,true));
+        assert!(!ready_after_completed_work(true,&q,false));
+    }
+    #[test]
     fn ready_work_skips_throttle_but_idle_and_debounce_do_not() {
         let mut q=HashMap::new();let now=Instant::now();enqueue_at(&mut q,PathBuf::from("ready"),now-Duration::from_secs(1)).unwrap();
-        assert!(!ready_after_completed_work(false,&q));assert!(ready_after_completed_work(true,&q));
+        assert!(!ready_after_completed_work(false,&q,false));assert!(ready_after_completed_work(true,&q,false));
         q.get_mut(Path::new("ready")).unwrap().last=now+Duration::from_secs(1);
-        assert!(!ready_after_completed_work(true,&q));q.clear();assert!(!ready_after_completed_work(true,&q));
+        assert!(!ready_after_completed_work(true,&q,false));q.clear();assert!(!ready_after_completed_work(true,&q,false));
     }
     #[test]
     fn old_watcher_events_cannot_rewind_a_source_change_debounce() {
@@ -654,6 +671,37 @@ impl Engine {
             states.push(match s.status.as_str(){"stopping"=>N::Stopping,"stopped"=>N::Stopped,"failed"=>N::Error,_=>if job.handle.as_ref().is_some_and(|h|h.is_finished()){N::Error}else{s.activity.phase()}});
         }}
         Ok(aggregate(states, ids.iter().any(|id|starts.get(id).is_some_and(|(stop,_)|!stop.load(Ordering::SeqCst)))))
+    }
+    /// Consume native completion epochs only for the invoking window's jobs.
+    /// No renderer snapshot/settings can restore these acknowledgements.
+    pub fn take_sync_completion(&self, ids: &[String]) -> Result<bool,String> {
+        use crate::taskbar_status::{aggregate,NativeSyncState as N,TaskbarState as T};
+        let jobs=self.jobs.lock().map_err(|_|"Job lock failed")?;
+        let starts=self.starts.lock().map_err(|_|"Start lock failed")?;
+        let failed=self.failed_starts.lock().map_err(|_|"Failure lock failed")?.iter().any(|id|ids.contains(id));
+        let mut statuses=Vec::new();let mut phases=Vec::new();let mut cancelled=false;
+        if failed{phases.push(N::Error);}
+        // Hold the job snapshot until acknowledgement: workers cannot change a
+        // completed status into an error/stop halfway through this decision.
+        for id in ids {if let Some(job)=jobs.get(id) {
+            let s=job.status.lock().map_err(|_|"Status lock failed")?;
+            cancelled|=job.stop.load(Ordering::SeqCst)||matches!(s.status.as_str(),"stopping"|"stopped");
+            phases.push(if job.stop.load(Ordering::SeqCst){N::Stopping}else{match s.status.as_str(){"stopping"=>N::Stopping,"stopped"=>N::Stopped,"failed"=>N::Error,_=>if job.handle.as_ref().is_some_and(|h|h.is_finished()){N::Error}else{s.activity.phase()}}});
+            statuses.push(s);
+        }}
+        cancelled|=ids.iter().any(|id|starts.get(id).is_some_and(|(stop,_)|stop.load(Ordering::SeqCst)));
+        let pending=ids.iter().any(|id|starts.get(id).is_some_and(|(stop,claimed)|*claimed||!stop.load(Ordering::SeqCst)));
+        if cancelled {
+            for mut status in statuses{status.activity.take_completion();}
+            return Ok(false);
+        }
+        let state=aggregate(phases,pending);
+        if state==T::Working{return Ok(false);}
+        let mut completed=false;
+        for mut status in statuses {completed|=status.activity.take_completion()>0;}
+        // Failed/stopped windows discard stale successes; a later committed
+        // change will create a fresh epoch rather than replaying old success.
+        Ok(state==T::CaughtUp&&completed)
     }
     /// Read-only strict idle attestation; ownership probation seals admissions.
     pub(crate) fn probation_idle(&self)->Result<bool,String>{
@@ -1088,7 +1136,7 @@ impl Engine {
             return Ok(op.stop.clone());
         }
         if prepared {return Err("Upload operation must be prepared first".into());}
-        if ops.len() >= 8 {
+        if ops.values().filter(|op|!op.persistent).count() >= 8 {
             return Err(
                 "Application closing, duplicate operation, or at most eight concurrent operations"
                     .into(),
@@ -1098,6 +1146,11 @@ impl Engine {
         ops.insert(
             id.into(),
             Operation {
+                editor: false,
+                editor_local: vec![],
+                document: None,
+                persistent: false,
+                progress: Arc::new(crate::operation_progress::Progress::default()),
                 stop: stop.clone(),
                 claimed: claim,
                 archive,
@@ -1119,6 +1172,22 @@ impl Engine {
                 }
             }
         }
+    }
+    pub fn retain_editor_reservation(&self,id:&str,token:&str)->Result<EditorReservation,String>{
+        let _gate=self.mutation_gate.lock().map_err(|_|"Reservation lock failed")?;
+        let mut ops=self.operations.lock().map_err(|_|"Operation lock failed")?;
+        let key=format!("editor-{token}");if ops.contains_key(&key){return Err("Duplicate editor reservation".into());}
+        let op=ops.get_mut(id).ok_or("Editor operation no longer reserved")?;crate::file_ops::check(&op.stop)?;op.document=Some(token.into());let mut held=op.clone();held.stop=Arc::new(AtomicBool::new(false));held.archive=false;held.persistent=true;ops.insert(key.clone(),held);
+        Ok(EditorReservation{key,operations:self.operations.clone(),gate:self.mutation_gate.clone()})
+    }
+    pub fn mark_editor_operation(&self,id:&str)->Result<(),String>{let _gate=self.mutation_gate.lock().map_err(|_|"Reservation lock failed")?;let mut ops=self.operations.lock().map_err(|_|"Operation lock failed")?;ops.get_mut(id).ok_or("Editor operation no longer reserved")?.editor=true;Ok(())}
+    pub fn bind_editor_operation(&self,id:&str,token:&str)->Result<(),String>{
+        let _gate=self.mutation_gate.lock().map_err(|_|"Reservation lock failed")?;let mut ops=self.operations.lock().map_err(|_|"Operation lock failed")?;
+        if !ops.get(&format!("editor-{token}")).is_some_and(|op|op.persistent&&op.document.as_deref()==Some(token)){return Err("Editor reservation is closed".into());}
+        let op=ops.get_mut(id).ok_or("Editor operation no longer reserved")?;op.document=Some(token.into());op.editor=true;Ok(())
+    }
+    pub fn operation_progress(&self,id:&str)->Option<Arc<crate::operation_progress::Progress>>{
+        self.operations.lock().ok()?.get(id).map(|op|op.progress.clone())
     }
     pub fn discard_prepared_operation(&self, id: &str) {
         if let Ok(_gate) = self.mutation_gate.lock() {
@@ -1220,6 +1289,7 @@ impl Engine {
             .lock()
             .map_err(|_| "Operation lock failed")?;
         let op = ops.get(id).ok_or("Operation no longer reserved")?;
+        let mut editor_local=local.clone();if let Some(parent)=&archive_parent{if editor_local.last()!=Some(parent){return Err("Invalid archive staging reservation".into());}editor_local.pop();}
         crate::file_ops::check(&op.stop)?;
         if self.closing.load(Ordering::SeqCst) {
             return Err("Application closing".into());
@@ -1254,11 +1324,12 @@ impl Engine {
             }
         }
         for (other_id, other) in ops.iter() {
-            if other_id == id {
+            if other_id == id || (op.document.is_some() && op.document==other.document) {
                 continue;
             }
-            if local.iter().any(|a| {
-                other.local.iter().any(|b| {
+            let local_paths=if other.editor{&editor_local}else{&local};let other_paths=if op.editor{&other.editor_local}else{&other.local};
+            if local_paths.iter().any(|a| {
+                other_paths.iter().any(|b| {
                     crate::file_ops::local_contains(a, b) || crate::file_ops::local_contains(b, a)
                 })
             }) || ((identity == other.identity
@@ -1275,6 +1346,7 @@ impl Engine {
             .checked_add(1)
             .ok_or("Mutation counter exhausted; restart application before changing files")?;
         op.local = local;
+        op.editor_local=editor_local;
         op.claimed = true;
         op.remote = remote;
         op.identity = identity;
@@ -1333,6 +1405,7 @@ fn worker(
                 callback_stop.store(true,Ordering::SeqCst);
                 return;
             }
+            #[cfg(test)] if let Ok(event)=&event{for path in &event.paths{new_file_wait_tests::mark(path,"watch");}}
             if tx.try_send((Instant::now(), event)).is_err() {
                 status.failure_context("Watcher overflow: stop and restart for a full rescan",None,"watch","unknown",0,false);
                 callback_stop.store(true,Ordering::SeqCst);
@@ -1736,6 +1809,7 @@ fn worker(
             }
         }
         if let Some(path) = ready {
+            #[cfg(test)] new_file_wait_tests::mark(&root.join(&path),"selected");
             // Serial comparisons and forced uploads supersede the original hint
             // too; a later directory event must never resurrect that observation.
             listing_hints.remove(&path);
@@ -1994,9 +2068,10 @@ fn worker(
             }
         }
         if stop.load(Ordering::SeqCst)||state.lock().unwrap().failure.is_some(){break;}
-        if ready_after_completed_work(completed_work,&queue) {
+        if ready_after_completed_work(completed_work,&queue,event_epoch.load(Ordering::SeqCst)!=observed_epoch) {
             // Re-enter event/stop/debounce/parent checks, without throttling
-            // already eligible work. A blocked next iteration still idle-waits.
+            // already eligible work or watcher events received during transfer.
+            // The next iteration still applies the full per-path debounce.
             thread::yield_now();
         }else{thread::sleep(Duration::from_millis(100));}
     }
@@ -2686,6 +2761,7 @@ mod tests {
         let target = fixture.join("target");
         std::fs::write(&source, b"must remain").unwrap();
         let request = crate::file_ops::Request {
+            items:vec![],
             id: id.into(),
             side: crate::file_ops::Side::Local,
             action: crate::file_ops::Action::Move,
@@ -3660,6 +3736,9 @@ mod startup_pipeline_tests;
  #[test] fn prepared_start_failure_and_cancel_are_truthful(){let e=Engine::default();assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.prepare("one".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.record_start_failure("one");e.discard_prepared_start("one");assert_eq!(e.taskbar_state().unwrap(),T::Error);e.prepare("two".into()).unwrap();assert_eq!(e.taskbar_state().unwrap(),T::Working);e.stop("two").unwrap();e.record_start_failure("two");e.discard_prepared_start("two");assert_eq!(e.taskbar_state().unwrap(),T::Idle);e.record_start_failure("unknown");assert_eq!(e.taskbar_state().unwrap(),T::Idle);}
  #[test] fn terminal_failure_never_automatically_recovers(){let mut s=Status::new();s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Scanning);s.activity.scan_finished();s.failure("transient",false);s.activity.settle(1,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);s.activity.settle(0,true,false,false,false);assert_eq!(s.activity.phase(),N::Error);assert_eq!(s.error_count,1);s.activity.settle(0,true,false,true,false);assert_eq!(s.activity.phase(),N::Stopping);}
 }
+#[cfg(test)]
+#[path="completion_attention_tests.rs"]
+mod completion_attention_tests;
 #[cfg(test)] mod upload_guard_tests {
  use super::*;
  #[test] fn upload_requires_preparation_preserves_early_cancel_and_shutdown(){let e=Engine::default();assert!(e.claim_prepared_upload("upload").is_err());e.prepare_operation("upload").unwrap();e.cancel_operation("upload").unwrap();let stop=e.claim_prepared_upload("upload").unwrap();assert!(stop.load(Ordering::SeqCst));assert!(e.claim_prepared_upload("upload").is_err());e.finish_operation("upload");e.prepare_operation("fresh").unwrap();let stop=e.claim_prepared_upload("fresh").unwrap();e.try_begin_close().unwrap();assert!(stop.load(Ordering::SeqCst));}

@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true} = {}) {
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -314,7 +314,10 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               status(id, e);
             }
           });
-          stream.on("READ", (id, h, offset, length) => {
+          stream.on("READ", async (id, h, offset, length) => {
+            const entry=handles.get(h.toString("hex"));
+            const source=entry?.p ? '/'+path.relative(remote,entry.p).split(path.sep).join('/') : '';
+            if(beforeRead){const injected=await beforeRead(source,offset,length);if(typeof injected==='number'){stream.status(id,injected);return;}}
             try {
               const buffer = Buffer.alloc(Math.min(length, 65536));
               const count = fs.readSync(handles.get(h.toString("hex")).fd, buffer, 0, buffer.length, offset);

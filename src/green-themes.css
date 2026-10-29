@@ -128,11 +128,11 @@
   border-color: var(--border-main);
   border-bottom-color: var(--surface-panel);
 }
-:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button, .add-tab, .window-controls button, .tree-row button, .notice button) {
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button, .add-tab, .window-controls button, .settings-toggle, .tree-row button, .notice button) {
   background: transparent;
   color: inherit;
 }
-:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
+:root:is([data-theme="forest"], [data-theme="mint"]) :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .settings-toggle:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
   background: var(--surface-hover);
   color: var(--text-main);
 }

@@ -122,7 +122,8 @@ async function deepFixture(page:Page,options:{hold?:string;missing?:boolean;fail
     Object.assign(window,{deepCalls:[],deepOptions:options});
     (window as any).__TAURI__={core:{invoke:async(cmd:string,args:any)=>{
       (window as any).deepCalls.push({cmd,args});
-      if(cmd==='load_settings')return JSON.parse(localStorage.getItem('deep-settings')||'null')||{version:1,language:'en',profiles:options.replacement?[p,other]:[p],history:{},browseLocations:{[key]:{local:'C:\\root\\deep\\leaf',remote:'/a/b/c'},...(options.replacement?{[otherKey]:{local:'C:\\root',remote:'/different/leaf'}}:{})}};
+      if(cmd === 'request_text_editor_origin_close') return true;
+          if(cmd==='load_settings')return JSON.parse(localStorage.getItem('deep-settings')||'null')||{version:1,language:'en',profiles:options.replacement?[p,other]:[p],history:{},browseLocations:{[key]:{local:'C:\\root\\deep\\leaf',remote:'/a/b/c'},...(options.replacement?{[otherKey]:{local:'C:\\root',remote:'/different/leaf'}}:{})}};
       if(cmd==='save_settings'){localStorage.setItem('deep-settings',JSON.stringify(args.data));return;}
       if(cmd==='default_folder')return 'C:\\root';
       if(cmd==='connect_session')return{path:'/',entries:args.profile.id==='replacement'?[dir('different')]:listings['/']};

@@ -1,7 +1,7 @@
 {
   "identifier": "main-capability",
   "windows": [
-    "main", "workspace-*"
+    "main", "workspace-*", "text-editor"
   ],
   "permissions": [
     "core:default",

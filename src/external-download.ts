@@ -16,7 +16,7 @@ export async function startExternalDownload(host:DropHost,sources:readonly strin
  try {
   await invoke('prepare_file_operation',{id});prepared=true;
   if(cancelled||!host.operationValid()||!host.uploadAllowed()){await invoke('cancel_file_operation',{id,abandon:true});prepared=false;terminalCancelled=true;results.textContent=say('キャンセルしました。','Cancelled.');return;}
-  dispatched=true;const outcome=await invoke('run_remote_drag',{request:{id,sessionId,sources:[...sources]}});
+  feedback.track(id);dispatched=true;const outcome=await invoke('run_remote_drag',{request:{id,sessionId,sources:[...sources]}});
   results.textContent=formatTransferOutcome(outcome)+(outcome.message?' '+tError(outcome.message):'');
   terminalCancelled=outcome.status==='cancelled';
   internalPosition=outcome.internalPosition;

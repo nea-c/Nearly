@@ -1,4 +1,8 @@
 import {ErrorAttention} from './error-attention.js';
+import {closeTextEditor,closeTextEditorForWorkspace,openTextEditor} from './text-editor.js';
+import {textFileName} from './text-file-name.js';
+import {createConnectionFocus} from './connection-focus.js';
+const connectionFocus=createConnectionFocus();
 import { entryOpenTarget } from './entry-open.js';
 import {workspaceIndicator,statusIcon} from './status-indicator.js';
 import { deletionRescanLabels } from "./sync-rescan.js";
@@ -292,6 +296,7 @@ function newWorkspaceLocal(profileId: string) {
   return (p ? store.lastBrowse(p).local : undefined) ?? defaultLocalBrowse;
 }
 async function closeEmptyWindow() {
+  if(!await closeTextEditor())return;
   if(windowClosing) return;
   windowClosing=true; active="";
   document.documentElement.dataset.windowClosing="true";
@@ -1339,6 +1344,7 @@ function closeWorkspace(id: string) {
 async function removeWorkspace(id: string) {
   const closing = store.workspaces.find((w) => w.id === id);
   if (!closing || closingWorkspaces.has(id)) return;
+  if(!await closeTextEditorForWorkspace(id)||!store.workspaces.includes(closing)||closingWorkspaces.has(id))return;
   closingWorkspaces.add(id);
   updatePrimaryState();
   try {
@@ -1721,6 +1727,7 @@ function message(e: unknown) {
   }
   render();
 }
+window.__TAURI__?.event?.listen("connection-editor-close", () => {document.querySelector<HTMLButtonElement>("#window-close")?.click();}).catch(()=>{});
 window.__TAURI__?.event
   ?.listen<string>("sync-close-blocked", (event) => showBlockedCloseNotice(event.payload))
   .catch(() => {});
@@ -1951,6 +1958,10 @@ function consumeRemoteChanges(t: SyncTab, changes: RemoteChanges | undefined) {
     if(trees.size)requestAutomaticRemoteTrees(w,[...trees]);
   }
 }
+void window.__TAURI__?.event?.listen<{side:Side;path:string;connectionKey?:unknown[]}>('text-editor-saved',event=>{
+ const change=event.payload;if(!initialized||!change||!['local','remote'].includes(change.side)||typeof change.path!=='string')return;
+ const side=change.side,parent=parentFolder(side,change.path);for(const w of store.workspaces){const p=w.connection;if(side==='remote'&&(!p||JSON.stringify(change.connectionKey)!==JSON.stringify([p.host.toLowerCase(),p.port,p.user,p.hostKey])))continue;directoryCache(w,side).invalidate();if(parent&&sameBrowsePath(side,browsePath(w,side),parent)){if(p)requestAutomaticRefresh(w,side,parent,p);else if(side==='local'&&active===w.id&&!automaticBusy())void refresh(side,{remember:false},w).catch(message);}}
+});
 function disposeAutomaticRefresh() {
   if(refreshDisposed)return;refreshDisposed=true;automaticRefresh.dispose();
   const old=visibleWatch;visibleWatch=undefined;
@@ -1958,10 +1969,11 @@ function disposeAutomaticRefresh() {
 }
 window.addEventListener("pagehide",disposeAutomaticRefresh);
 const sideBookmarkViews=new WeakSet<Workspace>();
+const pendingPairViews=new WeakMap<Workspace,{connection:Profile}>();
 function rememberViewedPair(w: Workspace) {
   if (!w.connection) return;
   try {
-    if (!sideBookmarkViews.has(w) && w.navigation.local.current && w.navigation.remote.current)
+    if (!sideBookmarkViews.has(w) && pendingPairViews.get(w)?.connection!==w.connection && w.navigation.local.current && w.navigation.remote.current)
       store.rememberFolderPair(w.connection, w.localBrowse, w.remoteBrowse);
     void persist().catch((error) => {
       if (active === w.id) message(error);
@@ -1974,106 +1986,54 @@ async function openFolderPair(
   w: Workspace,
   pair: { local: string; remote: string },
 ): Promise<boolean> {
-  if (
-    !w.connection ||
-    w.loading.local ||
-    w.loading.remote ||
-    !store.workspaces.includes(w)
-  )
-    return false;
-  if (active === w.id) {
-    leavePathEditor();
-    captureWorkspace();
-  }
-  const request = {
-    local: ++w.generation.local,
-    remote: ++w.generation.remote,
-  };
-  const browseTokens = {
-    local: store.beginBrowse(w.connection, "local"),
-    remote: store.beginBrowse(w.connection, "remote"),
-  };
-  const trees = {
-    local: folderTree(w, "local"),
-    remote: folderTree(w, "remote"),
-  };
-  automaticRefresh.cancel(refreshKey(w,"local"));automaticRefresh.cancel(refreshKey(w,"remote"));
-  w.loading.local = w.loading.remote = true;
-  reconcileLocalWatch();
-  w.notice = "";
-  if (active === w.id) {
-    restoreWorkspace();
-    render();
-  }
-  const stale = () =>
-    !store.workspaces.includes(w) ||
-    (["local", "remote"] as const).some(
-      (side) =>
-        w.generation[side] !== request[side] || w.trees[side] !== trees[side],
-    );
-  try {
-    const settled = await Promise.allSettled(
-      (["local", "remote"] as const).map(async (side) => {
-        try {
-          return await readDirectory(w, side, pair[side]);
-        } catch (error) {
-          if (!stale() && listingState(w, side).path === pair[side])
-            listingState(w, side).errorPath = pair[side];
-          throw Error(
-            (side === "local" ? tr("ローカル") : tr("リモート")) +
-              ": " +
-              rawError(error),
-          );
-        }
-      }),
-    );
-    if (stale()) return false;
-    const failure = settled.find((result) => result.status === "rejected");
-    if (failure?.status === "rejected") throw failure.reason;
-    const results = settled.map(
-      (result) => (result as PromiseFulfilledResult<Entry[]>).value,
-    );
-    for (const [index, side] of (["local", "remote"] as const).entries())
-      trees[side].record(pair[side], results[index]);
-    for (const [index, side] of (["local", "remote"] as const).entries()) {
+  if (!w.connection || w.loading.local || w.loading.remote || !store.workspaces.includes(w)) return false;
+  if (active === w.id) { leavePathEditor(); captureWorkspace(); }
+  const connection=w.connection;
+  const sides=['local','remote'] as const;
+  const request={local:++w.generation.local,remote:++w.generation.remote};
+  const browseTokens={local:store.beginBrowse(connection,'local'),remote:store.beginBrowse(connection,'remote')};
+  const trees={local:folderTree(w,'local'),remote:folderTree(w,'remote')};
+  const errors:Partial<Record<Side,string>>={};
+  const wasSuppressed=sideBookmarkViews.has(w);
+  const pendingPair={connection};
+  pendingPairViews.set(w,pendingPair);
+  sideBookmarkViews.add(w);
+  for(const side of sides){automaticRefresh.cancel(refreshKey(w,side));w.loading[side]=true;}
+  reconcileLocalWatch();w.notice='';
+  const stale=(side:Side)=>!store.workspaces.includes(w)||w.connection!==connection||w.generation[side]!==request[side]||w.trees[side]!==trees[side];
+  const repaint=()=>{if(active===w.id&&store.workspaces.includes(w)){restoreWorkspace();render();}};
+  const publishErrors=()=>{w.notice=sides.filter(side=>!stale(side)&&errors[side]).map(side=>errors[side]).join('\n');};
+  repaint();
+  const results=await Promise.all(sides.map(async side=>{
+    try{
+      const entries=await readDirectory(w,side,pair[side]);
+      if(stale(side))return false;
+      trees[side].record(pair[side],entries);
       parentSelection(w).delete(side);
-      store.rememberSuccessfulBrowse(
-        w.connection,
-        side,
-        pair[side],
-        browseTokens[side],
-      );
-      w.entries[side] = results[index];
-      listingSucceeded(w, side, pair[side]);
+      store.rememberSuccessfulBrowse(connection,side,pair[side],browseTokens[side]);
+      w.entries[side]=entries;
+      listingSucceeded(w,side,pair[side]);
       w.navigation[side].commit(pair[side]);
-      w.selections[side].context(
-        JSON.stringify([
-          side,
-          side === "remote" ? w.connection : null,
-          pair[side],
-        ]),
-        results[index].filter((e) => supportedName(e.name)).map((e) => e.name),
-      );
+      w.selections[side].context(JSON.stringify([side,side==='remote'?connection:null,pair[side]]),entries.filter(e=>supportedName(e.name)).map(e=>e.name));
+      if(side==='local')w.localBrowse=pair.local;else w.remoteBrowse=pair.remote;
+      // Persist the successful side immediately, without recording a mixed pair.
+      rememberViewedPair(w);
+      return true;
+    }catch(error){
+      if(!stale(side)){
+        if(listingState(w,side).path===pair[side])listingState(w,side).errorPath=pair[side];
+        errors[side]=(side==='local'?tr('ローカル'):tr('リモート'))+': '+rawError(error);
+        publishErrors();
+      }
+      return false;
+    }finally{
+      if(w.generation[side]===request[side])w.loading[side]=false;
+      repaint();
     }
-    w.localBrowse = pair.local;
-    w.remoteBrowse = pair.remote;
-    sideBookmarkViews.delete(w);
-    rememberViewedPair(w);
-    return true;
-  } catch (error) {
-    if (!stale())
-      w.notice =
-        tr("組み合わせを開けませんでした。閲覧位置は変更していません。 ") +
-        rawError(error);
-    return false;
-  } finally {
-    for (const side of ["local", "remote"] as const)
-      if (w.generation[side] === request[side]) w.loading[side] = false;
-    if (active === w.id && store.workspaces.includes(w)) {
-      restoreWorkspace();
-      render();
-    }
-  }
+  })).finally(()=>{if(pendingPairViews.get(w)===pendingPair)pendingPairViews.delete(w);});
+  if(results.every(Boolean)&&sides.every(side=>!stale(side))){sideBookmarkViews.delete(w);rememberViewedPair(w);}
+  else if(!results.some(Boolean)&&!wasSuppressed&&sides.every(side=>!stale(side)))sideBookmarkViews.delete(w);
+  return results.some(Boolean);
 }
 async function refresh(
   side: Side,
@@ -2642,6 +2602,7 @@ function render() {
         }${notice ? html`<div class="notice" role="alert">${esc(localizedNotice(notice))}<button id="dismiss" aria-label="通知を閉じる">×</button></div>` : ""}
       </main>
       ${statusbar(t)}`;
+  if(p)connectionFocus.show();
   if (!p) {
     let view = connectionViews.get(w.id);
     if (!view) {
@@ -2658,6 +2619,7 @@ function render() {
       renderConnection(view, state);
     }
     $("#connection-slot")!.replaceWith(view);
+    connectionFocus.show(view.querySelector<HTMLFormElement>('#connect-form')??undefined);
   }
   bindTabStrip({reorder:commitTabOrder,externalStart:windowRegistration?(id,grab,title)=>{void beginNativeTabDrag(id,grab,title);}:undefined,busy:()=>!initialized||!settingsAvailable||movingWorkspaces.size>0||!!dialog||selectionDrag||splitterDragging||closingWorkspaces.size>0});
   publishTabStrip();
@@ -3323,7 +3285,11 @@ function bindEntryOpen(scope: ParentNode = document) {
       try {
         const target = await entryOpenTarget(side, path, f, shortcut =>
           invoke('resolve_local_folder_shortcut', { path: shortcut }));
-        if (target && current()) navigateFolder(side, target);
+          if (!current()) return;
+          if (target) navigateFolder(side, target);
+          else if (!f.dir && supportedName(f.name) && textFileName(f.name))
+            await openTextEditor({side,path:childPath(side,path,f.name),workspaceId:w.id,
+              sessionId:connection?.mode==='sftp'?w.id:undefined},current,async()=>{});
       } catch (error) {
         if (current()) message(error);
       }
@@ -3365,6 +3331,7 @@ function bind() {
   on("#window-maximize", () => windowControl("toggleMaximize").catch(message));
   on("#window-close", () => {
     if(operationBusy()){showBlockedCloseNotice(tr("処理中です。"));return;}
+
     if (movingWorkspaces.size) { showBlockedCloseNotice(transferText("タブの移動が完了するまでお待ちください。", "Wait for the tab move to finish.")); return; }
     if (store.workspaces.some((w) => w.connecting)) {
       showBlockedCloseNotice(tr("接続を中止し、完了してからウィンドウを閉じてください。"));
@@ -3381,7 +3348,7 @@ function bind() {
       );
       return;
     }
-    windowControl("close").catch(message);
+    void closeTextEditor(store.workspaces.map(w=>w.id)).then(closed=>{if(closed)return windowControl("close");}).catch(message);
   });
   document.querySelectorAll<HTMLElement>("[data-tab]").forEach(
     (el) =>
@@ -4520,6 +4487,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       `[data-connection-select="${CSS.escape(chosenId)}"]`,
     )
     ?.focus();
+  connectionFocus.show(form);
 }
 
 

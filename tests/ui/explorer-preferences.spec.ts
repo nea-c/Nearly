@@ -168,7 +168,7 @@ test("bookmarks persist, dedupe and open both panes without changing an active s
   ).toHaveCount(0);
 });
 
-test("pair failure is atomic, legacy paths require confirmation, and identities stay separate", async ({
+test("pair failure retains the successful side, legacy paths require confirmation, and identities stay separate", async ({
   page,
 }) => {
   await bookmarkRootAction(page,'history');
@@ -190,10 +190,8 @@ test("pair failure is atomic, legacy paths require confirmation, and identities 
   await page.locator("#bookmark-save").click();
   await page.evaluate(() => (window.failPath = "/legacy"));
   await page.locator("[data-bookmark-open]").click();
-  await expect(page.locator(".notice")).toContainText(
-    "閲覧位置は変更していません",
-  );
-  await expect(page.locator("#local-path")).toHaveValue("C:\\root");
+  await expect(page.locator(".notice")).toContainText("fixture listing denied");
+  await expect(page.locator("#local-path")).toHaveValue("C:\\legacy");
   await expect(page.locator("#remote-path")).toHaveValue("/");
   await page.evaluate(() => {
     window.failPath = "";
@@ -207,7 +205,7 @@ test("pair failure is atomic, legacy paths require confirmation, and identities 
   await go(page, "remote", "/newer");
   await page.evaluate(() => window.releaseListing());
   await page.waitForTimeout(200);
-  await expect(page.locator("#local-path")).toHaveValue("C:\\root");
+  await expect(page.locator("#local-path")).toHaveValue("C:\\legacy");
   await expect(page.locator("#remote-path")).toHaveValue("/newer");
   const first = await page
     .locator("[data-tab][aria-selected=true]")

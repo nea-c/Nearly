@@ -1,5 +1,9 @@
 # ライセンス
 
+エディターの構文色分けには Prism 1.30.0 (MIT) の限定文法を使用します。
+MIT全文は `DISTRIBUTION-LICENSES.txt`、固定版の出典とハッシュは
+`third-party-license-inventory.json` の `frontendPackages` に収録しています。
+
 Nearly の独自コード・文書・アイコンには標準の Apache License 2.0 を適用します。全文は [LICENSE](LICENSE) にあります。独自の再配布禁止・改変禁止条件やアイコン除外は追加しません。この変更に伴う新リリースはなく、過去の r3.6 配布物を置き換えません。
 
 ## 第三者コードと配布

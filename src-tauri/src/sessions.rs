@@ -246,6 +246,14 @@ impl Sessions {
     }
 }
 impl Lease {
+    /// Keep the originating session generation and its intentional-disconnect
+    /// cancellation. Transport failures do not revoke this lease.
+    pub fn fork_editor(&self)->Result<Lease,String>{
+        let lease=self.owner.resolve(&self.id)?;
+        if !Arc::ptr_eq(&lease.stop,&self.stop){return Err("Session generation changed".into());}
+        Ok(lease)
+    }
+    pub fn generation(&self)->usize{Arc::as_ptr(&self.stop) as usize}
     pub fn browse_home(&self) -> Result<(String, Vec<Entry>), String> {
         let credentials = self.credentials.as_ref().expect("Live session lease");
         if self.initial {
@@ -368,6 +376,9 @@ impl Drop for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]fn editor_fork_is_revoked_by_intentional_origin_disconnect(){
+        let sessions=Arc::new(Sessions::default());sessions.prepare("origin").unwrap();let mut initial=sessions.connect("origin",profile("fixture"),Zeroizing::new("generated-secret".into())).unwrap();initial.install().unwrap();drop(initial);let source=sessions.resolve("origin").unwrap();let editor=source.fork_editor().unwrap();sessions.disconnect("origin").unwrap();assert!(source.stop().load(Ordering::SeqCst));assert!(editor.stop().load(Ordering::SeqCst));assert_eq!(editor.secret(),"generated-secret");assert_eq!(editor.profile().host,source.profile().host);let stop=Arc::new(AtomicBool::new(false));assert!(editor.link_stop(&stop).is_err());assert!(stop.load(Ordering::SeqCst));assert!(source.fork_editor().is_err());
+    }
     #[test]
     fn prepared_and_connecting_tabs_refuse_close_until_cancel_cleanup() {
         let sessions = Arc::new(Sessions::default());

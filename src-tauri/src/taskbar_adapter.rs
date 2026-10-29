@@ -4,29 +4,58 @@ use std::{collections::HashMap, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering
 use tauri::{image::Image, window::{ProgressBarState, ProgressBarStatus}, Manager};
 
 /// The stop token is the existing application shutdown flag, not frontend state.
-pub fn start(app: tauri::AppHandle, engine: Arc<Engine>, ownership:Arc<Mutex<crate::window_ownership::Registry>>, closing: Arc<AtomicBool>) {
+pub fn start(app: tauri::AppHandle, engine: Arc<Engine>, ownership:Arc<Mutex<crate::window_ownership::Registry>>, attention:Arc<Mutex<crate::error_attention::Controller>>, closing: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let mut applied = HashMap::new();
+        let applied=Arc::new(Mutex::new(HashMap::new()));
+        let failures=Arc::new(Mutex::new(HashMap::new()));
+        let attention_queued=Arc::new(AtomicBool::new(false));
         while !closing.load(Ordering::SeqCst) {
-            let windows=app.webview_windows();
-            applied.retain(|label,_|windows.contains_key(label));
-            for (label, window) in windows {
-                if label=="tab-drag-preview"{continue;}
-                let state=ownership.lock().map_err(|_|()).and_then(|r|engine.taskbar_state_for(&r.job_ids(&label)).map(|state|if state==TaskbarState::Idle&&r.has_stopped_sync(&label){TaskbarState::Paused}else{state}).map_err(|_|())).unwrap_or(TaskbarState::Error);
-                if applied.get(&label) != Some(&state) {
-                    // These API results indicate dispatch, not proof of shell rendering.
-                    // Leave applied unchanged on failure so a following tick retries.
-                    if apply(&window, state).is_ok() {
-                        applied.insert(label, state);
+            // Separate from icon dispatch: a presentation failure cannot erase
+            // a worker's completion, and a blocked UI cannot grow this queue.
+            if !attention_queued.swap(true,Ordering::SeqCst) {
+                let (target,engine,ownership,attention,queued,closing,applied,failures)=(app.clone(),engine.clone(),ownership.clone(),attention.clone(),attention_queued.clone(),closing.clone(),applied.clone(),failures.clone());
+                if app.run_on_main_thread(move||{
+                    if !closing.load(Ordering::SeqCst) {
+                        let windows=target.webview_windows();
+                        let states:HashMap<_,_>=windows.iter().filter(|(label,_)|label.as_str()!="tab-drag-preview").map(|(label,_)|{
+                            let state=ownership.lock().map_err(|_|()).and_then(|r|engine.taskbar_state_for(&r.job_ids(label)).map(|state|if state==TaskbarState::Idle&&r.has_stopped_sync(label){TaskbarState::Paused}else{state}).map_err(|_|())).unwrap_or(TaskbarState::Error);
+                            (label.clone(),state)
+                        }).collect();
+                        let group=crate::taskbar_status::group_badge(states.values().copied());
+                        if let (Ok(mut applied),Ok(mut failures))=(applied.lock(),failures.lock()){
+                            applied.retain(|label,_|states.contains_key(label));failures.retain(|label,_|states.contains_key(label));
+                            for (label,state) in &states {
+                                let window=&windows[label];
+                                let result=(||{
+                                    let hwnd=windows::Win32::Foundation::HWND(window.hwnd()?.0);
+                                    let epoch=crate::status_icon_native::button_epoch(hwnd).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
+                                    let key=(*state,group,epoch);
+                                    if applied.get(label)!=Some(&key){apply(window,*state,group)?;applied.insert(label.clone(),key);}
+                                    Ok::<_,tauri::Error>(())
+                                })();
+                                match result{Ok(())=>{failures.remove(label);},Err(e)=>{let message=e.to_string();if failures.get(label)!=Some(&message){eprintln!("Taskbar presentation failed for {label}: {message}");failures.insert(label.clone(),message);}}}
+                            }
+                        }
+                        for (label,window) in target.webview_windows(){
+                            if label=="tab-drag-preview"{continue;}
+                            // Resolve ownership at delivery, not when this tick
+                            // was queued; tab transfers cannot replay a snapshot.
+                            if let Ok(registry)=ownership.lock(){
+                                if registry.registered(&label).is_ok()&&engine.take_sync_completion(&registry.job_ids(&label)).unwrap_or(false){
+                                    let _=crate::error_attention::dispatch(&window.as_ref().window(),&attention,crate::error_attention::Event::Completion);
+                                }
+                            }
+                        }
                     }
-                }
+                    queued.store(false,Ordering::SeqCst);
+                }).is_err(){attention_queued.store(false,Ordering::SeqCst);}
             }
             std::thread::sleep(Duration::from_millis(250));
         }
     });
 }
 
-pub fn apply(window: &tauri::WebviewWindow, state: TaskbarState) -> tauri::Result<()> {
+pub fn apply(window: &tauri::WebviewWindow, state: TaskbarState, group:TaskbarState) -> tauri::Result<()> {
     let (status, progress) = match state {
         TaskbarState::Idle | TaskbarState::Paused | TaskbarState::CaughtUp => (ProgressBarStatus::None, None),
         TaskbarState::Working => (ProgressBarStatus::Indeterminate, None),
@@ -34,11 +63,10 @@ pub fn apply(window: &tauri::WebviewWindow, state: TaskbarState) -> tauri::Resul
         TaskbarState::Error => (ProgressBarStatus::Error, Some(100)),
     };
     // Clear stale completion before applying the new progress state.
-    // Shell overlays have an OS-controlled position. Full composites preserve
-    // the approved top-right placement without adding a second badge.
-    window.set_overlay_icon(None)?;
-    let index=match state {TaskbarState::Idle=>0,TaskbarState::Working=>1,TaskbarState::CaughtUp=>2,TaskbarState::Error=>3,TaskbarState::Paused=>4};
-    crate::status_icon_native::apply(windows::Win32::Foundation::HWND(window.hwnd()?.0),index,[BASE,SYNC,DONE,ERROR,PAUSED]).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
+    // Restore the r3.6 Shell path. Placement is chosen by Windows and remains
+    // visually unqualified; do not treat API success as proof of rendering.
+    let index=match group {TaskbarState::Idle=>0,TaskbarState::Working=>1,TaskbarState::CaughtUp=>2,TaskbarState::Error=>3,TaskbarState::Paused=>4};
+    crate::status_icon_native::apply_shell(windows::Win32::Foundation::HWND(window.hwnd()?.0),index,[BASE,SYNC,DONE,ERROR,PAUSED]).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
     window.set_progress_bar(ProgressBarState { status: Some(status), progress })
 }
 

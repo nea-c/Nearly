@@ -31,6 +31,7 @@ pub(crate) struct RemoteReader {
     entries: Vec<RemoteEntry>,
     stop: Arc<AtomicBool>,
     pub bytes: AtomicU64,
+    progress: Option<Arc<crate::operation_progress::Progress>>,
     coverage: Mutex<HashMap<usize, Vec<(u64, u64)>>>,
     last_activity: Mutex<Instant>,
     error: Mutex<Option<String>>,
@@ -41,6 +42,7 @@ impl RemoteReader {
         entries: Vec<RemoteEntry>,
         stop: Arc<AtomicBool>,
         lease: Option<crate::sessions::Lease>,
+        progress: Option<Arc<crate::operation_progress::Progress>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             runtime: Mutex::new(Some(Runtime {
@@ -50,6 +52,7 @@ impl RemoteReader {
             entries,
             stop,
             bytes: AtomicU64::new(0),
+            progress,
             coverage: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
             error: Mutex::new(None),
@@ -61,6 +64,7 @@ impl RemoteReader {
             .lock()
             .map_err(|_| "Stream accounting unavailable")?;
         let ranges = all.entry(index).or_default();
+        let before:u64=ranges.iter().map(|(a,b)|b-a).sum();
         ranges.push((start, end));
         ranges.sort_unstable();
         let mut merged: Vec<(u64, u64)> = Vec::new();
@@ -76,7 +80,9 @@ impl RemoteReader {
         if merged.len() > 64 {
             return Err("Too many disjoint stream reads".into());
         }
+        let after:u64=merged.iter().map(|(a,b)|b-a).sum();
         *ranges = merged;
+        if let Some(p)=&self.progress {p.bytes(after.saturating_sub(before));if p.snapshot().total==Some(p.snapshot().done) {p.phase("finalizing");}}
         Ok(())
     }
     fn completed(&self) -> usize {
@@ -118,6 +124,7 @@ impl Reader for RemoteReader {
     ) -> Result<Vec<u8>, String> {
         crate::file_ops::check(&self.stop)?;
         let entry = self.entries.get(index).ok_or("Invalid virtual source")?;
+        if let Some(p)=&self.progress {p.position(index+1,self.entries.len());p.phase("downloading");}
         if entry.attrs.is_dir() {
             return Err("Directory has no file contents stream".into());
         }
@@ -421,6 +428,7 @@ fn run_sta(
     if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } >= 0 {
         return Ok(DragOutcome { internal_position: None, outcome: unaccepted_drag_outcome(DRAGDROP_S_CANCEL, true, Ok((0, 0))) });
     }
+    let progress=engine.operation_progress(&request.id);
     let deferred = DeferredFiles::new(stop.clone());
     let metadata = deferred.clone();
     let metadata_stop = stop.clone();
@@ -431,14 +439,17 @@ fn run_sta(
                 .map_err(|_| "Cannot resolve drag endpoint")?.collect();
             let (connection, identity) = crate::sftp::connect(profile, lease.secret(), &metadata_stop)?;
             engine.reserve_upload_operation(&request.id, vec![], request.sources.clone(), identity, endpoints)?;
+            if let Some(p)=&progress {p.phase("scanning");}
             let entries = connection.run(&metadata_stop,
                 crate::transfer_io::remote_inventory(&connection, &request.sources, &metadata_stop))?;
+            let total=crate::operation_progress::checked_byte_total(entries.iter().filter(|e|!e.attrs.is_dir()).map(|e|e.attrs.size))?;
             let descriptors = entries.iter().map(|entry| VirtualEntry {
                 relative: entry.relative.clone(), directory: entry.attrs.is_dir(),
                 size: if entry.attrs.is_dir() { 0 } else { entry.attrs.size.unwrap_or(0) },
                 modified: entry.attrs.mtime,
             }).collect();
-            let reader = RemoteReader::new(connection, entries, metadata_stop.clone(), Some(lease));
+            if let Some(p)=&progress {p.plan("bytes",total);p.position(1,entries.len());p.phase("waiting");}
+            let reader = RemoteReader::new(connection, entries, metadata_stop.clone(), Some(lease),progress);
             let files = VirtualFiles::new(descriptors, reader.clone(), metadata_stop.clone())?;
             metadata.publish(Ok(files));
             Ok(reader)
@@ -757,7 +768,8 @@ mod tests {
                 modified: e.attrs.mtime,
             })
             .collect();
-        let reader = RemoteReader::new(connection, entries, stop.clone(), None);
+        let progress=Arc::new(crate::operation_progress::Progress::default());progress.plan("bytes",bytes.len() as u64);
+        let reader = RemoteReader::new(connection, entries, stop.clone(), None, Some(progress.clone()));
         let files = VirtualFiles::new(metadata, reader.clone(), stop.clone()).unwrap();
         let object = files.object().unwrap();
         let format = FORMATETC {
@@ -781,6 +793,11 @@ mod tests {
         };
         assert_eq!(&data[..n as usize], bytes);
         assert_eq!(reader.bytes.load(Ordering::SeqCst), bytes.len() as u64);
+        assert_eq!(progress.snapshot().done,bytes.len() as u64);
+        assert_eq!(progress.snapshot().phase,"finalizing");
+        unsafe {stream.Seek(0,STREAM_SEEK_SET,None).unwrap();stream.Read(data.as_mut_ptr().cast(),4,Some(&mut n)).ok().unwrap();}
+        assert_eq!(reader.bytes.load(Ordering::SeqCst),bytes.len() as u64+4,"network retransmitted bytes remain diagnostic");
+        assert_eq!(progress.snapshot().done,bytes.len() as u64,"Explorer rereads never inflate gauge");
         assert!(reader.active());
         let asynchronous = object.cast::<IDataObjectAsyncCapability>().unwrap();
         unsafe {

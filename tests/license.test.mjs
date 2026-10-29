@@ -45,6 +45,16 @@ test('inventory notices are preserved byte for byte and MPL sources remain avail
   assert.ok(!text.includes('icon provenance is pending'));
   assert.ok(text.includes('https://sourceforge.net/projects/nsis/files/NSIS%203/3.13/nsis-3.13-src.tar.bz2/download'));
 });
+test('bundled Prism tokenizer retains its exact MIT notice and pinned source',()=>{
+ const inventory=JSON.parse(read('third-party-license-inventory.json'));
+ const prism=inventory.frontendPackages.find(p=>p.name==='prismjs');
+ assert.equal(prism.version,'1.30.0');assert.equal(prism.license,'MIT');
+ assert.equal(prism.source,'https://registry.npmjs.org/prismjs/-/prismjs-1.30.0.tgz');
+ const notice=read('node_modules/prismjs/LICENSE');
+ assert.equal(createHash('sha256').update(notice).digest('hex'),prism.notices[0].sha256);
+ assert.ok(read('DISTRIBUTION-LICENSES.txt').includes(notice));
+});
+
 test('the actual installer license-page block compiles with bundled texts without running setup', {skip:process.platform!=='win32'},()=>{
   const template=read('src-tauri/windows/installer.nsi').toString();
   const block=template.match(/\{\{#if license\}\}([\s\S]*?)\{\{\/if\}\}/)?.[1];

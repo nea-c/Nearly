@@ -73,6 +73,7 @@ async function boot(page: Page, options: Options = {}) {
         core: {
           invoke: async (cmd, args = {}) => {
             fixture.calls.push({ cmd, args });
+            if (cmd === "request_text_editor_origin_close") return true;
             if (cmd === "register_window") {
               const s = JSON.parse(localStorage.getItem(KEY));
               return {

@@ -1,11 +1,12 @@
 import { operationFeedback, operationBusy } from "./operation-feedback.js";
+import {openTextEditor} from './text-editor.js';
 import {
   archiveEligibility,
   archiveDefaultName,
   formatArchiveError,
   type ArchiveAction,
 } from "./archive-actions.js";
-import { t, text, html, tError } from "./i18n.js";
+import { t, text, html, tError, getLanguage } from "./i18n.js";
 import { invoke, native, type FileOperationRequest } from "./api.js";
 import type { Entry, Profile, Side } from "./core.js";
 import type { FileSelection } from "./selection.js";
@@ -29,7 +30,7 @@ export interface ActionHost {
     side: Side,
     passphrase: string,
     change: {
-      action: FileOperationRequest["action"];
+      action: FileOperationRequest["action"] | 'edit';
       paths: string[];
       parent?: string;
       created?: boolean;
@@ -260,6 +261,7 @@ function showMenu(state: Snapshot, x: number, y: number) {
       新しいフォルダー
     </button>
     <div class="menu-rule"></div>
+    <button role="menuitem" data-file-action="edittext" ${state.items.length!==1||state.items[0]?.dir?'disabled':''}>${getLanguage()==='ja'?'テキストを編集':'Edit text'}</button>
     <button
       role="menuitem"
       data-file-action="copy"
@@ -309,7 +311,8 @@ function showMenu(state: Snapshot, x: number, y: number) {
           notice(() => t("表示先が変わったため、もう一度対象を選んでください"));
           return;
         }
-        if (action === "compress" || action === "extract")
+        if(action==='edittext')void openTextEditor({side:state.side,path:state.items[0].path,workspaceId:state.host.workspaceId,sessionId:state.host.sessionId},()=>state.host.operationValid(),()=>state.host.changed(state.side,'',{action:'edit',paths:[state.items[0].path],affectedDirectories:[parentPath(state.side,state.items[0].path)]})).catch(error=>notice(()=>tError(error)));
+        else if (action === "compress" || action === "extract")
           showArchive(state, action);
         else if (action === "createfile" || action === "mkdir")
           showCreation(state, action);
@@ -509,6 +512,7 @@ function showOperation(
           ${statuses.map((s) => `<li class="${s.status === "失敗" ? "failed" : ""}"><strong>${esc(t(s.status))}</strong><code>${esc(s.item.path)}</code>${s.error ? `<p>${esc(tError(s.error))}</p>` : ""}</li>`).join("")}
         </ul>`;
     };
+    const batched=remote&&statuses.length>1&&(action==='copy'||action==='delete');
     const moved = new Set<string>();
     let refreshError = "";
     try {
@@ -528,11 +532,13 @@ function showOperation(
             await invoke("cancel_file_operation", {id: stateRun.current, abandon:true});
             throw Error(t("接続が変わったか、中止が要求されました。"));
           }
+          if(remote)feedback.track(stateRun.current);
           const outcome = await invoke("run_file_operation", {
             request: {
               id: stateRun.current,
               side: state.side,
               action,
+              items:batched?statuses.map(s=>({source:s.item.path,destination:action==='delete'?undefined:childPath(state.side,destination,s.item.name)})):undefined,
               source: status.item.path,
               destination:
                 action === "delete"
@@ -546,13 +552,16 @@ function showOperation(
           });
           status.status = "完了";
           status.error = outcome.message;
+          if(batched){if(!outcome.items||outcome.items.length!==statuses.length)throw Error('Incomplete native batch result; refresh before retrying');for(let i=0;i<statuses.length;i++){const result=outcome.items[i];if(result.source!==statuses[i].item.path)throw Error('Mismatched native batch result');statuses[i].status=result.completed?'完了':result.attempted?'失敗':'未実行';statuses[i].error=result.message;}}
           if (action === "move") moved.add(status.item.path);
         } catch (error) {
           status.status = "失敗";
           status.error = tError(error);
+          if(batched)for(const other of statuses){other.status='失敗';other.error=tError(error);}
         }
         stateRun.current = undefined;
         draw();
+        if(batched)break;
       }
       if (clipboard?.cut && action === "move") {
         clipboard.items = clipboard.items.filter((i) => !moved.has(i.path));

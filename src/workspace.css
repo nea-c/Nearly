@@ -160,10 +160,12 @@ tr:focus-visible {
 }
 .window-controls {
   display: flex;
+  height: 42px;
   flex-shrink: 0;
   position: relative;
   z-index: 200;
 }
+.settings-toggle { height: 42px; }
 .window-controls button {
   border: 0;
   border-radius: 0;
@@ -173,7 +175,8 @@ tr:focus-visible {
   font-size: 17px;
   color: #3f4e60;
 }
-.window-controls button:hover {
+.window-controls button:hover,
+.settings-toggle:hover {
   background: #d1dce9;
 }
 .window-controls #window-close:hover {
@@ -1349,11 +1352,11 @@ main {
   border-color: var(--border-main);
   border-bottom-color: var(--surface-panel);
 }
-:root[data-theme="dark"] :is(.tab button, .add-tab, .window-controls button, .tree-row button, .notice button) {
+:root[data-theme="dark"] :is(.tab button, .add-tab, .window-controls button, .settings-toggle, .tree-row button, .notice button) {
   background: transparent;
   color: inherit;
 }
-:root[data-theme="dark"] :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
+:root[data-theme="dark"] :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .settings-toggle:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
   background: var(--surface-hover);
   color: var(--text-main);
 }
@@ -1565,7 +1568,7 @@ main {
 .connection-empty { text-align: center; }
 .connection-empty h1 { margin-bottom: 18px; color: #52657d; }
 .connection-status { color: #52657d; }
-.tabs { flex: 0 1 calc(183px * var(--tab-count) + 3px); max-width: none; width: calc(183px * var(--tab-count) + 3px); padding-left: 6px; overflow-y: hidden; }
+.tabs { flex: 0 1 max(0px, calc(183px * var(--tab-count) - 3px)); max-width: none; width: max(0px, calc(183px * var(--tab-count) - 3px)); padding-left: 0; overflow-y: hidden; }
 .tab { flex: 1 1 180px; min-width: 108px; max-width: 180px; }
 .tab button[role="tab"] { padding-inline: 7px 2px; gap: 5px; }
 .tab button[role="tab"] > span:last-child { max-width: none; }
@@ -1573,7 +1576,7 @@ main {
 .tab [data-close] { flex: 0 0 28px; width: 28px; margin-right: 2px; }
 .title-drag { flex: 1 0 96px; min-width: 96px; }
 .add-tab { width: 34px; margin: 0 2px; }
-.settings-toggle { flex: 0 0 38px; width: 38px; padding: 0; border: 0; border-radius: 0; background: transparent; display: grid; place-items: center; }
+.settings-toggle { color: #3f4e60; flex: 0 0 38px; width: 38px; padding: 0; border: 0; border-radius: 0; background: transparent; display: grid; place-items: center; }
 .caption-divider { flex: 0 0 1px; height: 22px; align-self: center; background: #bac8db; margin: 0 3px; }
 .settings-popup { position: fixed; right: 144px; top: 44px; z-index: 210; width: 270px; max-width: calc(100vw - 16px); padding: 14px; border: 1px solid #bfcee2; border-radius: 6px; box-shadow: 0 8px 28px #213c5c30; background: white; }
 .settings-popup header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
@@ -1971,11 +1974,11 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
   border-color: var(--border-main);
   border-bottom-color: var(--surface-panel);
 }
-:root[data-theme="midnight"] :is(.tab button, .add-tab, .window-controls button, .tree-row button, .notice button) {
+:root[data-theme="midnight"] :is(.tab button, .add-tab, .window-controls button, .settings-toggle, .tree-row button, .notice button) {
   background: transparent;
   color: inherit;
 }
-:root[data-theme="midnight"] :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
+:root[data-theme="midnight"] :is(.tab button:hover, .add-tab:hover, .window-controls button:hover, .settings-toggle:hover, .tree-row:hover, tbody tr:is([data-entry], .parent-row):hover) {
   background: var(--surface-hover);
   color: var(--text-main);
 }

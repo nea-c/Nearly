@@ -9,7 +9,8 @@ test.beforeEach(async ({ page }) => {
     window.calls = [];
     window.__TAURI__ = { core: { invoke: async (cmd, args) => {
       window.calls.push({cmd, args});
-      if (cmd === "load_settings") return JSON.parse(localStorage.getItem("tree-settings") || "null") || { version: 1, profiles: [
+      if(cmd === 'request_text_editor_origin_close') return true;
+          if (cmd === "load_settings") return JSON.parse(localStorage.getItem("tree-settings") || "null") || { version: 1, profiles: [
         {id:"a",name:"Alpha",host:"a.invalid",port:22,user:"alice",mode:"sftp",auth:"key",keyFile:"fixture.ppk",hostKey:"fixture-a"},
         {id:"b",name:"Beta",host:"b.invalid",port:22,user:"bob",mode:"sftp",auth:"key",keyFile:"fixture.ppk",hostKey:"fixture-b"}
       ], history: {'["a","/old"]':"C:\\old"}, theme:"light", localPaneRatio:.6 };

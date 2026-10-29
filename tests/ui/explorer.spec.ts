@@ -24,6 +24,7 @@ test.beforeEach(async ({ page }) => {
       core: {
         invoke: async (cmd, args) => {
           window.fixtureCalls.push({ cmd, args });
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,

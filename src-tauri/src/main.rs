@@ -21,6 +21,11 @@ mod exclusion;
 mod explorer_preferences;
 mod side_bookmarks;
 mod file_ops;
+mod text_codec;
+mod text_editor;
+mod text_remote;
+mod operation_progress;
+#[cfg(test)] mod remote_operation_tests;
 mod upload;
 mod transfer_choices;
 mod transfer_io;
@@ -73,6 +78,8 @@ use std::{
 use tauri::{Emitter, Manager};
 #[derive(Default)]
 struct AppState {
+    editor_window: Mutex<()>,
+    text_editor: Arc<text_editor::Broker>,
     transfer_choices: Arc<transfer_choices::Broker>,
     local_watch: Arc<local_watch::LocalWatchRegistry>,
     local_watch_visibility: Arc<Mutex<()>>,
@@ -82,6 +89,7 @@ struct AppState {
     settings_clients: Mutex<settings_clients::SettingsClients>,
     window_size: Mutex<window_size::Session>,
     ownership: Arc<Mutex<window_ownership::Registry>>,
+    attention: Arc<Mutex<error_attention::Controller>>,
     tab_drag: Arc<tab_drag::Controller>,
     startup_update: startup_update::StartupUpdate,
     update_restart: update_runtime::Runtime,
@@ -1170,7 +1178,7 @@ async fn connect_session(
 fn disconnect_session(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let ownership = state.ownership.lock().map_err(|_| "Ownership lock failed")?;
     ownership.mutable(window.label(), &id)?;
-    state.sessions.disconnect(&id)?;
+    state.text_editor.guard_origin_close(&[id.clone()],||state.sessions.disconnect(&id))?;
     if let Ok(watch) = state.local_watch.status(&id) {
         state.local_watch.unwatch(&id, watch.token)?;
     }
@@ -1416,6 +1424,17 @@ fn prepare_file_operation(window: tauri::WebviewWindow, state: tauri::State<'_, 
 }
 
 #[tauri::command]
+fn file_operation_progress(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,id:String)->Result<Option<operation_progress::Snapshot>,String>{
+    read_operation_progress(&state,window.label(),&id)
+}
+fn read_operation_progress(state:&AppState,label:&str,id:&str)->Result<Option<operation_progress::Snapshot>,String>{
+    let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    registry.registered(label)?;
+    window_ownership::Registry::scoped(&mut registry.operations,label,id,false)?;
+    Ok(state.engine.operation_progress(id).map(|p|p.snapshot()))
+}
+
+#[tauri::command]
 fn file_transfer_prompt(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,id:String)->Result<Option<transfer_choices::Prompt>,String>{
  state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
  state.transfer_choices.pending(&id,window.label())
@@ -1544,6 +1563,96 @@ async fn run_file_operation(
     .map_err(|_| "File operation worker failed; outcome may be partial; refresh before retrying")?;
     result
 }
+struct EditorOperationRelease{engine:Arc<engine::Engine>,id:String}
+#[cfg(test)]mod editor_lifecycle_tests{
+ use super::*;
+ #[test]fn review_destroyed_editor_releases_unclaimed_preparations(){let state=AppState::default();{let mut r=state.ownership.lock().unwrap();r.bootstrap("text-editor").unwrap();r.operations.insert("not-dispatched".into(),"text-editor".into());}state.engine.prepare_operation("not-dispatched").unwrap();release_closed_window_registry(&state,"text-editor");for n in 0..8{state.engine.prepare_operation(&format!("fresh-{n}")).expect("destroyed editor must not leak a preparation slot");}}
+ #[test]fn review_last_destroyed_editor_waits_for_active_worker_before_shutdown(){let state=AppState::default();state.ownership.lock().unwrap().bootstrap("text-editor").unwrap();state.engine.prepare_operation("held-save").unwrap();let mut operation=NativeOperation::claim(&state,"text-editor","held-save",None).unwrap();state.engine.claim_operation("held-save").unwrap();let called=Arc::new(AtomicBool::new(false));let observed=called.clone();let registry=state.ownership.clone();let engine=state.engine.clone();operation.finished=Some(Box::new(move||{assert!(!engine.operation_claimed("held-save").unwrap());assert!(registry.lock().unwrap().seal_shutdown_if_idle(),"completion must retry last-window shutdown after releasing ownership");observed.store(true,Ordering::SeqCst);}));state.ownership.lock().unwrap().closed("text-editor");let early=state.ownership.lock().unwrap().seal_shutdown_if_idle();assert!(!called.load(Ordering::SeqCst));state.engine.finish_operation("held-save");drop(operation);assert!(!early,"last editor must not exit while its worker is alive");assert!(called.load(Ordering::SeqCst));}
+ #[test]fn pending_open_and_empty_editor_window_have_explicit_lifecycle_guards(){let state=AppState::default();state.ownership.lock().unwrap().bootstrap("text-editor").unwrap();let pending=state.text_editor.pending_open();assert!(seal_native_window_close(&state,"text-editor",false).is_err());drop(pending);assert!(begin_native_update(&state).is_err(),"empty editor must close before updater settlement, since it has no explorer updater participant");}
+ type Hook=Option<(std::sync::mpsc::Sender<()>,std::sync::mpsc::Receiver<()>)>;
+ thread_local!{static HOOK:std::cell::RefCell<Hook>=const{std::cell::RefCell::new(None)};}
+ pub(super)fn checkpoint(){if let Some((ready,release))=HOOK.with(|h|h.borrow_mut().take()){ready.send(()).unwrap();release.recv_timeout(std::time::Duration::from_secs(5)).unwrap();}}
+ #[test]fn completing_open_blocks_lifecycle_seal_after_waiting_for_ownership(){for update in [false,true]{
+  let state=Arc::new(AppState::default());let root=std::env::temp_dir().join(format!("nearly-editor-lifecycle-{}",getrandom::u64().unwrap()));std::fs::create_dir(&root).unwrap();let path=root.join("sample.txt");std::fs::write(&path,b"sample").unwrap();
+  let mut registry=state.ownership.lock().unwrap();registry.bootstrap("window").unwrap();registry.claim("window","workspace").unwrap();registry.operations.insert("open".into(),"window".into());registry.active_operations.insert("open".into());
+  let (ready_tx,ready_rx)=std::sync::mpsc::channel();let(release_tx,release_rx)=std::sync::mpsc::channel();let other=state.clone();let worker=std::thread::spawn(move||{HOOK.with(|h|*h.borrow_mut()=Some((ready_tx,release_rx)));if update{begin_native_update(&other)}else{seal_native_window_close(&other,"window",false)}});
+  ready_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();let stop=state.engine.claim_operation("open").unwrap();let view=state.text_editor.open(&state.engine,"window","workspace","open",text_editor::Target::Local(path),&stop).unwrap();state.engine.finish_operation("open");registry.operations.remove("open");registry.active_operations.remove("open");release_tx.send(()).unwrap();drop(registry);
+  assert!(worker.join().unwrap().is_err(),"completed open must prevent close/update");state.text_editor.close("window",&view.token).unwrap();std::fs::remove_dir_all(root).unwrap();
+ }}
+}
+impl Drop for EditorOperationRelease{fn drop(&mut self){self.engine.finish_operation(&self.id);}}
+#[tauri::command]
+async fn open_text_document(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:text_editor::OpenRequest)->Result<text_editor::View,String>{
+    let operation=NativeOperation::claim(&state,window.label(),&request.id,Some(&request.workspace_id))?;
+    let stop=state.engine.claim_operation(&request.id)?;
+    let release=EditorOperationRelease{engine:state.engine.clone(),id:request.id.clone()};
+    let target=if request.side==file_ops::Side::Remote{
+        if request.session_id.as_deref()!=Some(request.workspace_id.as_str()){return Err("Editor session must match its owned workspace".into());}
+        let source=state.sessions.resolve(&request.workspace_id)?;guard_connection_pin(&app,&state,source.profile())?;let lease=source.fork_editor()?;lease.link_stop(&stop)?;
+        text_editor::Target::Remote{path:request.path,lease}
+    }else{text_editor::Target::Local(PathBuf::from(request.path))};
+    let pending=state.text_editor.pending_open();let editor=ensure_editor_window(&app)?;
+    let broker=state.text_editor.clone();let engine=state.engine.clone();
+    let opened=tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;let _pending=pending;broker.open(&engine,"text-editor",&request.workspace_id,&request.id,target,&stop)}).await.map_err(|_|"Text open worker failed".to_owned()).and_then(|v|v);
+    let result=match opened{Ok(v)=>v,Err(e)=>{if !state.text_editor.has_window("text-editor"){let _=close_empty_native_window(&app,"text-editor");}return Err(e);}};
+    if app.get_webview_window("text-editor").is_none(){state.text_editor.forget_window("text-editor");return Err("Editor window closed while opening".into());}
+    let _=editor.emit("text-editor-opened",&result.token);let _=editor.show();let _=editor.set_focus();Ok(result)
+}
+#[tauri::command]
+async fn save_text_document(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,id:String,token:String,text:String)->Result<text_editor::Saved,String>{
+    state.text_editor.get(window.label(),&token)?;
+    let mut operation=NativeOperation::claim(&state,window.label(),&id,None)?;let finish_app=app.clone();operation.finished=Some(Box::new(move||{shutdown_if_idle(&finish_app);}));
+    let stop=state.engine.claim_operation(&id)?;let release=EditorOperationRelease{engine:state.engine.clone(),id:id.clone()};
+    let broker=state.text_editor.clone();let engine=state.engine.clone();let label=window.label().to_owned();
+    let notice_token=token.clone();let result=tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;broker.save(&engine,&label,&token,&id,&text,&stop)}).await.map_err(|_|"Text save worker failed; outcome may be uncertain. Reopen and compare before retrying")?;
+    if result.is_ok(){if let Ok(change)=state.text_editor.changed(window.label(),&notice_token){let _=app.emit("text-editor-saved",change);}}result
+}
+#[tauri::command]
+fn close_text_document(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,token:Option<String>)->Result<(),String>{
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    if let Some(token)=token{state.text_editor.close(window.label(),&token)}else{state.text_editor.close_window(window.label())}
+}
+fn ensure_editor_window(app:&tauri::AppHandle)->Result<tauri::WebviewWindow,String>{
+    let state=app.state::<AppState>();let _gate=state.editor_window.lock().map_err(|_|"Editor window lock failed")?;
+    if let Some(w)=app.get_webview_window("text-editor"){state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered("text-editor")?;return Ok(w);}
+    let mut config=app.config().app.windows.iter().find(|w|w.label=="main").cloned().unwrap_or_default();config.label="text-editor".into();config.title="Nearly — Text editor".into();config.url=tauri::WebviewUrl::App("editor.html".into());config.decorations=true;config.width=1000.;config.height=780.;config.min_width=Some(600.);config.min_height=Some(400.);config.visible=false;
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.register_native_window("text-editor")?;
+    let built=tauri::WebviewWindowBuilder::from_config(app,&config).and_then(|b|b.build());
+    match built{Ok(w)=>{input_policy::configure(&w);Ok(w)},Err(e)=>{release_closed_window_registry(&state,"text-editor");Err(format!("Editor window creation failed: {e}"))}}
+}
+#[tauri::command]
+async fn list_text_documents(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>)->Result<Vec<text_editor::View>,String>{
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    if window.label()!="text-editor"{return Err("Only the editor window may list documents".into());}let broker=state.text_editor.clone();tauri::async_runtime::spawn_blocking(move||broker.list("text-editor")).await.map_err(|_|"Editor list worker failed")?
+}
+#[tauri::command]
+async fn request_text_editor_origin_close(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,workspace_ids:Vec<String>)->Result<bool,String>{
+    {let registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;for id in &workspace_ids{registry.mutable(window.label(),id)?;}}
+    let tokens=state.text_editor.remote_tokens(&workspace_ids)?;
+    if tokens.is_empty(){return Ok(true);}
+    let editor=app.get_webview_window("text-editor").ok_or("Editor window unavailable; connection retained to protect unsaved changes")?;
+    let(request_id,response)=state.text_editor.begin_origin_request()?;
+    if let Err(error)=editor.emit("text-editor-origin-close",serde_json::json!({"requestId":request_id,"tokens":tokens})){
+        let _=state.text_editor.resolve_origin_request(&request_id,false);return Err(error.to_string());
+    }
+    let _=editor.show();let _=editor.set_focus();
+    // A crashed/unresponsive editor must never keep a close command pending forever.
+    let accepted=tokio::time::timeout(std::time::Duration::from_secs(120),response).await;
+    let _=state.text_editor.resolve_origin_request(&request_id,false);
+    if accepted.is_err(){let _=editor.emit("text-editor-origin-close-expired",&request_id);}
+    match accepted{Ok(Ok(true))=>{let closed=state.text_editor.remote_tokens(&workspace_ids)?.is_empty();if closed&&!state.text_editor.has_window("text-editor"){let _=close_empty_native_window(&app,"text-editor");}Ok(closed)},Ok(_)=>Ok(false),Err(_)=>Err("Editor close confirmation timed out; connection and unsaved content retained".into())}
+}
+#[tauri::command]
+fn resolve_text_editor_origin_close(window:tauri::WebviewWindow,state:tauri::State<'_,AppState>,request_id:String,accepted:bool)->Result<(),String>{
+    state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
+    if window.label()!="text-editor"{return Err("Only the editor may answer close confirmation".into());}
+    state.text_editor.resolve_origin_request(&request_id,accepted)
+}
+#[tauri::command]
+fn close_text_editor_window(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>)->Result<(),String>{
+    if window.label()!="text-editor"{return Err("Not an editor window".into());}
+    let ids=seal_native_window_close(&state,window.label(),false)?;complete_native_window_close(&app,window.label(),ids)
+}
 #[tauri::command]
 fn cancel_file_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, id: String, abandon: Option<bool>) -> Result<(), String> {
     if abandon.unwrap_or(false){abandon_native_preparation(&state,window.label(),&id)}else{cancel_native_operation(&state,window.label(),&id)}
@@ -1570,9 +1679,12 @@ fn cancel_native_operation(state:&AppState,label:&str,id:&str)->Result<(),String
     Ok(())
 }
 fn release_closed_window_registry(state:&AppState,label:&str){
+    state.text_editor.forget_window(label);
     state.startup_update.cancel(label,true);
     state.tab_drag.forget(label);
+    if let Ok(mut attention)=state.attention.lock(){attention.forget(label);}
     if let Ok(mut registry)=state.ownership.lock(){
+        for(id,owner)in &registry.operations{if owner==label&&!registry.active_operations.contains(id)&&state.engine.operation_claimed(id).ok()==Some(false){let _=state.engine.cancel_operation(id);state.engine.discard_prepared_operation(id);}}
         for (id,owner) in &registry.cancelled_preparations{if owner==label{state.engine.discard_prepared_operation(id);}}
         registry.cancelled_preparations.retain(|_,owner|owner!=label);
         registry.closed(label);
@@ -1606,7 +1718,7 @@ async fn run_local_archive(window: tauri::WebviewWindow, state:tauri::State<'_,A
         local_zip::execute_sources(request.action,&sources,&target,&budget)
     }).await.map_err(|_|ArchiveError::new("io_error"))?
 }
-struct NativeOperation { registry: Arc<Mutex<window_ownership::Registry>>, id:String }
+struct NativeOperation { registry: Arc<Mutex<window_ownership::Registry>>, id:String,finished:Option<Box<dyn FnOnce()+Send>> }
 impl NativeOperation {
     fn claim(state:&AppState,label:&str,id:&str,workspace:Option<&str>)->Result<Self,String>{
         let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
@@ -1617,10 +1729,10 @@ impl NativeOperation {
         window_ownership::Registry::scoped(&mut registry.operations,label,id,true)?;
         if !registry.active_operations.insert(id.into()){return Err("Operation is already being dispatched".into());}
         registry.cancelled_preparations.remove(id);
-        Ok(Self{registry:state.ownership.clone(),id:id.into()})
+        Ok(Self{registry:state.ownership.clone(),id:id.into(),finished:None})
     }
 }
-impl Drop for NativeOperation {fn drop(&mut self){if let Ok(mut r)=self.registry.lock(){r.active_operations.remove(&self.id);r.operations.remove(&self.id);}}}
+impl Drop for NativeOperation {fn drop(&mut self){{if let Ok(mut r)=self.registry.lock(){r.active_operations.remove(&self.id);r.operations.remove(&self.id);}}if let Some(finished)=self.finished.take(){finished();}}}
 #[cfg(test)] mod native_reservation_tests {
     use super::*;
     #[test]
@@ -1680,8 +1792,7 @@ impl Drop for NativeOperation {fn drop(&mut self){if let Ok(mut r)=self.registry
 fn request_error_attention(window:tauri::WebviewWindow,state:tauri::State<AppState>,active:bool)->Result<(),String>{
     // The target is the invoking window, never a renderer-supplied label.
     state.ownership.lock().map_err(|_|"Ownership lock failed")?.registered(window.label())?;
-    let focused=if active{window.is_focused().map_err(|e|e.to_string())?}else{false};
-    error_attention::apply(active,focused,|request|window.request_user_attention(if request{Some(tauri::UserAttentionType::Critical)}else{None})).map_err(|e|e.to_string())
+    error_attention::dispatch(&window.as_ref().window(),&state.attention,if active{error_attention::Event::Error}else{error_attention::Event::Clear}).map_err(|e|e.to_string())
 }
 #[tauri::command]
 fn register_window(window:tauri::WebviewWindow,state:tauri::State<AppState>)->Result<window_ownership::Bootstrap,String>{
@@ -1697,7 +1808,7 @@ fn unregister_workspace(window:tauri::WebviewWindow,state:tauri::State<AppState>
     let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
     registry.mutable(window.label(),&id)?;
     if state.sessions.window_busy(&[id.clone()])?||state.engine.window_busy(&registry.workspace_job_ids(&id),&[])?||registry.operations.values().any(|o|o==window.label()){return Err("Workspace still has native work in progress".into());}
-    state.sessions.disconnect(&id)?;
+    state.text_editor.guard_origin_close(&[id.clone()],||state.sessions.disconnect(&id))?;
     if let Ok(watch)=state.local_watch.status(&id){state.local_watch.unwatch(&id,watch.token)?;}
     registry.release(window.label(),&id)
 }
@@ -1787,14 +1898,19 @@ fn open_blank_window(app:tauri::AppHandle){
 }
 fn shutdown_if_idle(app:&tauri::AppHandle)->bool{let state=app.state::<AppState>();let idle=state.ownership.lock().map(|mut r|r.seal_shutdown_if_idle()).unwrap_or(false);if idle{state.sessions.begin_shutdown();state.sessions.shutdown();state.host_verification.shutdown();app.exit(0);}idle}
 fn seal_native_window_close(state:&AppState,label:&str,require_empty:bool)->Result<Vec<String>,String>{
+    #[cfg(test)] editor_lifecycle_tests::checkpoint();
     let mut registry=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    if state.text_editor.has_window(label){return Err("Close the text editor first; unsaved changes are still open".into());}
     if registry.probes.iter().any(|(id,owner)|owner==label&&state.host_verification.request_pending(id).unwrap_or(true)){return Err("Finish host verification before closing".into());}
+    let owned=registry.owned(label);
+    state.text_editor.guard_origin_close(&owned,||{
     let ids=if require_empty{registry.seal_empty_close(label)?}else{registry.seal_close(label)?};
     let jobs=registry.job_ids(label);
     match(state.sessions.window_busy(&ids),state.engine.window_busy(&jobs,&[])){
         (Ok(false),Ok(false))=>Ok(ids),
         _=>{registry.unseal(label);Err("Stop this window's syncs and finish connecting before closing".into())}
     }
+    })
 }
 fn complete_native_window_close(app:&tauri::AppHandle,label:&str,ids:Vec<String>)->Result<(),String>{
     let state=app.state::<AppState>();
@@ -1857,7 +1973,9 @@ fn dismiss_startup_update(window:tauri::WebviewWindow,state:tauri::State<AppStat
 #[tauri::command]
 fn ack_startup_update(window:tauri::WebviewWindow,state:tauri::State<AppState>,token:String,ready:bool)->Result<(),String>{state.startup_update.acknowledge(window.label(),&token,ready).map_err(str::to_string)}
 fn begin_native_update(state:&AppState)->Result<Vec<String>,String>{
+    #[cfg(test)] editor_lifecycle_tests::checkpoint();
     let mut r=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    if state.text_editor.any_open()||r.window_labels().iter().any(|label|label=="text-editor"){return Err("Close the text editor before updating".into());}
     if r.probes.keys().any(|id|state.host_verification.request_pending(id).unwrap_or(true)){return Err("updateBusy".into())}
     for label in r.window_labels(){if state.sessions.window_busy(&r.owned(&label))?||state.engine.window_busy(&r.job_ids(&label),&[])?{return Err("updateBusy".into())}}
     r.begin_update()
@@ -2099,7 +2217,7 @@ fn main() {
             if let Some(window)=app.get_webview_window("main"){input_policy::configure(&window);}
             restore_main_window_size(app.handle());
             #[cfg(windows)]
-            taskbar_adapter::start(app.handle().clone(), app.state::<AppState>().engine.clone(), app.state::<AppState>().ownership.clone(), taskbar_closing.clone());
+            taskbar_adapter::start(app.handle().clone(), app.state::<AppState>().engine.clone(), app.state::<AppState>().ownership.clone(), app.state::<AppState>().attention.clone(), taskbar_closing.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2130,6 +2248,7 @@ fn main() {
             retry_sync,
             stop_sync,
             run_file_operation,
+            open_text_document,save_text_document,close_text_document,list_text_documents,close_text_editor_window,request_text_editor_origin_close,resolve_text_editor_origin_close,
             run_upload,
             run_download,
             run_remote_drag,
@@ -2137,6 +2256,7 @@ fn main() {
             choose_file_transfer,
             run_local_archive,
             prepare_file_operation,
+            file_operation_progress,
             cancel_file_operation
         ])
         .on_webview_event(|webview, event| {
@@ -2149,9 +2269,12 @@ fn main() {
             }
         })
         .on_window_event(move |window, event| {
+            if window.label()=="text-editor"&&matches!(event,tauri::WindowEvent::Destroyed){
+                let state=window.state::<AppState>();if let Ok(r)=state.ownership.lock(){for(id,owner)in &r.operations{if owner=="text-editor"{let _=state.engine.cancel_operation(id);}}}release_closed_window_registry(&state,"text-editor");shutdown_if_idle(window.app_handle());return;
+            }
             if matches!(event,tauri::WindowEvent::Focused(true)) {
                 // Attention acknowledgement never clears errors or overlay badges.
-                let _=window.request_user_attention(None);
+                let _=error_attention::dispatch(window,&window.state::<AppState>().attention,error_attention::Event::Clear);
             }
             // A window-content WebView is surfaced as a synthesized window event.
             if let tauri::WindowEvent::DragDrop(event) = event {
@@ -2164,6 +2287,7 @@ fn main() {
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                if window.label()=="text-editor"{let _=window.emit("text-editor-close",());return;}
                 if closing.load(Ordering::SeqCst) {
                     return;
                 }
@@ -2171,6 +2295,8 @@ fn main() {
                 let state=app.state::<AppState>();
                 let label=window.label().to_owned();
                 if cancel_drag_preview_close(&app,&label).unwrap_or(false){return;}
+                let ids=state.ownership.lock().map(|r|r.owned(&label)).unwrap_or_default();
+                if state.text_editor.remote_tokens(&ids).map(|tokens|!tokens.is_empty()).unwrap_or(true){let _=window.emit("connection-editor-close",());return;}
                 flush_main_window_size(&app,&label);
                 let result=seal_native_window_close(&state,&label,false)
                     .and_then(|ids|complete_native_window_close(&app,&label,ids));

@@ -17,7 +17,7 @@ test('single build retains root resource harness and Cargo runtime environment',
  rows.push({reason:'build-script-executed',linked_paths:['native='+deps]},{reason:'build-finished',success:true});
  const result=resolveBuild(rows,root,target,deps,{PATH:'original'});
  assert.deepEqual(result.executables,[main,resource]);assert.equal(result.mainExecutable,main);
- assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.3');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
+ assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.1');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
  assert.equal(result.cwd,root);assert.equal(result.env.CARGO_MANIFEST_DIR,root);
  assert.ok(result.env.PATH.includes(deps));assert.ok(result.env.PATH.endsWith('original'));
  assert.throws(()=>resolveBuild(rows.slice(0,-1),root,target,deps,{}),/successful/i);
@@ -91,12 +91,13 @@ test('entry command performs exactly one Cargo build before both lanes',async()=
  const main=path.join(deps,'nearly-abcd.exe'),resource=path.join(deps,'windows_version_resource-abcd.exe');for(const item of [main,resource])fs.copyFileSync(exe,item);
  fs.writeFileSync(path.join(pkg,'Cargo.toml'),'[package]\nname = "nearly"\nversion = "3.6.0"\n');
  for(const name of ['native-parallel-test.mjs','native-test-process.mjs'])fs.copyFileSync(path.join(repo,'scripts',name),path.join(root,'scripts',name));
- for(const name of ['sync-difference-test.mjs','listing-worker-test.mjs','listing-existing-pipeline-test.mjs'])fs.writeFileSync(path.join(root,'scripts',name),`import fs from 'node:fs';import path from 'node:path';const root=process.env.EVENT_ROOT;if(fs.readFileSync(path.join(root,'build-count'),'utf8')!=='1')throw Error('unexpected build count');const manifest=JSON.parse(fs.readFileSync(process.env.NEARLY_NATIVE_TEST_MANIFEST));if(manifest.mainExecutable!==${JSON.stringify(main)})throw Error('wrong shared executable');fs.appendFileSync(path.join(root,'fixture-filters'),process.argv.slice(1).join(' ')+'\\n');fs.writeFileSync(path.join(root,'fixture-start'),'');await new Promise(r=>setTimeout(r,100));`);
+ for(const name of ['sync-difference-test.mjs','listing-worker-test.mjs','listing-existing-pipeline-test.mjs','remote-operation-test.mjs','new-file-wait-test.mjs','text-editor-test.mjs','transfer-progress-test.mjs'])fs.writeFileSync(path.join(root,'scripts',name),`import fs from 'node:fs';import path from 'node:path';const root=process.env.EVENT_ROOT;if(fs.readFileSync(path.join(root,'build-count'),'utf8')!=='1')throw Error('unexpected build count');const manifest=JSON.parse(fs.readFileSync(process.env.NEARLY_NATIVE_TEST_MANIFEST));if(manifest.mainExecutable!==${JSON.stringify(main)})throw Error('wrong shared executable');fs.appendFileSync(path.join(root,'fixture-filters'),process.argv.slice(1).join(' ')+'\\n');fs.writeFileSync(path.join(root,'fixture-start'),'');await new Promise(r=>setTimeout(r,100));`);
  const jsonFile=path.join(root,'cargo.jsonl');fs.writeFileSync(jsonFile,[main,resource].map((executable,i)=>JSON.stringify({reason:'compiler-artifact',manifest_path:path.join(pkg,'Cargo.toml'),target:{name:i?'windows_version_resource':'nearly',kind:[i?'test':'bin']},profile:{test:true},executable})).concat(JSON.stringify({reason:'build-finished',success:true})).join('\n'));
  const p=new Processes();try{await p.run(process.execPath,[path.join(root,'scripts','native-parallel-test.mjs')],{cwd:root,env:{...process.env,PATH:tools+path.delimiter+process.env.PATH,EVENT_ROOT:root,CARGO_TARGET_DIR:target,DUMMY_CARGO_JSON:jsonFile}});}finally{await p.stop();}
  assert.equal(fs.readFileSync(path.join(root,'build-count'),'utf8'),'1');
  const args=fs.readFileSync(path.join(root,'build-args'),'utf8');assert.match(args,/\+1\.97\.1 test --no-run --offline --locked --message-format=json/);
- const filters=fs.readFileSync(path.join(root,'fixture-filters'),'utf8').trim().split('\n');assert.equal(filters.length,4);assert.match(filters[0],/sync_difference_generated_localhost/);assert.match(filters[1],/directory_deletion_generated_localhost/);
+ const filters=fs.readFileSync(path.join(root,'fixture-filters'),'utf8').trim().split('\n');assert.equal(filters.length,8);assert.match(filters[0],/sync_difference_generated_localhost/);assert.match(filters[1],/directory_deletion_generated_localhost/);
+ for(const [i,name]of ['remote-operation-test','new-file-wait-test','text-editor-test','transfer-progress-test'].entries())assert.match(filters[i+4],new RegExp(name));
  const resultRoot=fs.readdirSync(path.join(root,'test-results')).find(name=>name.startsWith('native-parallel-'));
  assert.ok(fs.existsSync(path.join(root,'test-results',resultRoot,'normal-1.log')),'resource integration executable ran');
 });

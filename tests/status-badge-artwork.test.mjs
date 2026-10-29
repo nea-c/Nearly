@@ -10,9 +10,9 @@ test('adopted A uses fixed upper right half-width and exact approved symbols',as
  assert.match(statusBadgeSvg('sync','data:image/png;base64,dummy',32),/M12\.5 9\.6A4\.8 4\.8 0 1 1 10\.2 3\.7L12 4\.6/);
  assert.throws(()=>statusBadgeSvg('connected','',32));
 });
-test('native window icon uses composites and removes OS-positioned overlay',async()=>{
+test('r3.6 regression restores shell badges and avoids a duplicate composite window badge',async()=>{
  const adapter=await fs.readFile(new URL('src-tauri/src/taskbar_adapter.rs',root),'utf8');
- assert.match(adapter,/status_icon_native::apply\(windows::Win32::Foundation::HWND\(window\.hwnd\(\)\?\.0\),index,\[BASE,SYNC,DONE,ERROR,PAUSED\]\)/);
- assert.match(adapter,/window\.set_overlay_icon\(None\)\?/);
+ assert.match(adapter,/status_icon_native::apply_shell/);
+ assert.doesNotMatch(adapter,/window\.set_overlay_icon\(None\)/);
  assert.match(adapter,/TaskbarState::Idle => BASE/);
 });
