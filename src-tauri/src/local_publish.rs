@@ -156,10 +156,24 @@ impl OwnedStage {
         })
     }
     fn publish_replacing_checked(&mut self, target: &Path, budget: &Budget, check: impl FnOnce(&File, &File) -> Result<(), ArchiveError>) -> Result<(), ArchiveError> {
+        self.publish_replacing_with_access(target,budget,0x20080,check)
+    }
+    /// Retains a readable, write-denying target handle from verification through publication.
+    /// Delete sharing is required for atomic rename; recheck pathname identity after verification.
+    pub fn publish_replacing_verified(&mut self,target:&Path,budget:&Budget,verify:impl FnOnce(&File)->Result<(),ArchiveError>)->Result<(),ArchiveError>{
+        self.publish_replacing_with_access(target,budget,0x20081,|source,original|{
+            if file_security(source)?!=file_security(original)?||(source.metadata()?.file_attributes()^original.metadata()?.file_attributes())&0x4000!=0{return Err(ArchiveError::new("security_mismatch"));}
+            verify(original)?;
+            let current=OpenOptions::new().access_mode(0x80).share_mode(5).custom_flags(0x02200000).open(target)?;
+            if identity(&current)?!=identity(original)?{return Err(ArchiveError::new("target_changed"));}
+            Ok(())
+        })
+    }
+    fn publish_replacing_with_access(&mut self,target:&Path,budget:&Budget,access:u32,check:impl FnOnce(&File,&File)->Result<(),ArchiveError>)->Result<(),ArchiveError>{
         if !self.handle.metadata()?.is_file() || !ordinary(&fs::symlink_metadata(target)?) || !fs::symlink_metadata(target)?.is_file() {
             return Err(ArchiveError::new("unsafe_entry"));
         }
-        let original = OpenOptions::new().access_mode(0x20080).share_mode(5).custom_flags(0x02200000).open(target)?;
+        let original = OpenOptions::new().access_mode(access).share_mode(5).custom_flags(0x02200000).open(target)?;
         if !ordinary(&original.metadata()?) || !original.metadata()?.is_file() { return Err(ArchiveError::new("unsafe_entry")); }
         check(&self.handle, &original)?;
         self.publish_inner(target, budget, true)
@@ -305,6 +319,16 @@ mod tests {
         use std::io::Write;
         let parent=temp();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let target=parent.join("target");fs::write(&target,b"old intact").unwrap();let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"new complete").unwrap();
         assert!(stage.publish_replacing_checked(&target,&budget,|_,_|Err(ArchiveError::new("security_mismatch"))).is_err());assert_eq!(fs::read(&target).unwrap(),b"old intact");assert_eq!(stage.handle.metadata().unwrap().len(),12);stage.discard_file().unwrap();drop(stage);fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn readable_publication_guard_blocks_in_place_writes_until_rename(){
+        use std::io::Write;let parent=temp();let target=parent.join("target.txt");fs::write(&target,b"original").unwrap();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"replacement").unwrap();stage.handle.sync_all().unwrap();
+        stage.publish_replacing_verified(&target,&budget,|original|{assert!(fs::write(&target,b"external").is_err(),"retained readable handle must deny in-place writes");assert_eq!(identity(original)?,identity(&source_file(&target)?)?);Ok(())}).unwrap();assert_eq!(fs::read(&target).unwrap(),b"replacement");drop(stage);fs::remove_dir_all(parent).unwrap();
+    }
+    #[test]
+    fn delete_shared_replacement_during_verification_is_detected_by_path_identity(){
+        use std::io::Write;let parent=temp();let target=parent.join("target.txt");let external=parent.join("external.txt");fs::write(&target,b"original").unwrap();fs::write(&external,b"external").unwrap();let stop=AtomicBool::new(false);let budget=Budget::new(&stop);let mut stage=OwnedStage::create(&parent,false,&budget).unwrap();stage.handle.write_all(b"replacement").unwrap();
+        let error=stage.publish_replacing_verified(&target,&budget,|_|{fs::rename(&external,&target)?;Ok(())}).unwrap_err();assert_eq!(error.code,"target_changed");assert_eq!(fs::read(&target).unwrap(),b"external");stage.discard_file().unwrap();drop(stage);fs::remove_dir_all(parent).unwrap();
     }
     #[test]
     fn replacement_preserves_open_delete_shared_target_handle_until_atomic_publish() {

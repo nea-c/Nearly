@@ -1,6 +1,6 @@
 {
   "name": "nearly",
-  "version": "3.7.0-pre.3",
+  "version": "4.0.0-pre.1",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -28,6 +28,7 @@
     "@tauri-apps/cli": "^2.12.3",
     "node-gyp": "13.1.0",
     "prettier": "^3.9.10",
+    "prismjs": "1.30.0",
     "ssh2": "^1.17.0",
     "typescript": "^7.0.2",
     "vite": "^6.4.4"

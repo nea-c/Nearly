@@ -55,6 +55,9 @@ const fixture=await createFixture(output,{
   if(mode==='committed'&&committed&&target==='/upload/job/a.txt')return 3;
  },
 });
+// Keep filesystem failure evidence before sending an SFTP error; status is unchanged.
+const recordErrors=fixture.fileSystemErrors.push.bind(fixture.fileSystemErrors);
+fixture.fileSystemErrors.push=(...errors)=>{const count=recordErrors(...errors);fs.writeFileSync(path.join(output,'filesystem-errors.json'),JSON.stringify(fixture.fileSystemErrors));return count;};
 if(mode.startsWith('compare'))setInterval(()=>{
  for(const name of fs.readdirSync(output).filter(n=>n==='metrics-request'||n.startsWith('metrics-request-'))){
  const target=path.join(output,name==='metrics-request'?'metrics.json':name.replace('metrics-request-','metrics-')+'.json');

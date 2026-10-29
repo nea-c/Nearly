@@ -16,6 +16,17 @@ async function setup(page:Page,start=true){await page.addInitScript(()=>{
 const count=(p:Page)=>p.evaluate(()=>(window as any).attentionFixture.signals.filter((v:boolean)=>v).length);
 const fail=(p:Page,n:number)=>p.evaluate(n=>Object.assign((window as any).attentionFixture.status,{status:'failed',syncPhase:'error',errorCount:n}),n);
 const focus=(p:Page)=>p.evaluate(()=>{(window as any).attentionFixture.focused=true;window.dispatchEvent(new Event('focus'));});
+test('focus and repeated caught-up snapshots preserve completion presentation',async({page})=>{
+ await setup(page);await expect(page.locator('#sync-state')).toContainText('Up to date');
+ await expect(page.locator('.status-summary .status-icon')).toHaveClass(/sync-complete/);
+ const label=await page.locator('#sync-state').textContent();
+ await focus(page);await page.evaluate(()=>window.dispatchEvent(new Event('resize')));
+ await page.waitForTimeout(1600);
+ await expect(page.locator('#sync-state')).toHaveText(label!);
+ await expect(page.locator('.status-summary .status-icon')).toHaveClass(/sync-complete/);
+ expect(await count(page)).toBe(0);
+});
+
 test('new sync errors request once; focus clears attention but keeps failure; later errors rearm',async({page})=>{
  await setup(page);await fail(page,1);await expect.poll(()=>count(page)).toBe(1);await page.waitForTimeout(1600);expect(await count(page)).toBe(1);
  const failureLabel=await page.locator('#sync-state').textContent();

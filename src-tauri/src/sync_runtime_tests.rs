@@ -4,7 +4,8 @@ use std::{fs,io::{BufRead,BufReader},path::{Path,PathBuf},process::{Child,Comman
 struct Fixture { child:Child, root:PathBuf, remote:PathBuf, profile:Profile, secret:String }
 impl Fixture {
  fn start(mode:&str)->Self {
-  let root=std::env::temp_dir().join(format!("nearly-sync-runtime-{}-{}",std::process::id(),mode));
+  let root=std::env::temp_dir().join(format!("nearly-sync-runtime-{}-{}-{}",std::process::id(),mode,getrandom::u64().unwrap()));
+  fs::create_dir(&root).unwrap();
   fs::create_dir_all(root.join("local/nested")).unwrap();
   fs::write(root.join("local/a.txt"),vec![65;1024*1024]).unwrap();
   fs::write(root.join("local/nested/b.txt"),b"later upload").unwrap();

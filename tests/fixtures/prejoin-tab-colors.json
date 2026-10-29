@@ -1,0 +1,425 @@
+{
+  "provenance": "Exact pre-join CSS from ../badge-grouped-fix-result/combined-local.patch, measured in headless Edge with generated DOM. Effective backgrounds follow the first opaque ancestor; no palette values invented.",
+  "themes": {
+    "light": {
+      "main": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(231, 237, 245)",
+          "tabBackground": "rgb(220, 229, 241)",
+          "tabEffective": "rgb(220, 229, 241)",
+          "borderColor": "rgba(0, 0, 0, 0)",
+          "labelColor": "rgb(53, 71, 93)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(220, 229, 241)",
+          "closeColor": "rgb(113, 129, 153)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(220, 229, 241)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(231, 237, 245)",
+          "tabBackground": "rgb(220, 229, 241)",
+          "tabEffective": "rgb(220, 229, 241)",
+          "borderColor": "rgba(0, 0, 0, 0)",
+          "labelColor": "rgb(53, 71, 93)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(220, 229, 241)",
+          "closeColor": "rgb(113, 129, 153)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(220, 229, 241)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(231, 237, 245)",
+          "tabBackground": "rgb(220, 229, 241)",
+          "tabEffective": "rgb(220, 229, 241)",
+          "borderColor": "rgba(0, 0, 0, 0)",
+          "labelColor": "rgb(53, 71, 93)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(220, 229, 241)",
+          "closeColor": "rgb(28, 56, 93)",
+          "closeBackground": "rgb(202, 216, 235)",
+          "closeEffective": "rgb(202, 216, 235)"
+        }
+      },
+      "editor": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(255, 255, 255)",
+          "tabBackground": "rgb(242, 245, 249)",
+          "tabEffective": "rgb(242, 245, 249)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(197, 209, 224) rgb(197, 209, 224)",
+          "labelColor": "rgb(83, 102, 127)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(242, 245, 249)",
+          "closeColor": "rgb(83, 102, 127)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(242, 245, 249)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(255, 255, 255)",
+          "tabBackground": "rgb(242, 245, 249)",
+          "tabEffective": "rgb(242, 245, 249)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(197, 209, 224) rgb(197, 209, 224)",
+          "labelColor": "rgb(83, 102, 127)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(242, 245, 249)",
+          "closeColor": "rgb(83, 102, 127)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(242, 245, 249)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(255, 255, 255)",
+          "tabBackground": "rgb(242, 245, 249)",
+          "tabEffective": "rgb(242, 245, 249)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(197, 209, 224) rgb(197, 209, 224)",
+          "labelColor": "rgb(83, 102, 127)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(242, 245, 249)",
+          "closeColor": "rgb(36, 51, 72)",
+          "closeBackground": "rgb(237, 243, 251)",
+          "closeEffective": "rgb(237, 243, 251)"
+        }
+      }
+    },
+    "dark": {
+      "main": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(45, 45, 45)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgb(65, 65, 65)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(45, 45, 45)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(45, 45, 45)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(45, 45, 45)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgb(65, 65, 65)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgb(54, 54, 54)",
+          "labelEffective": "rgb(54, 54, 54)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(45, 45, 45)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(45, 45, 45)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgb(65, 65, 65)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(45, 45, 45)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgb(54, 54, 54)",
+          "closeEffective": "rgb(54, 54, 54)"
+        }
+      },
+      "editor": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(27, 27, 27)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(91, 91, 91) rgb(91, 91, 91)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgb(45, 45, 45)",
+          "labelEffective": "rgb(45, 45, 45)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgb(45, 45, 45)",
+          "closeEffective": "rgb(45, 45, 45)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(27, 27, 27)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(91, 91, 91) rgb(91, 91, 91)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgb(54, 54, 54)",
+          "labelEffective": "rgb(54, 54, 54)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgb(45, 45, 45)",
+          "closeEffective": "rgb(45, 45, 45)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(27, 27, 27)",
+          "tabBackground": "rgb(45, 45, 45)",
+          "tabEffective": "rgb(45, 45, 45)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(91, 91, 91) rgb(91, 91, 91)",
+          "labelColor": "rgb(237, 237, 237)",
+          "labelBackground": "rgb(45, 45, 45)",
+          "labelEffective": "rgb(45, 45, 45)",
+          "closeColor": "rgb(237, 237, 237)",
+          "closeBackground": "rgb(54, 54, 54)",
+          "closeEffective": "rgb(54, 54, 54)"
+        }
+      }
+    },
+    "midnight": {
+      "main": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(36, 47, 61)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgb(53, 68, 88)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(36, 47, 61)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(36, 47, 61)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(36, 47, 61)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgb(53, 68, 88)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgb(43, 60, 80)",
+          "labelEffective": "rgb(43, 60, 80)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(36, 47, 61)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(36, 47, 61)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgb(53, 68, 88)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(36, 47, 61)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgb(43, 60, 80)",
+          "closeEffective": "rgb(43, 60, 80)"
+        }
+      },
+      "editor": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(18, 24, 32)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(72, 92, 116) rgb(72, 92, 116)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgb(36, 47, 61)",
+          "labelEffective": "rgb(36, 47, 61)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgb(36, 47, 61)",
+          "closeEffective": "rgb(36, 47, 61)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(18, 24, 32)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(72, 92, 116) rgb(72, 92, 116)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgb(43, 60, 80)",
+          "labelEffective": "rgb(43, 60, 80)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgb(36, 47, 61)",
+          "closeEffective": "rgb(36, 47, 61)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(18, 24, 32)",
+          "tabBackground": "rgb(36, 47, 61)",
+          "tabEffective": "rgb(36, 47, 61)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(72, 92, 116) rgb(72, 92, 116)",
+          "labelColor": "rgb(230, 237, 245)",
+          "labelBackground": "rgb(36, 47, 61)",
+          "labelEffective": "rgb(36, 47, 61)",
+          "closeColor": "rgb(230, 237, 245)",
+          "closeBackground": "rgb(43, 60, 80)",
+          "closeEffective": "rgb(43, 60, 80)"
+        }
+      }
+    },
+    "forest": {
+      "main": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(46, 64, 56)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgb(73, 100, 83)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(46, 64, 56)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(46, 64, 56)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(46, 64, 56)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgb(73, 100, 83)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgb(58, 77, 67)",
+          "labelEffective": "rgb(58, 77, 67)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(46, 64, 56)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(46, 64, 56)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgb(73, 100, 83)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(46, 64, 56)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgb(58, 77, 67)",
+          "closeEffective": "rgb(58, 77, 67)"
+        }
+      },
+      "editor": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(25, 35, 31)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(109, 139, 120) rgb(109, 139, 120)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgb(46, 64, 56)",
+          "labelEffective": "rgb(46, 64, 56)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgb(46, 64, 56)",
+          "closeEffective": "rgb(46, 64, 56)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(25, 35, 31)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(109, 139, 120) rgb(109, 139, 120)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgb(58, 77, 67)",
+          "labelEffective": "rgb(58, 77, 67)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgb(46, 64, 56)",
+          "closeEffective": "rgb(46, 64, 56)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(25, 35, 31)",
+          "tabBackground": "rgb(46, 64, 56)",
+          "tabEffective": "rgb(46, 64, 56)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(109, 139, 120) rgb(109, 139, 120)",
+          "labelColor": "rgb(232, 239, 235)",
+          "labelBackground": "rgb(46, 64, 56)",
+          "labelEffective": "rgb(46, 64, 56)",
+          "closeColor": "rgb(232, 239, 235)",
+          "closeBackground": "rgb(58, 77, 67)",
+          "closeEffective": "rgb(58, 77, 67)"
+        }
+      }
+    },
+    "mint": {
+      "main": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(224, 238, 229)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgb(181, 204, 189)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(224, 238, 229)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(224, 238, 229)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(224, 238, 229)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgb(181, 204, 189)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgb(211, 232, 220)",
+          "labelEffective": "rgb(211, 232, 220)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgba(0, 0, 0, 0)",
+          "closeEffective": "rgb(224, 238, 229)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(224, 238, 229)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgb(181, 204, 189)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgba(0, 0, 0, 0)",
+          "labelEffective": "rgb(224, 238, 229)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgb(211, 232, 220)",
+          "closeEffective": "rgb(211, 232, 220)"
+        }
+      },
+      "editor": {
+        "normal": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(238, 247, 241)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(118, 151, 128) rgb(118, 151, 128)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgb(224, 238, 229)",
+          "labelEffective": "rgb(224, 238, 229)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgb(224, 238, 229)",
+          "closeEffective": "rgb(224, 238, 229)"
+        },
+        "labelHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(238, 247, 241)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(118, 151, 128) rgb(118, 151, 128)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgb(211, 232, 220)",
+          "labelEffective": "rgb(211, 232, 220)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgb(224, 238, 229)",
+          "closeEffective": "rgb(224, 238, 229)"
+        },
+        "closeHover": {
+          "stripBackground": "rgba(0, 0, 0, 0)",
+          "stripEffective": "rgb(238, 247, 241)",
+          "tabBackground": "rgb(224, 238, 229)",
+          "tabEffective": "rgb(224, 238, 229)",
+          "borderColor": "rgba(0, 0, 0, 0) rgb(118, 151, 128) rgb(118, 151, 128)",
+          "labelColor": "rgb(32, 61, 45)",
+          "labelBackground": "rgb(224, 238, 229)",
+          "labelEffective": "rgb(224, 238, 229)",
+          "closeColor": "rgb(32, 61, 45)",
+          "closeBackground": "rgb(211, 232, 220)",
+          "closeEffective": "rgb(211, 232, 220)"
+        }
+      }
+    }
+  }
+}

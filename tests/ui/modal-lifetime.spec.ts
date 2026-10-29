@@ -8,6 +8,7 @@ test("background drive and directory completion preserves drafts and pending sta
     window.__TAURI__ = {
       core: {
         invoke: async (cmd, args) => {
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,
@@ -104,6 +105,7 @@ test("a delayed tab disconnect cannot dismiss another tab connection modal", asy
     window.__TAURI__ = {
       core: {
         invoke: async (cmd) => {
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,

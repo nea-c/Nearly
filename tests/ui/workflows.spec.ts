@@ -8,7 +8,8 @@ for (const fail of [false, true]) {
         window.__TAURI__ = {
           core: {
             invoke: async (cmd, args) => {
-              if (cmd === "load_settings")
+              if(cmd === 'request_text_editor_origin_close') return true;
+          if (cmd === "load_settings")
                 return {
                   version: 1,
                   profiles: [
@@ -80,6 +81,7 @@ test("late directory response cannot replace the current folder", async ({
     window.__TAURI__ = {
       core: {
         invoke: async (cmd, args) => {
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,
@@ -147,6 +149,7 @@ test("delayed stop and cancelled restart review cannot revive a stopped job", as
       core: {
         invoke: async (cmd) => {
           window.restartCalls.push(cmd);
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,
@@ -222,6 +225,7 @@ test("pending sync startup freezes settings and cancellation restores them", asy
       },
       core: {
         invoke: async (cmd) => {
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,

@@ -162,3 +162,10 @@ Thumbs.db
 !/scripts/empty-remote-safety-test.mjs
 !/scripts/status-badge-artwork.mjs
 !/scripts/generate-status-badges.mjs
+!/scripts/remote-operation-test.mjs
+!/scripts/new-file-wait-test.mjs
+!/scripts/text-editor-test.mjs
+!/scripts/text-editor-ui-test.mjs
+!/scripts/editor-window-ui-test.mjs
+!/scripts/transfer-progress-test.mjs
+!/scripts/transfer-progress-native-ui.mjs

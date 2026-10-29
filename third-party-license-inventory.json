@@ -6333,5 +6333,19 @@
         }
       ]
     }
+  ],
+  "frontendPackages": [
+    {
+      "name": "prismjs",
+      "version": "1.30.0",
+      "license": "MIT",
+      "source": "https://registry.npmjs.org/prismjs/-/prismjs-1.30.0.tgz",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "sha256": "2b947f0901a7ffcf08a89957da9783c0e9c6e72cb6ce8e959f501ab5409e4d2b"
+        }
+      ]
+    }
   ]
 }

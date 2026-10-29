@@ -105,6 +105,7 @@ pub fn upload(
     entries: &mut [crate::upload::Entry],
     stop: &AtomicBool,
     choices: &Exchange,
+    progress: Option<&crate::operation_progress::Progress>,
 ) -> Result<UploadOutcome, String> {
     let mut completed = 0;
     let mut bytes = 0;
@@ -114,14 +115,19 @@ pub fn upload(
     let execution=s.run(stop,async{
   let outcome=async{
    checked_directory(&s.raw,remote,false).await?;
-   for entry in entries {
+   let count=entries.len();
+   for (index,entry) in entries.iter_mut().enumerate() {
+    if let Some(p)=progress {p.position(index+1,count);p.phase("uploading");}
     check(stop)?;crate::upload::revalidate(entry)?;
-    let Some(relative)=mappings.map(&entry.relative) else{skipped+=1;continue};
+    let Some(relative)=mappings.map(&entry.relative) else{if let Some(p)=progress {if !entry.directory {p.skip_bytes(entry.size);}}skipped+=1;continue};
     let mut target=format!("{}/{}",remote.trim_end_matches('/'),relative);let mut existing=lookup(s,&target).await?;
     if let Some(attrs)=existing.as_ref(){
      if !(entry.directory&&attrs.is_dir()){
-      match choices.ask(entry.path.to_str().ok_or("Unsupported source path")?,&target,entry.directory,attrs.is_dir(),stop)?{
-       Choice::Skip=>{if entry.directory{mappings.skipped.push(entry.relative.clone());}skipped+=1;continue},
+      if let Some(p)=progress {p.phase("waiting");}
+      let decision=choices.ask(entry.path.to_str().ok_or("Unsupported source path")?,&target,entry.directory,attrs.is_dir(),stop)?;
+      if let Some(p)=progress {p.phase("uploading");}
+      match decision {
+       Choice::Skip=>{if let Some(p)=progress {if !entry.directory {p.skip_bytes(entry.size);}}if entry.directory{mappings.skipped.push(entry.relative.clone());}skipped+=1;continue},
        Choice::KeepBoth=>{let (parent,name)=relative.rsplit_once('/').unwrap_or(("",relative.as_str()));let mut found=None;
         for n in 2..=10000{check(stop)?;let candidate=copy_name(name,entry.directory,n);crate::file_ops::validate_creation_name(&candidate,crate::file_ops::Side::Remote)?;let renamed=if parent.is_empty(){candidate}else{format!("{parent}/{candidate}")};let p=format!("{}/{}",remote.trim_end_matches('/'),renamed);if lookup(s,&p).await?.is_none(){found=Some((renamed,p));break}}
         let (renamed,p)=found.ok_or("No available keep-both name")?;mappings.renamed.push((entry.relative.clone(),renamed.clone()));target=p;existing=None;
@@ -132,12 +138,13 @@ pub fn upload(
      }
     }
     let parent=target.rsplit_once('/').unwrap().0;let parent=if parent.is_empty(){"/"}else{parent};checked_directory(&s.raw,parent,false).await?;unchanged(s,&target,existing.as_ref()).await?;
-    if entry.directory{if existing.is_none(){s.raw.mkdir(target.clone(),FileAttributes::empty()).await.map_err(|_|"Directory creation failed or outcome uncertain")?;}completed+=1;continue}
+    if entry.directory{if existing.is_none(){s.raw.mkdir(target.clone(),FileAttributes::empty()).await.map_err(|_|"Directory creation failed or outcome uncertain")?;}completed+=1;if let Some(p)=progress {p.committed();}continue}
     let stage=format!("{parent}/.nearly-transfer-{}.partial",nonce()?);
     let mut stage_attributes=FileAttributes::empty();stage_attributes.permissions=existing.as_ref().and_then(|a|a.permissions).map(|p|p&0o777);
     let handle=s.raw.open(stage.clone(),OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,stage_attributes).await.map_err(|_|"Exclusive stage creation failed")?.handle;
     let transfer=async{
-     let mut offset=0;loop{check(stop)?;let mut data=vec![0u8;32768];let n=entry.file.read(&mut data).map_err(|_|"Source read failed")?;if n==0{break}if offset+n as u64>entry.size{return Err("Source size changed".into())}data.truncate(n);s.raw.write(handle.clone(),offset,data).await.map_err(|_|"Upload write failed")?;offset+=n as u64;transferred_bytes+=n as u64;}
+     let mut offset=0;loop{check(stop)?;let mut data=vec![0u8;32768];let n=entry.file.read(&mut data).map_err(|_|"Source read failed")?;if n==0{break}if offset+n as u64>entry.size{return Err("Source size changed".into())}data.truncate(n);s.raw.write(handle.clone(),offset,data).await.map_err(|_|"Upload write failed")?;offset+=n as u64;transferred_bytes+=n as u64;if let Some(p)=progress {p.bytes(n as u64);}}
+     if let Some(p)=progress {p.phase("finalizing");}
      if offset!=entry.size{return Err("Source size changed".into())}crate::upload::revalidate(entry)?;
      let staged=s.raw.fstat(handle.clone()).await.map_err(|_|"Stage verification failed")?.attrs;if staged.size!=Some(offset)||!staged.file_type().is_file(){return Err("Stage size or type changed".into())}
      if let Some(original)=existing.as_ref(){if staged.permissions.map(|p|p&0o777)!=original.permissions.map(|p|p&0o777)||staged.uid!=original.uid||staged.gid!=original.gid{return Err("Destination permissions or ownership cannot be preserved; original retained".into())}}
@@ -149,8 +156,9 @@ pub fn upload(
      if existing.is_some(){let mut data=Vec::new();for p in [&stage,&target]{data.extend_from_slice(&(p.len() as u32).to_be_bytes());data.extend_from_slice(p.as_bytes());}match s.raw.extended("posix-rename@openssh.com",data).await{Ok(Packet::Status(v))if v.status_code==StatusCode::Ok=>Ok(()),_=>Err("Atomic replacement failed or acknowledgement uncertain".into())}}
      else{s.raw.rename(stage.clone(),target.clone()).await.map(|_|()).map_err(|_|"Exclusive publication failed or acknowledgement uncertain".into())}
     }.await;
-    if let Err(error)=publish{let cleaned=s.raw.remove(stage.clone()).await.is_ok();return Err(if cleaned{error}else{format!("{error}; staging may remain at {stage}")})}completed+=1;bytes+=entry.size;
+    if let Err(error)=publish{let cleaned=s.raw.remove(stage.clone()).await.is_ok();return Err(if cleaned{error}else{format!("{error}; staging may remain at {stage}")})}completed+=1;bytes+=entry.size;if let Some(p)=progress {p.committed();}
    }
+   if let Some(p)=progress {p.phase("finalizing");}
    Ok(())
   }.await;
   Ok(result(outcome,stop,completed,bytes,transferred_bytes,skipped))
@@ -338,6 +346,7 @@ pub fn download(
     choices: &Exchange,
 ) -> Result<UploadOutcome, String> {
     use std::net::ToSocketAddrs;
+    let progress=engine.operation_progress(&request.id);
     let local = crate::file_ops::local_path(&request.local, true)?;
     let mut guards = Vec::new();
     for ancestor in local.ancestors() {
@@ -365,11 +374,17 @@ pub fn download(
     let mut mappings = Mappings::default();
     let execution = s.run(stop, async {
         let outcome = async {
+            if let Some(p)=&progress {p.phase("scanning");}
             let entries = remote_inventory(&s, &request.sources, stop).await?;
-            for entry in entries {
+            let count=entries.len();
+            let total=crate::operation_progress::checked_byte_total(entries.iter().filter(|e|!e.attrs.is_dir()).map(|e|e.attrs.size))?;
+            if let Some(p)=&progress {p.plan("bytes",total);}
+            for (index,entry) in entries.into_iter().enumerate() {
+                if let Some(p)=&progress {p.position(index+1,count);p.phase("downloading");}
                 check(stop)?;
                 unchanged(&s, &entry.path, Some(&entry.attrs)).await?;
                 let Some(relative) = mappings.map(&entry.relative) else {
+                    if let Some(p)=&progress {if !entry.attrs.is_dir() {p.skip_bytes(entry.attrs.size.ok_or("Remote size unavailable")?);}}
                     skipped += 1;
                     continue;
                 };
@@ -378,14 +393,18 @@ pub fn download(
                 let mut existing = local_lookup(&target)?;
                 if let Some((attrs, _)) = existing.as_ref() {
                     if !(entry.attrs.is_dir() && attrs.directory) {
-                        match choices.ask(
+                        if let Some(p)=&progress {p.phase("waiting");}
+                        let decision=choices.ask(
                             &entry.path,
                             target.to_str().ok_or("Unsupported destination path")?,
                             entry.attrs.is_dir(),
                             attrs.directory,
                             stop,
-                        )? {
+                        )?;
+                        if let Some(p)=&progress {p.phase("downloading");}
+                        match decision {
                             Choice::Skip => {
+                                if let Some(p)=&progress {if !entry.attrs.is_dir() {p.skip_bytes(entry.attrs.size.unwrap_or(0));}}
                                 if entry.attrs.is_dir() {
                                     mappings.skipped.push(entry.relative.clone());
                                 }
@@ -444,6 +463,7 @@ pub fn download(
                             .map_err(|_| "Created directory changed")?,
                     );
                     completed += 1;
+                    if let Some(p)=&progress {p.committed();}
                     continue;
                 }
                 let budget = crate::zip_preflight::Budget::new(stop);
@@ -487,7 +507,9 @@ pub fn download(
                             .map_err(|_| "Local write failed")?;
                         offset += data.len() as u64;
                         transferred_bytes += data.len() as u64;
+                        if let Some(p)=&progress {p.bytes(data.len() as u64);}
                     }
+                    if let Some(p)=&progress {p.phase("finalizing");}
                     stage
                         .0
                         .handle
@@ -518,7 +540,9 @@ pub fn download(
                 drop(parent_guard);
                 completed += 1;
                 bytes += entry.attrs.size.ok_or("Remote size unavailable")?;
+                if let Some(p)=&progress {p.committed();}
             }
+            if let Some(p)=&progress {p.phase("finalizing");}
             Ok(())
         }
         .await;
@@ -1059,5 +1083,309 @@ mod generated {
             fs::read(remote.join("down/tree/nested/child.txt")).unwrap(),
             b"download child"
         );
+    }
+}
+
+#[cfg(test)]
+mod progress_fixture {
+    use super::*;
+    #[test]
+    #[ignore = "generated localhost fixture runner only"]
+    fn generated_transfer_progress_rejects_invalid_metadata_before_mutation() {
+        let v: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::env::var("NEARLY_PROGRESS_FIXTURE").unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["generatedOnly"], true);
+        let root = std::path::PathBuf::from(v["root"].as_str().unwrap());
+        assert!(root.starts_with(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("test-results")
+        ));
+        let profile = crate::sftp::Profile {
+            id: "metadata".into(),
+            name: "Generated localhost".into(),
+            host: "127.0.0.1".into(),
+            port: v["port"].as_u64().unwrap() as u16,
+            user: "fixture".into(),
+            auth: "key".into(),
+            mode: "sftp".into(),
+            key_file: v["key"].as_str().unwrap().into(),
+            host_key: v["fingerprint"].as_str().unwrap().into(),
+        };
+        let mut evidence = Vec::new();
+        for mode in ["missing", "overflow", "imprecise"] {
+            let source = root.join("remote").join(format!("metadata-{mode}"));
+            std::fs::create_dir_all(&source).unwrap();
+            for name in ["first.bin", "second.bin"] {
+                std::fs::write(source.join(name), b"generated metadata fixture").unwrap();
+            }
+            let destination = root.join(format!("metadata-output-{mode}"));
+            std::fs::create_dir_all(&destination).unwrap();
+            let engine = crate::engine::Engine::default();
+            engine.prepare_operation(mode).unwrap();
+            let stop = engine.claim_prepared_upload(mode).unwrap();
+            let outcome = download(
+                &engine,
+                DownloadRequest {
+                    id: mode.into(),
+                    session_id: "fixture".into(),
+                    sources: vec![
+                        format!("/metadata-{mode}/first.bin"),
+                        format!("/metadata-{mode}/second.bin"),
+                    ],
+                    local: destination.to_string_lossy().into(),
+                },
+                &profile,
+                v["passphrase"].as_str().unwrap(),
+                &stop,
+                &Exchange::test_policy(Choice::Overwrite),
+            )
+            .unwrap();
+            assert_eq!(outcome.status, UploadStatus::Partial, "{mode}");
+            assert_eq!(
+                (outcome.completed, outcome.bytes, outcome.transferred_bytes),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                std::fs::read_dir(&destination).unwrap().count(),
+                0,
+                "no owned stage or destination before validated plan"
+            );
+            let snapshot = engine.operation_progress(mode).unwrap().snapshot();
+            assert_eq!(snapshot.total, None);
+            assert_eq!(snapshot.done, 0);
+            assert!(outcome.message.contains(if mode == "missing" {
+                "Source size/timestamp unavailable"
+            } else {
+                crate::operation_progress::BYTE_TOTAL_LIMIT_ERROR
+            }));
+            evidence.push(serde_json::json!({"mode":mode,"outcome":outcome,"snapshot":snapshot}));
+            engine.finish_operation(mode);
+        }
+        std::fs::write(
+            root.join("metadata-limits.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    #[ignore = "generated localhost fixture runner only"]
+    fn generated_transfer_progress_acknowledgements_and_aggregate() {
+        let manifest = std::env::var("NEARLY_PROGRESS_FIXTURE").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(v["generatedOnly"], true);
+        let root = std::path::PathBuf::from(v["root"].as_str().unwrap());
+        assert!(
+            root.starts_with(std::env::current_dir().unwrap().join("test-results"))
+                || root.starts_with(
+                    std::env::current_dir()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("test-results")
+                )
+        );
+        let profile = crate::sftp::Profile {
+            id: "progress".into(),
+            name: "Generated localhost".into(),
+            host: "127.0.0.1".into(),
+            port: v["port"].as_u64().unwrap() as u16,
+            user: "fixture".into(),
+            auth: "key".into(),
+            mode: "sftp".into(),
+            key_file: v["key"].as_str().unwrap().into(),
+            host_key: v["fingerprint"].as_str().unwrap().into(),
+        };
+        let local = root.join("sources");
+        std::fs::create_dir_all(local.join("empty")).unwrap();
+        std::fs::write(local.join("first.bin"), vec![17; 100000]).unwrap();
+        std::fs::write(local.join("second.bin"), vec![23; 70000]).unwrap();
+        let mut evidence = vec![];
+        for mode in [
+            "upload",
+            "legacy",
+            "download",
+            "download-failed",
+            "download-cancel",
+            "failed",
+            "cancel",
+            "skip",
+            "publish-failed",
+            "empty",
+        ] {
+            let engine = crate::engine::Engine::default();
+            engine.prepare_operation(mode).unwrap();
+            let stop = engine.claim_prepared_upload(mode).unwrap();
+            let progress = engine.operation_progress(mode).unwrap();
+            let watch = progress.clone();
+            let halted = stop.clone();
+            let finished = std::sync::Arc::new(AtomicBool::new(false));
+            let done = finished.clone();
+            let cancel = mode.ends_with("cancel");
+            let observer = std::thread::spawn(move || {
+                let mut samples = vec![];
+                while !done.load(Ordering::SeqCst) {
+                    let s = watch.snapshot();
+                    if cancel && s.done > 0 {
+                        halted.store(true, Ordering::SeqCst);
+                    }
+                    samples.push(s);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                samples
+            });
+            if mode == "skip" {
+                let target = root.join("remote/skip");
+                std::fs::write(target.join("first.bin"), b"sentinel").unwrap();
+                std::fs::write(target.join("second.bin"), b"sentinel").unwrap();
+            }
+            let outcome = if mode.starts_with("download") {
+                let dest = root.join(mode);
+                let remote = if mode == "download" { "upload" } else { mode };
+                if mode != "download" {
+                    let source = root.join("remote").join(mode);
+                    std::fs::create_dir_all(source.join("empty")).unwrap();
+                    std::fs::copy(local.join("first.bin"), source.join("first.bin")).unwrap();
+                    std::fs::copy(local.join("second.bin"), source.join("second.bin")).unwrap();
+                }
+                std::fs::create_dir_all(&dest).unwrap();
+                download(
+                    &engine,
+                    DownloadRequest {
+                        id: mode.into(),
+                        session_id: "fixture".into(),
+                        sources: vec![
+                            format!("/{remote}/first.bin"),
+                            format!("/{remote}/second.bin"),
+                            format!("/{remote}/empty"),
+                        ],
+                        local: dest.to_string_lossy().into(),
+                    },
+                    &profile,
+                    v["passphrase"].as_str().unwrap(),
+                    &stop,
+                    &Exchange::test_policy(Choice::Overwrite),
+                )
+            } else {
+                let request = crate::upload::UploadRequest {
+                    id: mode.into(),
+                    session_id: "fixture".into(),
+                    sources: if mode == "empty" {
+                        vec![local.join("empty").to_string_lossy().into()]
+                    } else {
+                        vec![
+                            local.join("first.bin").to_string_lossy().into(),
+                            local.join("second.bin").to_string_lossy().into(),
+                            local.join("empty").to_string_lossy().into(),
+                        ]
+                    },
+                    remote: format!("/{mode}"),
+                    recursive: true,
+                    interactive: mode != "legacy",
+                };
+                if mode == "legacy" {
+                    crate::upload::run(
+                        &engine,
+                        request,
+                        &profile,
+                        v["passphrase"].as_str().unwrap(),
+                        &stop,
+                    )
+                } else {
+                    crate::upload::run_interactive(
+                        &engine,
+                        request,
+                        &profile,
+                        v["passphrase"].as_str().unwrap(),
+                        &stop,
+                        &Exchange::test_policy(if mode == "skip" {
+                            Choice::Skip
+                        } else {
+                            Choice::Overwrite
+                        }),
+                    )
+                }
+            }
+            .unwrap();
+            finished.store(true, Ordering::SeqCst);
+            let samples = observer.join().unwrap();
+            let snapshot = progress.snapshot();
+            assert_eq!(
+                snapshot.total,
+                Some(if mode == "skip" || mode == "empty" {
+                    0
+                } else {
+                    170000
+                }),
+                "{mode}: aggregate planned bytes"
+            );
+            assert_eq!(
+                snapshot.done, outcome.transferred_bytes,
+                "{mode}: acknowledged bytes only"
+            );
+            if mode != "skip" && mode != "empty" {
+                assert!(
+                    samples.iter().any(|s| s.done > 0 && s.done < 170000),
+                    "{mode}: live intermediate progress"
+                );
+            }
+            let mut previous = 0;
+            for s in &samples {
+                assert!(s.done >= previous, "aggregate must never reset per file");
+                previous = s.done;
+                assert!(s.done <= 170000);
+            }
+            if mode == "failed"
+                || mode == "cancel"
+                || mode == "download-failed"
+                || mode == "download-cancel"
+            {
+                assert_eq!(
+                    outcome.status,
+                    if mode.ends_with("cancel") {
+                        UploadStatus::Cancelled
+                    } else {
+                        UploadStatus::Partial
+                    }
+                );
+                assert!(snapshot.done < 170000);
+                assert_eq!(outcome.bytes, 0);
+            } else if mode == "publish-failed" {
+                assert_eq!(outcome.status, UploadStatus::Partial);
+                assert_eq!(snapshot.done, 170000);
+                assert_eq!(outcome.bytes, 100000);
+                assert_eq!(snapshot.phase, "finalizing");
+            } else {
+                assert_eq!(outcome.status, UploadStatus::Completed);
+                assert_eq!(
+                    snapshot.done,
+                    if mode == "skip" || mode == "empty" {
+                        0
+                    } else {
+                        170000
+                    }
+                );
+                assert_eq!(
+                    snapshot.entries,
+                    if mode == "skip" || mode == "empty" {
+                        1
+                    } else {
+                        3
+                    }
+                );
+                assert_eq!(snapshot.phase, "finalizing");
+            }
+            evidence.push(serde_json::json!({"mode":mode,"snapshot":snapshot,"outcome":outcome,"samples":samples}));
+            engine.finish_operation(mode);
+        }
+        std::fs::write(
+            root.join("progress.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap(),
+        )
+        .unwrap();
     }
 }

@@ -123,7 +123,8 @@ async function coordinator(context: BrowserContext, count = 3) {
             : {}),
         };
       if (cmd === "register_workspace") return;
-      if (cmd === "load_settings") {
+      if(cmd === 'request_text_editor_origin_close') return true;
+          if (cmd === "load_settings") {
         const snapshot = copy(settings);
         if (label === holdSettingsLabel) {
           holdSettingsLabel = undefined;

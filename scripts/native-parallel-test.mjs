@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {Processes,cancellation,fixtureDirectory,assertHarnessResult} from './native-test-process.mjs';
 
 export const standardArgs=['--skip','install_root::native::tests::ordinary_inherited_namespace_is_admitted_by_production_validation','--skip','install_root::native::tests::generated_custom_root_payload_current_identity_and_namespace_guards','--test-threads=1'];
-export const fixtureCommands=[['sync-difference-test.mjs','sync_difference_generated_localhost'],['sync-difference-test.mjs','directory_deletion_generated_localhost'],['listing-worker-test.mjs'],['listing-existing-pipeline-test.mjs']];
+export const fixtureCommands=[['sync-difference-test.mjs','sync_difference_generated_localhost'],['sync-difference-test.mjs','directory_deletion_generated_localhost'],['listing-worker-test.mjs'],['listing-existing-pipeline-test.mjs'],['remote-operation-test.mjs'],['new-file-wait-test.mjs'],['text-editor-test.mjs'],['transfer-progress-test.mjs']];
 
 export function resolveBuild(rows,root,target,runtime,environment=process.env) {
   const finished=rows.filter(row=>row.reason==='build-finished');

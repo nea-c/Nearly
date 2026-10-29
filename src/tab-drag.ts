@@ -57,11 +57,13 @@ export function bindTabDrag(tabs: HTMLElement, options: TabDragOptions) {
     }
     // Absolute positioning is in scroll content coordinates. Keep every pixel
     // of the floating tab inside the viewport, including during edge scrolling.
-    const visibleLeft = Math.max(0, Math.min(viewport.width - current.width,
-      point.x - viewport.left - current.grab));
+    const intendedLeft = point.x - viewport.left - current.grab;
+    const visibleLeft = Math.max(0, Math.min(viewport.width - current.width, intendedLeft));
     const left = visibleLeft + tabs.scrollLeft;
     source.style.left = `${left}px`;
-    const center = left + current.width / 2;
+    // Clamp the painted tab, not its insertion target. With a flush strip,
+    // the clamped center ties the first sibling's center and cannot cross it.
+    const center = intendedLeft + tabs.scrollLeft + current.width / 2;
     const siblings = children().filter(node => node !== source);
     const before = siblings.find(node => center < node.offsetLeft + node.offsetWidth / 2);
     const next = current.placeholder.nextElementSibling;

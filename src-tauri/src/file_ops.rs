@@ -1,4 +1,12 @@
 use crate::sftp::{self, Profile};
+#[cfg(test)]
+mod batch_request_tests {
+    #[test]
+    fn remote_multi_selection_is_one_request() {
+        let request = serde_json::json!({"id":"batch","side":"remote","action":"delete","source":"/one","destination":null,"profile":null,"passphrase":"","confirmDelete":true,"items":[{"source":"/one","destination":null},{"source":"/two","destination":null}]});
+        assert!(serde_json::from_value::<super::Request>(request).is_ok(), "remote selection must reach native as one operation");
+    }
+}
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -10,6 +18,8 @@ use std::{
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
+    #[serde(default)]
+    pub items: Vec<Selection>,
     pub id: String,
     pub side: Side,
     pub action: Action,
@@ -38,14 +48,22 @@ pub enum Action {
 }
 #[derive(Serialize)]
 pub struct Outcome {
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub items: Vec<ItemOutcome>,
     pub completed: usize,
     pub message: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {pub source:String,pub destination:Option<String>}
+#[derive(Serialize)]
+pub struct ItemOutcome {pub source:String,pub completed:bool,pub message:String,pub attempted:bool}
 pub fn run(
     engine: &crate::engine::Engine,
     request: Request,
     stop: &AtomicBool,
 ) -> Result<Outcome, String> {
+    if !request.items.is_empty() {return remote_batch(engine,request,stop);}
     if matches!(request.action, Action::CreateFile | Action::Mkdir) {
         return create_entry(engine, request, stop);
     }
@@ -109,15 +127,46 @@ pub fn run(
                 paths.push(target.clone());
             }
             engine.reserve_operation(&request.id, vec![], paths, identity, endpoints, false)?;
-            sftp::file_operation(
+            let progress=engine.operation_progress(&request.id);
+            sftp::file_operation_tracked(
                 &mut connection,
                 request.action,
                 &source,
                 target.as_deref(),
                 stop,
+                progress.as_deref(),
             ).map_err(|error|format!("{error} If a mutation was issued, a partial target or partially deleted tree may remain. Refresh before retrying."))
         }
     }
+}
+fn remote_batch(engine:&crate::engine::Engine,request:Request,stop:&AtomicBool)->Result<Outcome,String>{
+    if request.side!=Side::Remote || !matches!(request.action,Action::Copy|Action::Delete) || request.items.len()>1000 {return Err("Only remote copy/delete selections of at most 1,000 roots can be batched".into());}
+    if request.action==Action::Delete && !request.confirm_delete{return Err("Explicit delete confirmation is required".into());}
+    let mut paths:Vec<String>=Vec::new();let mut selected=Vec::new();
+    for item in &request.items {
+        let source=remote_path(&item.source)?;
+        let target=if request.action==Action::Delete {if item.destination.is_some(){return Err("Delete must not specify a target".into());}None}else{Some(remote_path(item.destination.as_deref().ok_or("Copy requires destination")?)?)};
+        if let Some(t)=&target{validate_pair(&source,t)?;}
+        // Reject overlaps across ALL sources and targets before connecting/mutating.
+        for path in std::iter::once(&source).chain(target.iter()) {if paths.iter().any(|p|sftp::overlap(p,path)){return Err("Overlapping batch paths are refused".into());}paths.push(path.clone());}
+        selected.push((source,target));
+    }
+    check(stop)?;
+    let profile=request.profile.ok_or("Remote operation requires a profile")?;
+    use std::net::ToSocketAddrs;
+    let endpoints=(profile.host.as_str(),profile.port).to_socket_addrs().map_err(|_|"Cannot resolve remote endpoint")?.collect();
+    let (mut connection,identity)=sftp::connect(&profile,&request.passphrase,stop)?;
+    engine.reserve_operation(&request.id,vec![],paths,identity,endpoints,false)?;
+    let progress=engine.operation_progress(&request.id);let mut outcomes=Vec::new();let mut failed=false;let mut completed=0;
+    for (index,(source,target)) in selected.iter().enumerate(){
+        if failed || stop.load(Ordering::SeqCst){outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:false,message:"Not attempted after cancellation or earlier failure; refresh before retrying".into()});continue;}
+        if let Some(p)=&progress{p.item(index+1,selected.len());}
+        match sftp::file_operation_tracked(&mut connection,request.action,source,target.as_deref(),stop,progress.as_deref()){
+            Ok(out)=>{completed+=out.completed;outcomes.push(ItemOutcome{source:source.clone(),completed:true,attempted:true,message:out.message});}
+            Err(error)=>{failed=true;outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:true,message:format!("{error}. Partial/uncertain targets may remain; refresh before retrying")});}
+        }
+    }
+    Ok(Outcome{completed,items:outcomes,message:"Remote selection finished; inspect individual results and refresh".into()})
 }
 pub fn validate_creation_name(name: &str, side: Side) -> Result<(), String> {
     if name.is_empty()
@@ -250,6 +299,7 @@ impl LocalCreation {
             _ => return Err("Unsupported creation action".into()),
         }
         Ok(Outcome {
+        items:vec![],
             completed: 1,
             message: "Created one new entry; refresh its parent folder.".into(),
         })
@@ -592,6 +642,7 @@ pub fn local(
         }
     }
     Ok(Outcome {
+        items:vec![],
         completed: tree.len(),
         message:
             "Operation completed. Refresh the folders to reconcile any concurrent external changes."

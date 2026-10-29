@@ -220,7 +220,11 @@ fn run_inner(
         return Err("Remote traversal is refused".into());
     }
     let remote = crate::sftp::normalize(&request.remote)?;
+    let progress=engine.operation_progress(&request.id);
+    if let Some(p)=&progress {p.phase("scanning");}
     let mut tree = inventory(&request.sources, request.recursive, stop)?;
+    let total=crate::operation_progress::checked_byte_total(tree.entries.iter().filter(|e|!e.directory).map(|e|Some(e.size)))?;
+    if let Some(p)=&progress {p.phase("connecting");}
     let endpoints = (profile.host.as_str(), profile.port)
         .to_socket_addrs()
         .map_err(|_| "Cannot resolve upload endpoint")?
@@ -233,7 +237,8 @@ fn run_inner(
         identity,
         endpoints,
     )?;
-    match choices {Some(choices)=>crate::transfer_io::upload(&connection,&remote,&mut tree.entries,stop,choices),None=>crate::sftp::upload_new(&mut connection,&remote,&mut tree.entries,stop)}
+    if let Some(p)=&progress {p.plan("bytes",total);p.position(1,tree.entries.len());}
+    match choices {Some(choices)=>crate::transfer_io::upload(&connection,&remote,&mut tree.entries,stop,choices,progress.as_deref()),None=>crate::sftp::upload_new(&mut connection,&remote,&mut tree.entries,stop,progress.as_deref())}
 }
 #[cfg(test)]
 mod generated_tests {

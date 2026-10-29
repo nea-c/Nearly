@@ -1,4 +1,5 @@
 export const uploadErrorLiterals: ReadonlyArray<readonly [string, string]> = [
+['転送合計が9,007,199,254,740,991バイトを超えています。小さい単位に分けて転送してください','Transfer total exceeds 9,007,199,254,740,991 bytes; smaller batches are required'],
 ['フォルダーのショートカットを読み取れませんでした','Folder shortcut could not be read'],
 ['ショートカットのリンク先が見つからないか、フォルダーではありません','Folder shortcut target is unavailable or is not a folder'],
 ['ネットワーク先のショートカットには対応していません。接続は行っていません','Network shortcut targets are unsupported; no connection was attempted'],

@@ -56,10 +56,15 @@ uninstaller generator. No downloads or changes to the base icon/installer ICO.
 Browser rasterizer versions can affect antialiasing; inspect regenerated images
 and update the explicit RGBA hashes in the Rust artwork tests when intentional.
 
-Windows chooses shell overlay placement, so the adapter clears that old overlay
-and sets both the small and taskbar window icon slots to the composite. Five
-native HICONs are shared for the process lifetime; state changes allocate no new
-handles. Idle restores the original icon. Job aggregation and progress color
-are unchanged. Attention acknowledgement does not erase an error badge.
-Pinned/grouped taskbar rendering and DPI scaling still require OS visual
-qualification; generated previews do not prove shell rendering.
+The adapter restores r3.6's Shell overlay display path. It extracts the exact
+upper-right 16px square from these composites for the overlay, preserving every
+adopted pixel. Windows controls actual placement; upper-right positioning is
+not established by API success. Both window icon slots use the original icon
+to avoid displaying a second composite badge on uncombined taskbars/Alt+Tab.
+Fixed native HICONs are shared for the process lifetime. A shared taskbar group
+uses error > working > paused > caught-up > idle across its windows; an idle
+editor window cannot clear another window's status. TaskbarButtonCreated
+invalidates the presentation cache after Shell recreation. Attention
+acknowledgement remains independent and does not erase the badge.
+Pinned/grouped taskbar rendering, placement and DPI scaling still require OS
+visual qualification; generated previews and native API tests do not prove it.

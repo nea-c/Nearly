@@ -75,6 +75,13 @@ export interface UploadOutcome { status: "completed" | "partial" | "cancelled"; 
 export type NativeFileDrop = {type: "enter" | "over" | "drop" | "leave"; ownOutbound?: boolean; paths?: string[]; position?: {x:number;y:number}};
 export interface RemoteDragOutcome extends UploadOutcome { internalPosition?: {x:number;y:number} | null }
 interface Commands {
+  open_text_document:{args:{request:{id:string;side:'local'|'remote';path:string;workspaceId:string;sessionId?:string}};result:TextDocument};
+  save_text_document:{args:{id:string;token:string;text:string};result:{text:string;message:string}};
+  close_text_document:{args:{token?:string};result:void};
+  list_text_documents:{args:undefined;result:TextDocument[]};
+  request_text_editor_origin_close:{args:{workspaceIds:string[]};result:boolean};
+  resolve_text_editor_origin_close:{args:{requestId:string;accepted:boolean};result:void};
+  close_text_editor_window:{args:undefined;result:void};
   request_error_attention: { args: {active:boolean}; result:void };
   file_transfer_prompt: {args:{id:string};result:TransferPrompt|null};
   choose_file_transfer: {args:{id:string;decision:{token:string;action:'overwrite'|'skip'|'keepboth'|'cancel';applyAll:boolean}};result:void};
@@ -131,9 +138,10 @@ interface Commands {
   };
   disconnect_session: { args: { id: string }; result: void };
   prepare_file_operation: { args: { id: string }; result: void };
+  file_operation_progress: { args: {id:string}; result: OperationProgress | null };
   run_file_operation: {
     args: { request: FileOperationRequest };
-    result: { completed: number; message: string };
+    result: { completed: number; message: string; items?: {source:string;completed:boolean;attempted:boolean;message:string}[] };
   };
   cancel_file_operation: { args: { id: string; abandon?: boolean }; result: void };
   load_settings: { args: undefined; result: Settings };
@@ -181,7 +189,9 @@ interface Commands {
   retry_sync: { args: { id: string }; result: void };
   sync_status: { args: { id: string }; result: Status };
 }
+export interface TextDocument {token:string;text:string;encoding:string;newline:string;path:string;side:'local'|'remote';connectionLabel:string;readOnly?:string|null}
 export interface FileOperationRequest {
+  items?: {source:string;destination?:string}[];
   id: string;
   side: "local" | "remote";
   action: "copy" | "move" | "delete" | "createfile" | "mkdir";
@@ -192,6 +202,7 @@ export interface FileOperationRequest {
   passphrase: string;
   confirmDelete: boolean;
 }
+export interface OperationProgress {phase:string;unit:'bytes'|'entries';done:number;total:number|null;entries:number;item:number;itemCount:number}
 declare global {
   interface Window {
     __TAURI__?: {

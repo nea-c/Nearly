@@ -11,6 +11,27 @@ pub enum NativeSyncState {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskbarState { Idle, Working, CaughtUp, Error, Paused }
+/// One shared Shell button must not alternate with window iteration order.
+/// Active work/errors win; an idle/editor window never clears a live badge.
+pub fn group_badge(states:impl IntoIterator<Item=TaskbarState>)->TaskbarState{
+ states.into_iter().max_by_key(|s|match s{TaskbarState::Idle=>0,TaskbarState::CaughtUp=>1,TaskbarState::Paused=>2,TaskbarState::Working=>3,TaskbarState::Error=>4}).unwrap_or(TaskbarState::Idle)
+}
+#[cfg(test)]mod group_tests{
+ use super::*;
+ #[test]fn shell_group_is_order_independent_and_idle_windows_never_clear_live_badges(){
+  use TaskbarState::*;let ordered=[Idle,CaughtUp,Paused,Working,Error];
+  assert_eq!(group_badge([]),Idle);
+  for (i,a) in ordered.iter().enumerate(){for (j,b) in ordered.iter().enumerate(){let expected=ordered[i.max(j)];assert_eq!(group_badge([*a,*b]),expected);assert_eq!(group_badge([*b,Idle,*a]),expected);}}
+ }
+ #[test]fn closing_error_or_working_windows_reveals_remaining_state_and_last_close_clears(){
+  use TaskbarState::*;
+  assert_eq!(group_badge([Error,Working,CaughtUp]),Error);
+  assert_eq!(group_badge([Working,CaughtUp]),Working);
+  assert_eq!(group_badge([CaughtUp]),CaughtUp);
+  assert_eq!(group_badge([Paused,Idle]),Paused);
+  assert_eq!(group_badge([Idle]),Idle);
+ }
+}
 pub fn aggregate(states: impl IntoIterator<Item = NativeSyncState>, starts_pending: bool) -> TaskbarState {
     let mut working = starts_pending;
     let mut caught_up = false;
@@ -83,6 +104,26 @@ mod tests {
 #[cfg(test)]
 mod activity_tests {
  use super::*;
+ #[test] fn completion_epochs_survive_short_cycles_without_a_presentation_poll(){
+  let mut a=Activity::new();assert_eq!(a.take_completion(),0);
+  a.scan_finished();a.settle(0,true,false,false,false);assert_eq!(a.take_completion(),1);
+  a.mark_working();a.applied_change();a.settle(0,true,false,false,false);
+  a.mark_working();a.applied_change();a.settle(0,true,false,false,false);
+  assert_eq!(a.take_completion(),2);assert_eq!(a.take_completion(),0);
+  for _ in 0..10{a.settle(0,true,false,false,false);}assert_eq!(a.take_completion(),0);
+ }
+ #[test] fn unchanged_watcher_noise_does_not_rearm_completion(){
+  let mut a=Activity::new();a.scan_finished();a.settle(0,true,false,false,false);assert_eq!(a.take_completion(),1);
+  a.mark_working();a.settle(0,true,false,false,false);assert_eq!(a.take_completion(),0);
+  a.applied_change();a.mark_working();a.settle(0,true,false,false,false);assert_eq!(a.take_completion(),1);
+ }
+ #[test] fn cancellation_failure_and_rescan_do_not_complete(){
+  for (stopping,blocked,rescan) in [(true,false,false),(false,true,false),(false,false,true)]{
+   let mut a=Activity::new();a.scan_finished();a.applied_change();a.set_deletion_rescan_required(rescan);
+   a.settle(0,true,false,stopping,blocked);assert_eq!(a.take_completion(),0);
+  }
+  let mut a=Activity::new();a.scan_finished();a.failure(true);a.settle(0,true,false,false,false);assert_eq!(a.take_completion(),0);
+ }
  #[test] fn deletion_rescan_is_not_completion_or_error_and_does_not_stop_work(){let mut a=Activity::new();a.scan_finished();a.set_deletion_rescan_required(true);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::DeletionRescanRequired);assert_eq!(aggregate([a.phase(),NativeSyncState::CaughtUp],false),TaskbarState::Paused);a.settle(2,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::Working);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::DeletionRescanRequired);a.settle(0,true,false,true,false);assert_eq!(a.phase(),NativeSyncState::Stopping);a.set_deletion_rescan_required(false);a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::CaughtUp);}
  #[test] fn scanning_empty_queue_is_not_completion(){let mut a=Activity::new();a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::Scanning);}
  #[test] fn scan_then_idle_is_caught_up_and_new_work_revokes_it(){let mut a=Activity::new();a.scan_finished();a.settle(0,true,false,false,false);assert_eq!(a.phase(),NativeSyncState::CaughtUp);a.mark_working();assert_eq!(a.phase(),NativeSyncState::Working);}
@@ -94,9 +135,19 @@ mod activity_tests {
 
 /// Worker-owned current activity. Historic error metrics remain separate.
 #[derive(Clone, Debug)]
-pub struct Activity { phase: NativeSyncState, scanned: bool, current_error: bool, hard_error: bool, deletion_rescan_required: bool }
+pub struct Activity {
+ phase: NativeSyncState, scanned: bool, current_error: bool, hard_error: bool, deletion_rescan_required: bool,
+ // Native-only epochs survive work that starts and finishes between UI polls.
+ completion_epoch: u64, acknowledged_epoch: u64, completion_armed: bool,
+}
 impl Activity {
- pub fn new()->Self {Self{phase:NativeSyncState::Scanning,scanned:false,current_error:false,hard_error:false,deletion_rescan_required:false}}
+ pub fn new()->Self {Self{phase:NativeSyncState::Scanning,scanned:false,current_error:false,hard_error:false,deletion_rescan_required:false,completion_epoch:0,acknowledged_epoch:0,completion_armed:true}}
+ pub fn applied_change(&mut self){self.completion_armed=true;}
+ pub fn take_completion(&mut self)->u64 {
+  let pending=self.completion_epoch-self.acknowledged_epoch;
+  self.acknowledged_epoch=self.completion_epoch;
+  pending
+ }
  pub fn set_deletion_rescan_required(&mut self,required:bool){self.deletion_rescan_required=required;}
  pub fn phase(&self)->NativeSyncState {self.phase}
  pub fn scan_finished(&mut self){self.scanned=true;}
@@ -104,11 +155,16 @@ impl Activity {
  pub fn failure(&mut self,hard:bool){self.current_error=true;self.hard_error|=hard;self.phase=NativeSyncState::Error;}
  pub fn stopped(&mut self){self.phase=NativeSyncState::Stopped;}
  pub fn settle(&mut self,pending:usize,events_drained:bool,in_flight:bool,stopping:bool,blocked:bool){
+  let previous=self.phase;
   self.phase=if stopping {NativeSyncState::Stopping}
    else if blocked||self.hard_error {NativeSyncState::Error}
    else if !self.scanned {NativeSyncState::Scanning}
    else if pending>0||!events_drained||in_flight {if self.current_error {NativeSyncState::Error}else{NativeSyncState::Working}}
    else if self.deletion_rescan_required {NativeSyncState::DeletionRescanRequired}
    else {self.current_error=false;NativeSyncState::CaughtUp};
+  if self.phase==NativeSyncState::CaughtUp&&previous!=NativeSyncState::CaughtUp&&self.completion_armed {
+   self.completion_epoch=self.completion_epoch.saturating_add(1);
+   self.completion_armed=false;
+  }
  }
 }

@@ -247,6 +247,7 @@ async function run(
       );
       return;
     }
+    feedback.track(id);
     dispatched = true;
     const stopChoices = watchTransferChoices(id);
     let outcome;

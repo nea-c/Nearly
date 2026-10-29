@@ -151,6 +151,7 @@ test("native session connection clears the secret and cancellation never connect
       core: {
         invoke: async (cmd, args) => {
           window.calls.push({ cmd, args });
+          if(cmd === 'request_text_editor_origin_close') return true;
           if (cmd === "load_settings")
             return {
               version: 1,

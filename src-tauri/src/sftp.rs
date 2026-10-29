@@ -764,7 +764,7 @@ pub fn create_entry(
         if attrs.is_symlink() || (action==Action::CreateFile && (!attrs.file_type().is_file() || attrs.size!=Some(0))) || (action==Action::Mkdir && !attrs.is_dir()) {
             return Err("Remote entry may already exist but its type or empty size could not be verified. Refresh before retrying".into());
         }
-        Ok(Outcome{completed:1,message:"Created one new entry; refresh its parent folder.".into()})
+        Ok(Outcome{items:vec![],completed:1,message:"Created one new entry; refresh its parent folder.".into()})
     })
 }
 pub fn file_operation(
@@ -774,7 +774,11 @@ pub fn file_operation(
     destination: Option<&str>,
     stop: &AtomicBool,
 ) -> Result<crate::file_ops::Outcome, String> {
+    file_operation_tracked(s,action,source,destination,stop,None)
+}
+pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,source:&str,destination:Option<&str>,stop:&AtomicBool,progress:Option<&crate::operation_progress::Progress>)->Result<crate::file_ops::Outcome,String>{
     use crate::file_ops::{check, Action, Outcome};
+    if let Some(p)=progress{p.phase("scanning");}
     fn parent(path: &str) -> &str {
         let (p, _) = path.rsplit_once('/').unwrap();
         if p.is_empty() {
@@ -831,7 +835,13 @@ pub fn file_operation(
             }
             tree.push((path,a));
         }
-        if let Some(target)=destination {absent(&s.raw,target).await?;}
+        // Copy checks each destination immediately before creation below; no duplicate root lookup.
+        if progress.is_none() || action!=Action::Copy {if let Some(target)=destination {absent(&s.raw,target).await?;}}
+        if let Some(p)=progress {
+            if action==Action::Delete{p.plan("entries",tree.len() as u64);}
+            else if action==Action::Copy{let total=tree.iter().filter(|(_,a)|!a.is_dir()).try_fold(0u64,|sum,(_,a)|sum.checked_add(a.size?)).ok_or("Remote copy total size unavailable")?;p.plan("bytes",total);}
+            else{p.phase("finalizing");}
+        }
         check(stop)?;
         match action {
             Action::CreateFile | Action::Mkdir=>return Err("Creation requires its dedicated validation path".into()),
@@ -848,6 +858,7 @@ pub fn file_operation(
                 if current.is_dir()!=original.is_dir() {return Err("Remote source changed; deletion stopped. Earlier items may already be deleted".into());}
                 if current.is_dir() {s.raw.rmdir(path.clone()).await.map_err(|_|"Remote directory deletion failed; some selected descendants may already be deleted")?;}
                 else {s.raw.remove(path.clone()).await.map_err(|_|"Remote deletion failed; some selected descendants may already be deleted")?;}
+                if let Some(p)=progress{p.committed();}
             },
             Action::Copy=>{
                 let target=destination.ok_or("Copy requires destination")?;
@@ -858,7 +869,7 @@ pub fn file_operation(
                     let suffix=path.strip_prefix(source).ok_or("Remote source escaped tree")?;
                     let output=format!("{target}{suffix}");
                     absent(&s.raw,&output).await?;
-                    if original.is_dir() {s.raw.mkdir(output,FileAttributes::empty()).await.map_err(|_|"Remote copy directory creation failed; partial target retained")?;continue;}
+                    if original.is_dir() {s.raw.mkdir(output,FileAttributes::empty()).await.map_err(|_|"Remote copy directory creation failed; partial target retained")?;if let Some(p)=progress{p.committed();}continue;}
                     let expected=original.size.ok_or("Remote file size unavailable; copy refused")?;
                     let input=s.raw.open(path.clone(),OpenFlags::READ,FileAttributes::empty()).await.map_err(|_|remote_error("copy source open"))?.handle;
                     let out=s.raw.open(output,OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|"Remote target creation failed; partial target retained; no overwrite attempted")?.handle;
@@ -867,16 +878,19 @@ pub fn file_operation(
                         check(stop)?;
                         let data=s.raw.read(input.clone(),offset,((expected-offset).min(65536)) as u32).await.map_err(|_|"Remote copy read failed; partial target retained")?.data;
                         if data.is_empty() || data.len() as u64>expected-offset {return Err("Remote copy source size changed; partial target retained".into());}
-                        let len=data.len();s.raw.write(out.clone(),offset,data).await.map_err(|_|"Remote copy write failed; partial target retained")?;offset+=len as u64;
+                        let len=data.len();s.raw.write(out.clone(),offset,data).await.map_err(|_|"Remote copy write failed; partial target retained")?;offset+=len as u64;if let Some(p)=progress{p.bytes(len as u64);}
                     }
+                    if let Some(p)=progress{p.phase("finalizing");}
                     s.raw.close(input).await.map_err(|_|remote_error("copy source close"))?;
                     s.raw.close(out).await.map_err(|_|remote_error("copy target close"))?;
                     let after=attrs(&s.raw,path).await?;
                     if after.size!=original.size || after.mtime!=original.mtime {return Err("Remote source changed during copy; partial target retained".into());}
+                    if let Some(p)=progress{p.committed();p.phase("copying");}
                 }
             },
         }
-        Ok(Outcome {completed:tree.len(),message:"Remote operation completed; refresh both folders.".into()})
+        if let Some(p)=progress{p.phase("finalizing");}
+        Ok(Outcome {items:vec![],completed:tree.len(),message:"Remote operation completed; refresh both folders.".into()})
     })
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2043,6 +2057,7 @@ pub fn upload_new(
     remote: &str,
     entries: &mut [crate::upload::Entry],
     stop: &AtomicBool,
+    progress: Option<&crate::operation_progress::Progress>,
 ) -> Result<crate::upload::UploadOutcome, String> {
     use crate::file_ops::check;
     fn upload_error(operation:&str)->String{format!("SFTP {operation} failed; check connection and permissions.")}
@@ -2051,6 +2066,7 @@ pub fn upload_new(
     let mut transferred_bytes = 0u64;
     let mut attempted = false;
     let result = s.run(stop, async {
+        if let Some(p)=progress {p.phase("scanning");}
         checked_directory(&s.raw, remote, false).await?;
         // Inventory existing destination siblings, bounded and case-insensitive.
         let handle = s
@@ -2092,7 +2108,9 @@ pub fn upload_new(
                 );
             }
         }
-        for entry in entries.iter_mut() {
+        let count=entries.len();
+        for (index,entry) in entries.iter_mut().enumerate() {
+            if let Some(p)=progress {p.position(index+1,count);p.phase("uploading");}
             check(stop)?;
             crate::upload::revalidate(entry)?;
             let target = format!("{}/{}", remote.trim_end_matches('/'), entry.relative);
@@ -2121,6 +2139,7 @@ pub fn upload_new(
                     return Err("Created directory changed during upload".into());
                 }
                 completed += 1;
+                if let Some(p)=progress {p.committed();}
                 continue;
             }
             let handle = s
@@ -2156,7 +2175,9 @@ pub fn upload_new(
                         .map_err(|_| "Upload write failed or acknowledgement uncertain")?;
                     offset += n as u64;
                     transferred_bytes += n as u64;
+                    if let Some(p)=progress {p.bytes(n as u64);}
                 }
+                if let Some(p)=progress {p.phase("finalizing");}
                 if offset != entry.size {
                     return Err("Source size changed".into());
                 }
@@ -2173,7 +2194,9 @@ pub fn upload_new(
             close?;
             completed += 1;
             bytes += entry.size;
+            if let Some(p)=progress {p.committed();}
         }
+        if let Some(p)=progress {p.phase("finalizing");}
         Ok::<(), String>(())
     });
     match result{Ok(())=>Ok(crate::upload::UploadOutcome{status:crate::upload::UploadStatus::Completed,completed,bytes,transferred_bytes,skipped:0,message:"Upload complete; local sources retained. Refresh destination.".into()}),Err(error) if attempted=>Ok(crate::upload::UploadOutcome{status:if stop.load(Ordering::SeqCst){crate::upload::UploadStatus::Cancelled}else{crate::upload::UploadStatus::Partial},completed,bytes,transferred_bytes,skipped:0,message:format!("{error}. Upload incomplete; new partial targets may remain. Preexisting targets were not replaced; local sources retained. Refresh before retrying.")}),Err(error)=>Err(error)}

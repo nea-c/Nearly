@@ -9,7 +9,8 @@ async function fixture(context:BrowserContext){
   await context.exposeBinding('ownershipInvoke',async({page},cmd:string,args:any={})=>{
     const label=pages.get(page)!;calls.push({label,cmd,id:args.id});
     if(cmd==='register_window')return {label,freshProcess:true,ownedWorkspaceIds:[],jobs:[],workspaces:[]};
-    if(cmd==='load_settings')return {version:1,settingsRevision:1,language:'en',theme:'light',profiles:[],history:{}};
+    if(cmd === 'request_text_editor_origin_close') return true;
+          if(cmd==='load_settings')return {version:1,settingsRevision:1,language:'en',theme:'light',profiles:[],history:{}};
     if(cmd==='register_workspace'){
       if(hold){hold=false;await new Promise<void>(resolve=>release=resolve);}
       if(fail){fail=false;throw Error('Generated registration failure');}
