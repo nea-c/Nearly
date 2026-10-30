@@ -87,6 +87,8 @@
 }
 .editor-tabs {
   display: flex;
+  /* One continuous lower edge; the active tab's surface covers its segment. */
+  box-shadow: inset 0 -1px var(--border-main);
   align-items: flex-end;
   gap: 4px;
   overflow-x: auto;
@@ -94,7 +96,7 @@
   scrollbar-width: none;
   flex-shrink: 0;
   min-height: 40px;
-  padding-inline: 0;
+  padding-inline: 4px 0;
 }
 .editor-tabs::-webkit-scrollbar { display: none; }
 .editor-tab {
@@ -107,15 +109,15 @@
   height: 40px;
   background: var(--surface-raised);
   border: 1px solid var(--border-main);
-  border-inline-width: 0;
-  border-top: 3px solid transparent;
+  background-clip: padding-box;
   border-radius: 4px 4px 0 0;
   color: var(--text-muted);
 }
 .editor-tab.active {
-  background: var(--surface-panel);
+  background-color: var(--surface-panel);
   color: var(--text-main);
-  border: 0;
+  border-bottom: 0;
+  padding-bottom: 1px;
   border-radius: 10px 10px 0 0;
   z-index: 1;
 }
@@ -295,7 +297,7 @@
 .editor-window .editor-tab { --tab-hover-base: var(--surface-raised); --tab-hover-tint: white; }
 .editor-window .editor-tab.active { --tab-hover-base: var(--surface-panel); }
 .editor-window .editor-tab:hover {
-  background: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 12%);
+  background-color: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 12%);
 }
 .editor-window .editor-tab:hover :is(.editor-tab-label, .editor-tab-close) {
   background: transparent;

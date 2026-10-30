@@ -2,7 +2,7 @@ import {test,expect} from '@playwright/test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 const output=path.resolve(process.env.NEARLY_EDITOR_LAYOUT_OUTPUT||'../editor-width-result');
-test('editor uses full width without tab dividers in all themes and at overflow edges',async({page})=>{
+test('editor uses full width with thin tab contours in all themes and at overflow edges',async({page})=>{
   await fs.mkdir(output,{recursive:true});
   await page.addInitScript(()=>{
     (window as any).__TAURI__={core:{invoke:async(cmd:string)=>{
@@ -29,7 +29,7 @@ test('editor uses full width without tab dividers in all themes and at overflow 
       if(!process.env.NEARLY_WIDTH_BASELINE){
         expect(m.left).toBe(0);expect(m.right).toBe(0);
         expect(m.caretLeft).toBe('12px');expect(m.caretRight).toBe('12px');expect(m.highlightPadding).toBe('12px');
-        expect(m.divider).toBe('none');expect(m.leftBorder).toBe('0px');expect(m.rightBorder).toBe('0px');
+        expect(m.leftBorder).toBe('1px');expect(m.rightBorder).toBe('1px');
         expect(m.pathHeight).toBe(18);expect(m.join).toBe(0);expect(m.background).toBe(m.pathBackground);
         expect(m.footerHeight).toBe(16);expect(m.footerTopGap).toBe(2);expect(m.footerBottomGap).toBe(2);expect(m.totalBottomArea).toBe(20);expect(m.footerPaddingLeft).toBe('12px');expect(m.footerPaddingRight).toBe('12px');
         expect(m.footerPaddingTop).toBe('0px');expect(m.footerPaddingBottom).toBe('0px');expect(m.formatRight).toBe(12);expect(m.messagesLeft).toBe(12);

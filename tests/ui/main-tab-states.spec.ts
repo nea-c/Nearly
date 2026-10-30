@@ -25,7 +25,7 @@ async function wholeTabHover(page:any,tab:any,evidence?:string){
  await tab.locator('button:not([role=tab])').evaluate((el:HTMLElement)=>el.blur());
 }
 
-test('main tabs join the actual surface without vertical dividers in new, failed and connected states',async({page})=>{
+test('main outlined tabs join the actual surface in new, failed and connected states',async({page})=>{
  test.setTimeout(120000);
  await page.addInitScript(()=>{
   const w=window as any;
@@ -68,13 +68,14 @@ test('main tabs join the actual surface without vertical dividers in new, failed
     if(theme==='forest'&&(index===0||index===1))await page.screenshot({path:path.join(output,`${state}-forest-${index}.png`)});
     // Write observations before assertions so the released failure is reviewable.
     fs.writeFileSync(path.join(output,'geometry.json'),JSON.stringify(results,null,2));
-    expect(geometry.leading).toBe(0);expect(geometry.titleHeight).toBe(42);expect(geometry.top).toBe(5);
+    expect(geometry.leading).toBe(3);expect(geometry.titleHeight).toBe(42);expect(geometry.top).toBe(5);expect(geometry.tabHeight).toBe(37);
     expect(geometry.join,`${state}/${theme}/${index} seamless edge`).toBe(0);
     expect(geometry.activeBackground,`${state}/${theme}/${index} actual adjacent surface`).toBe(geometry.surfaceBackground);
-    for(const tab of geometry.tabs){expect(tab.left).toBe('0px');expect(tab.right).toBe('0px');expect(tab.after).toBe('none');}
+    for(const tab of geometry.tabs){expect(tab.left).toBe('1px');expect(tab.right).toBe('1px');}
+    expect(geometry.tabs[index].after).toBe('none');
     await wholeTabHover(page,page.locator('.titlebar .tab').nth(index),state==='new'&&index===1&&['light','dark','forest'].includes(theme)?'main-new-'+theme:undefined);
     if(index===0)await wholeTabHover(page,page.locator('.titlebar .tab').nth(1));
-    await label.hover();const hovered=await read();expect(hovered.tabs.map(t=>[t.left,t.right,t.after])).toEqual(geometry.tabs.map(t=>[t.left,t.right,t.after]));
+    await label.hover();const hovered=await read();expect(hovered.tabs.map(t=>[t.left,t.right])).toEqual(geometry.tabs.map(t=>[t.left,t.right]));
     await label.focus();await page.keyboard.press('ArrowRight');await label.focus();
     expect(await label.evaluate(el=>getComputedStyle(el).outlineStyle)).toBe('solid');
    }
@@ -114,7 +115,7 @@ test('rendered historical header CSS establishes the total client-to-tab gap at 
     rows.push({method:'historical CSS with identical generated header markup, not native EXE',ref,connected,index,dpr,viewportWidth:width,...value});
     expect(value.clientTitleTop).toBe(0);expect(value.titleHeight).toBe(42);
     expect(value.tabs.find(t=>t.selected)!.clientTop).toBe(5);
-    if(ref==='current')for(const tab of value.tabs){expect(tab.clientTop).toBe(5);expect(tab.textLineTop,'restore the pre-join text position, not only outer padding').toBe(13.25);}
+    if(ref==='current')for(const tab of value.tabs){expect(tab.clientTop).toBe(5);expect(tab.height).toBe(37);expect(tab.textLineTop,'retain the reference text position').toBe(13.25);}
    }
   }}finally{await context.close();}
  }

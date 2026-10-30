@@ -258,12 +258,12 @@ test("columns use concrete types, fixed pixel widths, separate order and visibil
   await reorderColumn(page,"local","type","size");
   expect(
     await local
-      .locator("th")
+      .locator("th[data-column]")
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-column"))),
   ).toEqual(["name", "type", "size"]);
   expect(
     await remote
-      .locator("th")
+      .locator("th[data-column]")
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-column"))),
   ).toEqual(["name", "size", "type", "modified"]);
   const handle = local.locator('[data-column-resize="local:name"]');
@@ -279,7 +279,7 @@ test("columns use concrete types, fixed pixel widths, separate order and visibil
     )
     .toBe(290);
   const widths = await local
-    .locator("th")
+    .locator("th[data-column]")
     .evaluateAll((els) => els.map((e) => e.getBoundingClientRect().width));
   expect(widths).toEqual([290, 100, 100]);
   expect(
@@ -390,7 +390,7 @@ test("column widths survive native-style CSP, rerenders and saved settings reloa
   expect(await width(local, "name")).toBe(320);
   expect(await width(local, "modified")).toBe(170);
   expect(await local.locator("[data-cell=name]").first().evaluate(el => el.getBoundingClientRect().width)).toBe(320);
-  expect(await remote.locator("th").count()).toBe(3);
+  expect(await remote.locator("th[data-column]").count()).toBe(3);
   expect(await width(remote, "name")).toBe(280);
   await page.setViewportSize({ width: 800, height: 650 });
   const controls = await page.locator(".window-controls").boundingBox();
