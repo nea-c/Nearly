@@ -13,7 +13,7 @@
 .text-editor{position:fixed;inset:6vh 7vw;z-index:1600;display:grid;grid-template-rows:auto auto auto 1fr auto auto;gap:10px;padding:20px;background:var(--surface-panel,#fff);color:var(--text-main,#222);border:1px solid var(--border-main,#aaa);border-radius:10px;box-shadow:0 12px 70px #0008}.text-editor h2{margin:0;font-size:18px}.text-editor-path{overflow-wrap:anywhere;max-height:70px;overflow:auto}.text-editor-format{font-size:12px;opacity:.75}.text-editor textarea{min-height:180px;resize:none;width:100%;box-sizing:border-box;padding:12px;font:14px/1.55 Consolas,monospace;tab-size:4;white-space:pre;overflow:auto;background:var(--surface-main,#fff);color:inherit}.text-editor-status{margin:0;overflow-wrap:anywhere;max-height:90px;overflow:auto}.text-editor .actions{display:flex;gap:8px;justify-content:flex-end}.text-editor-discard{position:absolute;inset:30% 15% auto;padding:24px;border:1px solid var(--border-main,#aaa);border-radius:8px;background:var(--surface-panel,#fff);box-shadow:0 10px 40px #0006}.text-editor-discard button{margin-right:10px}
 
 /* The selected tab joins the actual adjacent surface in every workspace state.
-   Keep the strip/inactive palette and the original 5px client-top gap. */
+   Keep the reference palette and 5px visible above the contour. */
 #app > .titlebar {
   --joined-tab-surface: var(--surface-base, #f2f5f9);
   border-bottom: 0;
@@ -22,17 +22,32 @@
 #app:has(.bookmark-bar) > .titlebar {
   --joined-tab-surface: var(--surface-panel, #f7f9fc);
 }
-#app > .titlebar .tabs { padding-inline: 0; }
+#app > .titlebar .tabs {
+  padding-inline: 3px 0;
+  padding-top: 5px;
+  gap: 3px;
+  /* Reference 180px tabs and 3px gaps, plus a matching 3px leading inset. */
+  flex-basis: max(0px, calc(183px * var(--tab-count)));
+  width: max(0px, calc(183px * var(--tab-count)));
+}
+#app > .titlebar .tabs > :is(.tab, .tab-drag-placeholder) { margin-inline-start: 0; }
 #app > .titlebar .tab:not(.tab-drag-source):not(.tab-detached-source) {
   position: relative;
-  border-inline-width: 0;
+  /* Follow the rounded contour with one stroke, separated by the reference gap. */
+  border-inline-width: 1px;
+  border-color: var(--border-main, #ccd7e5);
+  /* Do not paint over the adjacent stroke or the shared lower edge. */
+  background-clip: padding-box;
   height: 37px;
   /* Extend the surface to the bar without lowering the pre-join text baseline. */
   padding-bottom: 1px;
 }
 #app > .titlebar .tab.active:not(.tab-drag-source):not(.tab-detached-source) {
-  background: var(--joined-tab-surface);
-  border-color: transparent;
+  background-color: var(--joined-tab-surface);
+  /* No transparent border join: it antialiases the shared side's last pixel.
+     Replace the removed border with padding to retain the text position. */
+  border-bottom: 0;
+  padding-bottom: 2px;
   border-radius: 10px 10px 0 0;
   height: 37px;
   z-index: 1;
@@ -42,10 +57,16 @@
 }
 #app > .titlebar .tab button:focus-visible { outline-offset: -2px; }
 
-#app > .titlebar .tab { --tab-hover-base: var(--surface-raised, #dce5f1); --tab-hover-tint: white; }
+#app > .titlebar .tab {
+  --tab-hover-base: var(--surface-raised, #dce5f1);
+  --tab-hover-tint: white;
+  /* Keep floating and detached tabs at the same reference height. */
+  height: 37px;
+  padding-top: 0;
+}
 #app > .titlebar .tab.active { --tab-hover-base: var(--joined-tab-surface); }
 #app > .titlebar .tab:hover:not(.tab-drag-source):not(.tab-detached-source) {
-  background: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 12%);
+  background-color: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 12%);
 }
 #app > .titlebar .tab:hover button { background: transparent; }
 #app > .titlebar .tab:hover [data-close]:hover,

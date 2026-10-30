@@ -2304,7 +2304,7 @@ function filePane(side: Side) {
         tabindex="0"
         aria-label="${trText`${isLocal ? tr("ローカル") : tr("リモート")}のファイル一覧`}"
       >
-        <table role="grid" aria-multiselectable="true">
+        <table role="grid" aria-multiselectable="true" aria-colcount="${columnIds.length}">
           ${columnsHead(side, columnSettings, columnSort(w).get(side))}
           <tbody>
             ${
@@ -2354,6 +2354,7 @@ function filePane(side: Side) {
                           </td>`,
                       )
                       .join("")}
+                    <td class="file-list-fill" role="presentation" aria-hidden="true"></td>
                   </tr>`
                 : ""
             }${
@@ -2375,12 +2376,13 @@ function filePane(side: Side) {
                     class="${selection.has(f.name) ? "selected" : ""} ${supported ? "" : "unsupported-entry"}"
                   >
                     ${columnIds.map((id) => columnCell(id, f, html`<span data-entry-label class="entry-label ${f.hidden ? "hidden-item-label" : ""}"><span class="${f.dir ? "folder-glyph" : "document-glyph"}" data-entry-icon aria-hidden="true"></span><span>${esc(display)}</span></span>`, fmt(f.size))).join("")}
+                    <td class="file-list-fill" role="presentation" aria-hidden="true"></td>
                   </tr>`;
                 })
                 .join("") ||
               (confirmedEmpty
                 ? html`<tr class="empty-row" data-no-marquee>
-                    <td colspan="${columnIds.length}" class="empty">
+                    <td colspan="${columnIds.length + 1}" aria-colspan="${columnIds.length}" class="empty">
                       <span class="empty-message">このフォルダーは空です</span>
                     </td>
                   </tr>`

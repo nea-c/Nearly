@@ -93,7 +93,7 @@ async function open(page) {
     await mountTextEditorWindow(document.body);
   });
 }
-test('joined editor tabs stay flush with close controls and focus at both scroll edges',async({page})=>{
+test('joined editor tabs preserve reference inset with close controls and focus at both scroll edges',async({page})=>{
   await open(page);await page.setViewportSize({width:600,height:500});
   await page.evaluate(()=>{
     const w=window as any;
@@ -111,7 +111,8 @@ test('joined editor tabs stay flush with close controls and focus at both scroll
       const t=el.getBoundingClientRect(),s=el.parentElement!.getBoundingClientRect();
       return {left:t.left-s.left,right:s.right-t.right,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content};
     });
-    expect(last?geometry.right:geometry.left).toBeCloseTo(0,0);
+    // The chosen outline reference has a 4px leading inset, and no trailing gap.
+    expect(last?geometry.right:geometry.left).toBeCloseTo(last?0:4,0);
     expect(geometry.before).toBe('none');expect(geometry.after).toBe('none');
     await page.keyboard.press('Tab');
     await tab.locator('[data-editor-tab-close]').focus();

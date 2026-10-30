@@ -1631,7 +1631,13 @@ main {
 .pair-paths code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
 .pair-actions { display:flex; align-items:center; gap:4px; }
 .pair-actions button { font-size:11px; padding:3px 7px; }
-.table-scroll table { min-width:0; table-layout:fixed; }
+.table-scroll table { min-width:100%; table-layout:fixed; }
+/* A non-interactive trailing cell absorbs only unused pane width. Real column
+   widths stay fixed, including when the table overflows horizontally. */
+.table-scroll .file-list-fill { padding:0; font-size:0; line-height:0; }
+/* Preserve the 1px layout space/row height without a decorative horizontal rule.
+   The explicit theme selector outranks the shared palette's generic td border. */
+.table-scroll td, :root[data-theme] .table-scroll[data-list] td { border-bottom-color:transparent; }
 .table-scroll th, .table-scroll th:first-child, .table-scroll th:nth-child(2) { width:auto; padding:0; overflow:visible; }
 .column-heading { display:block; width:100%; min-width:0; border:0; border-radius:0; background:transparent; padding:9px 14px; font:inherit; text-align:left; color:inherit; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .column-heading:hover { background:#e8eef7; }

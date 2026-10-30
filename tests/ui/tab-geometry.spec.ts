@@ -13,10 +13,13 @@ async function originalInactivePalette(page,kind:'main'|'editor',theme:string) {
     const strip=tab.closest(kind==='main'?'.tabs':'.editor-tabs')!,label=tab.querySelector('[role=tab]')!,close=tab.querySelector('button:not([role=tab])')!;
     const bg=(el:Element)=>getComputedStyle(el).backgroundColor;
     const effective=(el:Element)=>{while(bg(el)==='rgba(0, 0, 0, 0)'&&el.parentElement)el=el.parentElement;return bg(el);};
-    return {stripBackground:bg(strip),stripEffective:effective(strip),tabBackground:bg(tab),tabEffective:effective(tab),borderColor:getComputedStyle(tab).borderColor,
+    return {stripBackground:bg(strip),stripEffective:effective(strip),tabBackground:bg(tab),tabEffective:effective(tab),
       labelColor:getComputedStyle(label).color,labelBackground:bg(label),labelEffective:effective(label),closeColor:getComputedStyle(close).color,closeBackground:bg(close),closeEffective:effective(close)};
   },kind);
-  await page.mouse.move(100,500);expect(await read(),theme+' '+kind+' original inactive/strip normal palette').toEqual(originalPalettes[theme][kind].normal);
+  // Contours intentionally use the existing main-border token now. Keep every
+  // original background/foreground; separate raster tests verify the new stroke.
+  const {borderColor:_oldBorder,...normal}=originalPalettes[theme][kind].normal;
+  await page.mouse.move(100,500);expect(await read(),theme+' '+kind+' original inactive/strip normal palette').toEqual(normal);
   // Hover backgrounds intentionally brighten the entire tab now; retain the
   // original normal palette above and original foreground colors on hover.
   await tab.locator('[role=tab]').hover();expect((await read()).labelColor,theme+' '+kind+' label hover foreground').toBe(originalPalettes[theme][kind].labelHover.labelColor);
@@ -42,7 +45,7 @@ test('main first middle and last tabs share one flush joined shape in every them
     stripLeading:strip.getBoundingClientRect().left-document.querySelector('.titlebar')!.getBoundingClientRect().left,
     headerHeight:document.querySelector('.titlebar')!.getBoundingClientRect().height,
   }));
-  expect(initial).toEqual({leading:0,stripLeading:0,headerHeight:42});
+  expect(initial).toEqual({leading:3,stripLeading:0,headerHeight:42});
   await page.locator('#connect-form .primary').click();
   for(let i=0;i<2;i++){await page.locator('#add-tab').click();await page.locator('#connect-form .primary').click();}
   for(const theme of themes){
@@ -57,8 +60,8 @@ test('main first middle and last tabs share one flush joined shape in every them
         return {shape:{radius:css.borderRadius,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content,background:css.backgroundColor},bar:getComputedStyle(bar).backgroundColor,
           leading:strip.firstElementChild!.getBoundingClientRect().left-s.left,stripLeading:s.left-t.left,top:bounds.top-t.top,height:bounds.height,headerHeight:t.height,join:bar.getBoundingClientRect().top-bounds.bottom};
       });
-      expect(geometry.leading,theme+' flush first tab').toBe(0);expect(geometry.stripLeading).toBe(0);
-      expect(geometry.top,theme+' original 5px top gap').toBe(5);expect(geometry.height).toBe(37);expect(geometry.headerHeight).toBe(42);
+      expect(geometry.leading,theme+' first-tab inset').toBe(3);expect(geometry.stripLeading).toBe(0);
+      expect(geometry.top,theme+' reference top gap').toBe(5);expect(geometry.height).toBe(37);expect(geometry.headerHeight).toBe(42);
       expect(geometry.join,theme+' connected surface').toBe(0);expect(geometry.shape.background).toBe(geometry.bar);
       expect(geometry.shape.before).toBe('none');expect(geometry.shape.after).toBe('none');
       if(expected)expect(geometry.shape,theme+' same selected shape at '+index).toEqual(expected);else expected=geometry.shape;
@@ -105,7 +108,7 @@ test('editor first middle and last tabs share one flush joined shape and scrolli
         return {shape:{radius:css.borderRadius,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content,background:css.backgroundColor},pathBackground:getComputedStyle(path).backgroundColor,
           leading:strip.firstElementChild!.getBoundingClientRect().left-content.getBoundingClientRect().left,top:bounds.top-shell.getBoundingClientRect().top,height:bounds.height,join:path.getBoundingClientRect().top-bounds.bottom,contentJoin:content.getBoundingClientRect().top-path.getBoundingClientRect().bottom};
       });
-      expect(geometry.leading,theme+' flush editor tab/content').toBe(0);expect(geometry.top,theme+' unchanged editor top gap').toBe(8);expect(geometry.height).toBe(40);
+      expect(geometry.leading,theme+' first editor-tab inset').toBe(4);expect(geometry.top,theme+' reference editor top gap').toBe(8);expect(geometry.height).toBe(40);
       expect(geometry.join).toBe(0);expect(geometry.contentJoin).toBe(0);expect(geometry.shape.background).toBe(geometry.pathBackground);
       expect(geometry.shape.before).toBe('none');expect(geometry.shape.after).toBe('none');
       if(expected)expect(geometry.shape,theme+' same editor selected shape at '+index).toEqual(expected);else expected=geometry.shape;
