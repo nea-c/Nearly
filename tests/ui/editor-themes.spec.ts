@@ -47,6 +47,7 @@ test("editor applies every existing theme on startup and subsequent settings cha
       w.handlers["settings-changed"]({ payload: { settingsRevision: 1 } });
     }, theme);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.mouse.move(1100,850);
     await expect(page.locator(".text-editor textarea")).toHaveValue(
       "unsaved themed buffer",
     );
@@ -60,15 +61,18 @@ test("editor applies every existing theme on startup and subsequent settings cha
     expect(colors.color).not.toBe(colors.background);
     const contrast = async (selector: string) =>
       page.locator(selector).evaluate((el) => {
-        const rgb = (s: string) =>
-          s
-            .match(/[\d.]+/g)!
-            .slice(0, 3)
-            .map(Number)
+        // CSS color-mix serializes as color(srgb ...), not necessarily rgb().
+        // Resolve through the browser instead of treating normalized channels
+        // as 0..255 values, which reported false low hover contrast.
+        const rgb = (s: string) => {
+          const ctx=document.createElement('canvas').getContext('2d')!;
+          ctx.fillStyle=s;ctx.fillRect(0,0,1,1);
+          return [...ctx.getImageData(0,0,1,1).data].slice(0,3)
             .map((v) => {
               const n = v / 255;
               return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
             });
+        };
         const luminance = (s: string) => {
           const [r, g, b] = rgb(s);
           return 0.2126 * r + 0.7152 * g + 0.0722 * b;

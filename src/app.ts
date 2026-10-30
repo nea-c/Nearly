@@ -7,6 +7,7 @@ import { entryOpenTarget } from './entry-open.js';
 import {workspaceIndicator,statusIcon} from './status-indicator.js';
 import { deletionRescanLabels } from "./sync-rescan.js";
 import {syncLogMarkup,syncIndicatorClass,syncActivityLabel} from './sync-presentation.js';
+import {syncDecisionSummary} from './sync-decisions.js';
 import { installInputPolicy } from "./input-policy.js";
 import { popupBarrier } from './popup-barrier.js';
 import { bindFileDrop } from "./file-drop.js";
@@ -2927,6 +2928,8 @@ function paintPolledStatus() {
   if (retry) retry.disabled = t?.status !== "failed" || retrying.has(t.id);
   const failurePanel=document.querySelector<HTMLElement>('#sync-failure-details');
   if(failurePanel){const contents=syncFailureMarkup(t);if(failurePanel.innerHTML!==contents)failurePanel.innerHTML=contents;}
+  const decisionReport=document.querySelector<HTMLTextAreaElement>('#sync-decision-report');
+  if(decisionReport){const text=syncDecisionSummary(t?.syncDecisions);if(decisionReport.value!==text&&document.activeElement!==decisionReport)decisionReport.value=text;}
   const logs = document.querySelector<HTMLElement>(".log-drawer .logs");
   if (logs) {
     const contents =
@@ -2967,6 +2970,10 @@ function logDrawer(t?: SyncTab) {
     </header>
     ${t ? syncRoots(t) : ""}${t?.profile.mode === "mock" ? html`<div class="demo-controls"><span>モック動作確認</span><button id="burst">同じファイルを20回変更</button><button id="fail">次の転送を失敗させる</button></div>` : ""}
     <div id="sync-failure-details">${syncFailureMarkup(t)}</div>
+    <details class="sync-decision-diagnostics"><summary>${getLanguage()==='ja'?'同期の判定診断（匿名）':'Sync decision diagnostics (anonymous)'}</summary>
+      <p>${getLanguage()==='ja'?'理由別の観測件数です。成功した転送件数とは異なります。時刻はUTCの秒単位、差分はリモート − ローカル。ファイル名・接続先・内容は含みません。この欄だけをクリックし、Ctrl+A → Ctrl+Cで共有できます。同期を再開始するとリセットします。':'Counts are decision observations, not successful transfers. Times are UTC seconds; delta is remote minus local. No filenames, endpoints or contents. Click this field, then Ctrl+A and Ctrl+C to share only this report. Starting a new sync resets it.'}</p>
+      <textarea id="sync-decision-report" readonly rows="8" spellcheck="false" aria-label="${getLanguage()==='ja'?'匿名の同期判定診断':'Anonymous sync decision report'}">${esc(syncDecisionSummary(t?.syncDecisions))}</textarea>
+    </details>
     <ul class="logs">
       ${
         (t?.logs ?? [])

@@ -10,7 +10,10 @@ let failedStage=null,heldTarget=null;
 const fixture=await createFixture(output,{
  advertisedOpenHandles:mode==='compare-parallel-advertised-one'||mode==='compare-parallel-limits-unavailable'?1:undefined,
  rejectLimits:mode==='compare-parallel-limits-unavailable',
- beforeOpen(target){if((mode==='compare-parallel-handles'&&fixture.openFileHandles>=2)||(mode==='compare-parallel-advertised-one'&&fixture.openFileHandles>=1))throw Error('generated handle pressure');},
+ beforeOpen(target){
+  if(mode==='compare-guard-parent-at-open'&&!modified){modified=true;const p=path.join(fixture.remote,'upload/job/nested');fs.renameSync(p,p+'-saved');fs.writeFileSync(p,'generated non-directory replacement');}
+  if((mode==='compare-parallel-handles'&&fixture.openFileHandles>=2)||(mode==='compare-parallel-advertised-one'&&fixture.openFileHandles>=1))throw Error('generated handle pressure');
+ },
  beforeRmdir(){if(mode==='compare-parallel-mirror'&&fixture.openFileHandles!==0){fs.writeFileSync(path.join(output,'delete-with-open-handles'),'unexpected');return 3;}},
  async beforeReadDir(target){
   if(!mode.startsWith('compare-snapshot')||path.basename(target??'')!=='nested')return;
@@ -26,6 +29,7 @@ const fixture=await createFixture(output,{
   return names;
  },
  async beforeWrite(target){
+  if(mode==='compare-guard-postwrite')modified=true;
   if(mode.startsWith('compare-parallel')){activeWrites++;maxWrites=Math.max(maxWrites,activeWrites);writingFiles.set(target,(writingFiles.get(target)??0)+1);maxWritingFiles=Math.max(maxWritingFiles,writingFiles.size);await new Promise(r=>setTimeout(r,30));activeWrites--;const left=writingFiles.get(target)-1;if(left)writingFiles.set(target,left);else writingFiles.delete(target);}
   if(mode==='compare-parallel-fail'){failedStage??=target;if(target===failedStage)return 3;}
   if(mode==='compare-parallel-disconnect'){fixture.disconnect();return 4;}
@@ -74,6 +78,19 @@ const fixture=await createFixture(output,{
   if(mode==='compare-parallel-acklost'&&!failedStage){failedStage=source;fs.renameSync(path.join(fixture.remote,source),path.join(fixture.remote,target));throw Error('generated lost rename ACK');}
  },
  async beforeStat(_op,target){
+  if(mode==='compare-guard-server-error'&&target==='/upload/job/nested')return 3;
+  if(mode==='compare-guard-cancel'&&target==='/upload/job/nested'){
+   fs.writeFileSync(path.join(output,'guard-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 4;
+  }
+  if(mode==='compare-cancel'){
+   inflight++;maxInflight=Math.max(maxInflight,inflight);
+   if(inflight===4)fs.writeFileSync(path.join(output,'cancel-comparison-held'),'generated');
+   await new Promise(r=>setTimeout(r,3000));inflight--;return;
+  }
+  if(mode==='compare-snapshot-content-race'&&target==='/upload/job/nested/file0.txt'&&fs.existsSync(path.join(output,'hold-content-compare'))&&!fs.existsSync(path.join(output,'content-compare-held'))){
+   fs.writeFileSync(path.join(output,'content-compare-held'),'generated');const deadline=Date.now()+15000;
+   while(!fs.existsSync(path.join(output,'release-content-compare'))){if(Date.now()>deadline)throw Error('generated content comparison barrier timed out');await new Promise(r=>setTimeout(r,5));}
+  }
   if(mode==='compare-parallel-postcancel'&&target===heldTarget){fs.writeFileSync(path.join(output,'post-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 3;}
   if(mode==='compare-snapshot-target-race'&&target==='/upload/job/nested/file0.txt')targetLookups++;
   if(mode==='compare-snapshot-junction'&&target==='/upload/job/nested'&&!fs.existsSync(path.join(output,'junction-ready'))){
@@ -97,6 +114,9 @@ const fixture=await createFixture(output,{
   if(mode==='committed'&&committed&&target==='/upload/job/a.txt')return 3;
  },
  mapStat(target,attrs){
+  if(mode==='compare-guard-postwrite'&&modified&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
+  if(mode==='compare-guard-target-type'&&target.endsWith('.txt'))return {...attrs,mode:0o40755};
+  if(mode==='compare-guard-unknown-mode'&&target==='/upload/job/nested'){const changed={...attrs};delete changed.mode;return changed;}
   if(mode==='compare-upload-unsafe'&&modified&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
   if(mode==='compare-snapshot-parent'&&listed&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
   if(mode==='compare-snapshot-target-race'&&targetLookups>=2&&target==='/upload/job/nested/file0.txt')return {...attrs,mode:0o120777};

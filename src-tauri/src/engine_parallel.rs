@@ -17,6 +17,7 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
     let positive=|path:&Path,item:&Pending|item.force_upload||(path==ready&&selected_absent)||absent.get(path).is_some_and(|a|a.matches(session));
     let eligible=|path:&Path,item:&Pending|{
         item.last.elapsed()>=Duration::from_millis(500)&&positive(path,item)&&!directories.contains_key(path)
+            &&!connection.has_upload_fingerprint(root,path,remote)
             &&(!delete_enabled||path.ancestors().skip(1).filter(|p|!p.as_os_str().is_empty()).all(|p|directories.get(p).and_then(Option::as_ref).is_some_and(|b|b.expected(session).is_ok())))
             &&!rules.excludes(path,false).unwrap_or(true)&&(options.recursive||path.components().count()==1)
     };
@@ -62,7 +63,7 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
         if let Some(n)=outcome.committed_bytes{committed.set(true);s.sent+=1;s.committed_remote_change(remote,&paths[index]);bytes.set(bytes.get().saturating_add(n));s.latency=items[index].first.elapsed().as_millis()as u64;}
         match &outcome.result{
             Ok(sftp::SourceOutcome::Complete(_))=>{resolved.set(resolved.get()+1);s.log(&format!("Uploaded {}",paths[index].display()));},
-            Ok(sftp::SourceOutcome::Changed{..})=>s.log(&format!("Local source changed; waiting to resend {}",paths[index].display())),
+            Ok(sftp::SourceOutcome::Changed{..})=>{s.decisions.record(&paths[index],DecisionReason::SourceChanged,DecisionMetadata::default());s.log(&format!("Local source changed; waiting to resend {}",paths[index].display()));},
             Err(error)=>{if !outcome.cancelled&&first_error.get().is_none(){first_error.set(Some(index));}s.log(&format!("Batch {} ({:?}, settling in-flight results): {error}",paths[index].display(),outcome.commit));},
         }
         s.pending=base+count-resolved.get();s.speed=if s.failure.is_some()||outcome.result.is_err(){0}else{(bytes.get()as f64/started.elapsed().as_secs_f64().max(0.001))as u64};

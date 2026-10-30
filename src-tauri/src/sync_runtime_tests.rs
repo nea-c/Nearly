@@ -4,6 +4,8 @@ use std::{fs,io::{BufRead,BufReader},path::{Path,PathBuf},process::{Child,Comman
 struct Fixture { child:Child, root:PathBuf, remote:PathBuf, profile:Profile, secret:String }
 #[path="sync_snapshot_tests.rs"] mod sync_snapshot_tests;
 #[path="sync_parallel_tests.rs"] mod sync_parallel_tests;
+#[path="sync_classification_tests.rs"] mod sync_classification_tests;
+#[path="sync_guard_tests.rs"] mod sync_guard_tests;
 impl Fixture {
  fn start(mode:&str)->Self {
   let root=std::env::temp_dir().join(format!("nearly-sync-runtime-{}-{}-{}",std::process::id(),mode,getrandom::u64().unwrap()));
@@ -116,9 +118,14 @@ fn comparison_batch_cancel_discards_all_results_promptly(){
  let f=Fixture::start("compare-cancel");let root=f.root.join("local").canonicalize().unwrap();
  let paths:Vec<_>=(0..4).map(|i|{let p=PathBuf::from(format!("file{i}.txt"));fs::write(root.join(&p),b"local").unwrap();p}).collect();
  let stop=Arc::new(AtomicBool::new(false));let(mut s,_)=sftp::connect(&f.profile,&f.secret,&stop).unwrap();
- let signal=stop.clone();let cancel=thread::spawn(move||{thread::sleep(Duration::from_millis(30));signal.store(true,Ordering::SeqCst);});
- let start=Instant::now();assert!(sftp::compare_files(&mut s,&root,&paths,"/upload/job",&stop).is_err());cancel.join().unwrap();assert!(start.elapsed()<Duration::from_secs(1));
+ let signal=stop.clone();let held=f.root.join("server/cancel-comparison-held");let (tx,rx)=std::sync::mpsc::channel();
+ let cancel=thread::spawn(move||{
+  let deadline=Instant::now()+Duration::from_secs(10);while !held.exists()&&Instant::now()<deadline{thread::sleep(Duration::from_millis(2));}
+  let observed=held.exists();let at=Instant::now();signal.store(true,Ordering::SeqCst);tx.send((at,observed)).unwrap();
+ });
+ assert!(sftp::compare_files(&mut s,&root,&paths,"/upload/job",&stop).is_err());let(at,observed)=rx.recv().unwrap();cancel.join().unwrap();assert!(observed,"cancel must start after all four requests are in flight");assert!(at.elapsed()<Duration::from_secs(1));
  assert!(!f.remote.join("upload/job/file0.txt").exists());
+ assert!(f.metrics()["counts"]["WRITE"].is_null());
 }
 #[test]
 fn worker_cancel_during_comparison_batch_never_dispatches_followup_mutations(){

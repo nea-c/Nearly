@@ -17,6 +17,8 @@ test('editor uses full width without tab dividers in all themes and at overflow 
     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
     for(const index of [0,1,2]){
       await page.locator('.editor-tabs [role=tab]').nth(index).click();
+      // Measure the normal joined surface; hover deliberately brightens a tab.
+      await page.mouse.move(1100,850);
       const m=await page.evaluate(()=>{
         const content=document.querySelector('.editor-content')!,area=document.querySelector('textarea')!,layer=document.querySelector('.syntax-layer')!,tab=document.querySelector('.editor-tab:not(.active)')!,active=document.querySelector('.editor-tab.active')!,row=document.querySelector('.editor-active-path')!;
         const c=content.getBoundingClientRect(),s=getComputedStyle(area),t=getComputedStyle(tab);

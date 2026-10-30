@@ -17,8 +17,10 @@ async function originalInactivePalette(page,kind:'main'|'editor',theme:string) {
       labelColor:getComputedStyle(label).color,labelBackground:bg(label),labelEffective:effective(label),closeColor:getComputedStyle(close).color,closeBackground:bg(close),closeEffective:effective(close)};
   },kind);
   await page.mouse.move(100,500);expect(await read(),theme+' '+kind+' original inactive/strip normal palette').toEqual(originalPalettes[theme][kind].normal);
-  await tab.locator('[role=tab]').hover();expect(await read(),theme+' '+kind+' original inactive label hover palette').toEqual(originalPalettes[theme][kind].labelHover);
-  await tab.locator('button:not([role=tab])').hover();expect(await read(),theme+' '+kind+' original inactive close hover palette').toEqual(originalPalettes[theme][kind].closeHover);
+  // Hover backgrounds intentionally brighten the entire tab now; retain the
+  // original normal palette above and original foreground colors on hover.
+  await tab.locator('[role=tab]').hover();expect((await read()).labelColor,theme+' '+kind+' label hover foreground').toBe(originalPalettes[theme][kind].labelHover.labelColor);
+  await tab.locator('button:not([role=tab])').hover();expect((await read()).closeColor,theme+' '+kind+' close hover foreground').toBe(originalPalettes[theme][kind].closeHover.closeColor);
 }
 
 test('main first middle and last tabs share one flush joined shape in every theme',async({page})=>{
@@ -48,7 +50,7 @@ test('main first middle and last tabs share one flush joined shape in every them
     await originalInactivePalette(page,'main',theme);
     let expected;
     for(const index of [0,1,2]){
-      const label=page.locator('.titlebar .tab [role=tab]').nth(index);await label.click();await expect(label).toHaveAttribute('aria-selected','true');
+      const label=page.locator('.titlebar .tab [role=tab]').nth(index);await label.click();await expect(label).toHaveAttribute('aria-selected','true');await page.mouse.move(1100,750);
       const geometry=await page.locator('.titlebar .tab.active').evaluate(el=>{
         const css=getComputedStyle(el),bounds=el.getBoundingClientRect(),strip=document.querySelector('.titlebar .tabs')!,title=document.querySelector('.titlebar')!,bar=document.querySelector('.bookmark-bar')!;
         const t=title.getBoundingClientRect(),s=strip.getBoundingClientRect();
@@ -97,7 +99,7 @@ test('editor first middle and last tabs share one flush joined shape and scrolli
     await originalInactivePalette(page,'editor',theme);
     let expected;
     for(const index of [0,1,2]){
-      const label=page.locator('.editor-tabs [role=tab]').nth(index);await label.click();await expect(label).toHaveAttribute('aria-selected','true');
+      const label=page.locator('.editor-tabs [role=tab]').nth(index);await label.click();await expect(label).toHaveAttribute('aria-selected','true');await page.mouse.move(1100,750);
       const geometry=await page.locator('.editor-tab.active').evaluate(el=>{
         const css=getComputedStyle(el),bounds=el.getBoundingClientRect(),strip=document.querySelector('.editor-tabs')!,shell=document.querySelector('.editor-shell')!,content=document.querySelector('.editor-content')!,path=document.querySelector('.editor-active-path')!;
         return {shape:{radius:css.borderRadius,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content,background:css.backgroundColor},pathBackground:getComputedStyle(path).backgroundColor,

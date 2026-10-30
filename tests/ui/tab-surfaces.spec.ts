@@ -16,6 +16,7 @@ test('main selected tab joins the pair bar with a consistent shape in all themes
  await page.locator('#add-tab').click();await page.locator('#connect-form .primary').click();
  for(const theme of ['light','dark','midnight','forest','mint']){
   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  await page.mouse.move(1100,750);
   const shape=await page.locator('.titlebar .tab.active').evaluate(el=>{
    const style=getComputedStyle(el),bar=document.querySelector('.bookmark-bar')!,title=document.querySelector('.titlebar')!;
    return {background:style.backgroundColor,bar:getComputedStyle(bar).backgroundColor,

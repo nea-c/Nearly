@@ -141,6 +141,7 @@ export interface SyncFailure {
   requiresRescan: true;
 }
 export interface Status {
+  syncDecisions?: unknown;
   syncPhase?: 'scanning'|'working'|'caught_up'|'deletion_rescan_required'|'error'|'stopping'|'stopped';
   deletionRescanRequired?: boolean;
   stopComplete?: boolean;

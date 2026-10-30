@@ -24,6 +24,8 @@ use tokio::io::AsyncReadExt;
 pub(crate) use comparison_snapshot::comparison_snapshot;
 #[path="sftp_parallel.rs"] mod sftp_parallel;
 pub(crate) use sftp_parallel::{upload_batch,prepare_upload_parent,BatchCommit,BatchUploadResult};
+#[path="upload_fingerprint.rs"] mod upload_fingerprint;
+pub(crate) use upload_fingerprint::unchanged_uploaded_content;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -293,11 +295,13 @@ impl Drop for AbortSocket {
     }
 }
 pub struct Connection {
+    pub(crate) diagnostics: Option<crate::engine::sync_decisions::Diagnostics>,
     pub(crate) raw: RawSftpSession,
     session: client::Handle<VerifyHost>,
     abort: AbortSocket,
     pub(crate) posix_rename: bool,
     pub(crate) upload_cap:usize,
+    fingerprints: std::sync::Mutex<upload_fingerprint::Cache>,
 }
 impl Connection {
     pub(crate) fn run<F, T>(&self, stop: &AtomicBool, future: F) -> Result<T, String>
@@ -623,6 +627,8 @@ pub fn connect(
                     abort,
                     posix_rename,
                     upload_cap,
+                    fingerprints: Default::default(),
+                    diagnostics: None,
                 },
                 identity,
             ))
@@ -991,7 +997,9 @@ pub fn compare_files(s:&mut Connection,root:&Path,paths:&[std::path::PathBuf],re
             compare_file_observed(s,root,path,remote).await.map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})
         })).await?;
         // Recheck all local observations after the slowest sibling finishes.
-        for (path,result) in paths.iter().zip(&mut results) {result.revalidate().map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})?;}
+        for (path,result) in paths.iter().zip(&mut results) {result.revalidate().map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})?;
+            if matches!(result.comparison,FileComparison::SourceChanged){if let Some(d)=&s.diagnostics{d.record(path,crate::engine::sync_decisions::Reason::SourceChanged,Default::default());}}
+        }
         Ok(results.into_iter().map(|result|result.comparison).collect())
     });
     result.map_err(|e|(failed_path.into_inner(),e))
@@ -1072,12 +1080,15 @@ impl ObservedComparison {
     }
 }
 async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&str)->Result<ObservedComparison,String>{
+    use crate::engine::sync_decisions::{Reason,Metadata};
     let target = recorded_target(remote, relative)?;
     let source = root.join(relative);
     let canonical = source.canonicalize().map_err(|_| "Local source unavailable for comparison")?;
     if !canonical.starts_with(root) { return Err("Local comparison path escaped root".into()); }
     let input = std::fs::File::open(&source).map_err(|_| "Local source unreadable for comparison")?;
     let source_snapshot = crate::source_change::Snapshot::capture(&input)?;
+    let local_time=protocol_seconds(source_snapshot.modified());
+    let record=|reason,metadata|{if let Some(d)=&s.diagnostics{d.record(relative,reason,metadata);}};
     let comparison:Result<FileComparison,String>=async {
         let parent = target.rsplit_once('/').map(|(p,_)| if p.is_empty(){"/"}else{p}).ok_or("Invalid comparison target")?;
         let mut current = String::new();
@@ -1085,13 +1096,13 @@ async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&s
             current.push('/'); current.push_str(part);
             match s.raw.lstat(current.clone()).await {
                 Ok(a) if a.attrs.file_type().is_dir() && !a.attrs.is_symlink() => (),
-                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => return Ok(FileComparison::Upload { remote_newer: false }),
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));return Ok(FileComparison::Upload { remote_newer: false });},
                 _ => return Err("Remote comparison parent unavailable or unsafe".into()),
             }
         }
         let attrs = match s.raw.lstat(target.clone()).await {
             Ok(a) => a.attrs,
-            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => return Ok(FileComparison::Upload { remote_newer: false }),
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));return Ok(FileComparison::Upload { remote_newer: false });},
             Err(_) => return Err("Remote comparison lookup failed".into()),
         };
         if !attrs.file_type().is_file() || attrs.is_symlink() { return Err("Remote comparison target is not a regular file".into()); }
@@ -1099,8 +1110,10 @@ async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&s
         if current.file_type().is_symlink() { return Err("Local comparison path became a symlink".into()); }
         let current = std::fs::File::open(&source).map_err(|_| "Local comparison source unavailable")?;
         if source_snapshot.changed(&input, &current, source_snapshot.length())?.is_some() {
+            record(Reason::SourceChanged,Metadata::new(source_snapshot.length(),local_time,attrs.size,attrs.mtime));
             return Ok(FileComparison::SourceChanged);
         }
+        if let Some(d)=&s.diagnostics{d.compared(relative,Metadata::new(source_snapshot.length(),local_time,attrs.size,attrs.mtime));}
         if matching_metadata(source_snapshot.length(), Some(source_snapshot.modified()), &attrs) {
             let mut stamp = remote_stamp(&attrs)?;
             stamp.parent = Some(directory_guard(&s.raw, parent).await?);
@@ -1110,6 +1123,7 @@ async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&s
     }.await;
     let mut result=ObservedComparison{comparison:comparison?,source,root:root.to_path_buf(),snapshot:source_snapshot};
     result.revalidate()?;
+    if matches!(result.comparison,FileComparison::SourceChanged){record(Reason::SourceChanged,Metadata::default());}
     Ok(result)
 }
 
@@ -1476,6 +1490,7 @@ async fn upload_async(
     write_window: usize,
     ledger: Option<&sftp_parallel::Ledger>,
 ) -> Result<SourceOutcome<UploadReceipt>, String> {
+    if let Some(d)=&s.diagnostics{d.record(relative,crate::engine::sync_decisions::Reason::Dispatch,Default::default());}
     if relative
         .components()
         .any(|c| !matches!(c, std::path::Component::Normal(_)))
@@ -1514,7 +1529,10 @@ async fn upload_async(
         .map_err(|_| "Clock unavailable")?
         .as_nanos();
     let stage = format!("{parent}/.syncfiles-{id}-{stamp}-{unique}.part");
-        checked_directory(&s.raw,parent,create_parent).await?;
+        // directory_guard immediately below subsumes the no-create traversal:
+        // fresh root/ancestor type+symlink checks, permissions and canonical path.
+        // Creation still needs its own checked MKDIR/verification sequence.
+        if create_parent { checked_directory(&s.raw,parent,true).await?; }
         let stage_parent = directory_guard(&s.raw,parent).await?;
         let existing=match s.raw.lstat(target.clone()).await {
             Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}true},
@@ -1524,6 +1542,7 @@ async fn upload_async(
         if existing && !s.posix_rename{return Err("Server lacks posix-rename@openssh.com; safe overwrite is unavailable. The existing target was not deleted.".into());}
         let original=std::fs::File::open(canonical).map_err(|_|"Local source unavailable")?;
         let source_snapshot=crate::source_change::Snapshot::capture(&original)?;
+        let mut fingerprint=(source_snapshot.length()<=upload_fingerprint::MAX_FILE).then(||ring::digest::Context::new(&ring::digest::SHA256));
         let mut input=tokio::fs::File::from_std(original.try_clone().map_err(|_|"Local source handle unavailable")?);
         let source_mtime=protocol_seconds(source_snapshot.modified()).ok_or("Local source timestamp unsupported by SFTPv3; upload was not committed")?;
         let handle=s.raw.open(stage.clone(),OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|remote_error("staging open"))?.handle;
@@ -1533,7 +1552,7 @@ async fn upload_async(
             let mut chunks=Vec::new();
             for _ in 0..write_window {
                 let mut chunk=vec![0u8;32768];let n=input.read(&mut chunk).await.map_err(|_|"Local read failed")?;
-                if n==0{break;}chunk.truncate(n);chunks.push((offset,chunk));offset+=n as u64;
+                if n==0{break;}chunk.truncate(n);if let Some(digest)=fingerprint.as_mut(){digest.update(&chunk);}chunks.push((offset,chunk));offset+=n as u64;
             }
             if chunks.is_empty(){break;}
             let writes=chunks.into_iter().map(|(at,data)|s.raw.write(handle.clone(),at,data));
@@ -1582,6 +1601,10 @@ async fn upload_async(
             }
         }else{s.raw.rename(stage,target.clone()).await.map_err(|_|remote_error("final rename"))?;}
         if let Some(l)=ledger{l.phase.store(2,Ordering::SeqCst);}
+        if let (Some(digest),Ok(mut cache),Ok(mut remote_stamp))=(fingerprint,s.fingerprints.lock(),remote_stamp(&staged)) {
+            remote_stamp.parent=Some(stage_parent);
+            cache.remember(source.clone(),target,upload_fingerprint::Evidence{source:source_snapshot.clone(),digest:digest.finish(),remote:remote_stamp});
+        }
         Ok(SourceOutcome::Complete(UploadReceipt { bytes:offset, source:source_snapshot }))
 }
 #[cfg(test)]
