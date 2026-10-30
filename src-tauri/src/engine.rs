@@ -22,7 +22,8 @@ mod decision_report_contract {
     #[test]
     fn new_job_exposes_bounded_anonymous_decision_report() {
         let status=serde_json::to_value(super::Status::new()).unwrap();
-        assert_eq!(status["syncDecisions"]["precision"], "UTC Unix seconds (SFTP v3), exact equality");
+        assert_eq!(status["syncDecisions"]["precision"], "UTC Unix seconds (SFTP v3), no tolerance");
+        assert_eq!(status["syncDecisions"]["version"],2);
         assert_eq!(status["syncDecisions"]["examples"].as_array().unwrap().len(),0);
     }
 }
@@ -413,12 +414,14 @@ impl Status {
     fn failure_context(&mut self, message: &str, relative: Option<&Path>, operation: &str, commit_state: &str, pending: usize, cancelled: bool) {
         self.pending = pending;
         let first = self.failure.is_none();
+        let conflict=message.starts_with("Sync conflict:");
+        if conflict&&first&&!cancelled{self.decisions.record(relative.unwrap_or(Path::new("")),DecisionReason::Conflict,DecisionMetadata::default());}
         self.failure(message, cancelled);
         if first && !cancelled {
             if let Some(failure) = self.failure.as_mut() {
                 failure.relative_path = relative.filter(|p| !p.as_os_str().is_empty() && p.components().all(|c| matches!(c, std::path::Component::Normal(_))))
                     .map(|p| p.to_string_lossy().chars().take(4096).collect());
-                failure.operation = operation.into();
+                failure.operation = if conflict{"conflict"}else{operation}.into();
                 failure.commit_state = commit_state.into();
                 failure.pending = pending;
             }
@@ -1395,6 +1398,8 @@ fn worker(
 ) {
     let decisions=state.lock().unwrap().decisions.clone();
     initial.diagnostics=Some(decisions.clone());
+    let sync_policy=sftp::SyncPolicy::default();
+    initial.sync_policy=Some(sync_policy.clone());
     let fatal = |error: String| {
         let mut s = state.lock().unwrap();
         if s.failure.is_none() { s.status = if stop.load(Ordering::Relaxed) { "stopping" } else { "failed" }.into(); }
@@ -1415,6 +1420,7 @@ fn worker(
             if matches!(&event,Ok(e) if matches!(e.kind,notify::EventKind::Access(_))) {
                 return;
             }
+            let detected=Instant::now();
             let mut status=callback_state.lock().unwrap();
             if status.failure.is_some() { return; }
             callback_epoch.fetch_add(1,Ordering::SeqCst);
@@ -1425,7 +1431,7 @@ fn worker(
                 return;
             }
             #[cfg(test)] if let Ok(event)=&event{for path in &event.paths{new_file_wait_tests::mark(path,"watch");sync_notice_test_hooks::observed(path);}}
-            if tx.try_send((Instant::now(), event)).is_err() {
+            if tx.try_send((detected, event)).is_err() {
                 status.failure_context("Watcher overflow: stop and restart for a full rescan",None,"watch","unknown",0,false);
                 callback_stop.store(true,Ordering::SeqCst);
                 of.store(true, Ordering::Relaxed);
@@ -1452,6 +1458,7 @@ fn worker(
     let mut directories: HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>> = HashMap::new();
     if let Err(error) = crate::initial_scan::walk(&root,&stop,&rules,options.recursive,options.delete_removed, |path,is_directory| {
         if is_directory { directories.entry(path.clone()).or_insert(None); }
+        else { initial.sync_mark_initial(&remote,&path)?; }
         enqueue_at(&mut queue,path,Instant::now())
     }) {
         let mut status=state.lock().unwrap();
@@ -1490,7 +1497,7 @@ fn worker(
             for path in queue.keys().filter(|p|!directories.contains_key(*p)) {
                 if !rules.excludes(path,false)? {
                     if let Some(candidate)=snapshot.coverage.candidate(path,listing_session){
-                        if crate::listing_absence::reserve_candidate(&mut candidate_bytes,path.as_os_str().len()){decisions.record(path,DecisionReason::MissingRemote,DecisionMetadata::default());absent_candidates.insert(path.clone(),candidate);}
+                        if crate::listing_absence::reserve_candidate(&mut candidate_bytes,path.as_os_str().len()){connection.as_ref().unwrap().sync_mark_missing(&remote,path)?;decisions.record(path,DecisionReason::MissingRemote,DecisionMetadata::default());absent_candidates.insert(path.clone(),candidate);}
                     }
                 }
             }
@@ -1522,33 +1529,39 @@ fn worker(
             let paths:Vec<_>=queue.keys().cloned().collect();
             if let Some(snapshot)=sftp::comparison_snapshot(connection.as_mut().unwrap(),&remote,&paths,listing_session,&stop)?{
                 if local_root_identity(&root)?!=root_identity{return Err("Local root changed during comparison inventory".into());}
-                let mut skipped=0usize;
-                for (path,hint) in snapshot.hints{
-                    crate::file_ops::check(&stop)?;
-                    if local_transfer_action(&root,&path,&root_identity,false,&stop)?!=LocalAction::Upload{continue;}
-                    match sftp::listing_candidate(&root,&path,&hint,listing_session,&stop)?{
-                        Candidate::ListedUnchanged=>{decisions.record(&path,DecisionReason::Unchanged,DecisionMetadata::default());queue.remove(&path);skipped+=1;state.lock().unwrap().log(&format!("Skipped unchanged {} (complete directory listing)",path.display()));},
-                        Candidate::SourceChanged=>if let Some(item)=queue.get_mut(&path){decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());item.force_upload=true;item.last=Instant::now();},
-                        Candidate::FreshComparison=>(),
-                    }
-                }
-                for path in snapshot.missing{if let Some(item)=queue.get_mut(&path){decisions.record(&path,DecisionReason::MissingRemote,DecisionMetadata::default());item.force_upload=true;}}
+                listing_hints=snapshot.hints;
+                for path in snapshot.missing{if let Some(item)=queue.get_mut(&path){connection.as_ref().unwrap().sync_mark_missing(&remote,&path)?;decisions.record(&path,DecisionReason::MissingRemote,DecisionMetadata::default());item.force_upload=true;}}
                 if local_root_identity(&root)?!=root_identity{return Err("Local root changed during comparison inventory".into());}
                 let mut status=state.lock().unwrap();status.pending=queue.len();
-                status.log(&format!("Read-only comparison listed {} directories; skipped {} unchanged files",snapshot.directories,skipped));
+                status.log(&format!("Read-only comparison listed {} directories",snapshot.directories));
             }else{
                 decisions.record(Path::new(""),DecisionReason::ListingUnavailable,DecisionMetadata::default());
                 state.lock().unwrap().log("Comparison listing unavailable, ambiguous or over limit; using fresh per-file comparison");
             }
         }
+        // Both delete modes classify from the same initial inventory. These
+        // observations constrain later writes; they never authorize a mutation.
+        for(path,hint)in std::mem::take(&mut listing_hints){
+            crate::file_ops::check(&stop)?;
+            if local_transfer_action(&root,&path,&root_identity,options.delete_removed&&inventory.contains_key(&path),&stop)?!=LocalAction::Upload{continue;}
+            let outcome=sftp::sync_listing_candidate(connection.as_ref().unwrap(),&root,&path,&hint,listing_session,&remote,&stop);
+            match outcome{
+                Ok(sftp::SyncListing::Unchanged)=>{queue.remove(&path);state.lock().unwrap().log(&format!("Skipped listed unchanged {} (complete directory listing)",path.display()));},
+                Ok(sftp::SyncListing::RetainedRemote)=>{queue.remove(&path);decisions.record(&path,DecisionReason::RetainedRemote,DecisionMetadata::default());state.lock().unwrap().log(&format!("Retained newer remote {}",path.display()));},
+                Ok(sftp::SyncListing::Upload)=>if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.batch_checked=true;},
+                Ok(sftp::SyncListing::SourceChanged)=>{if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.last=Instant::now();}decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));},
+                Err(error)=>{state.lock().unwrap().failure_context(&error,Some(&path),"compare","not_committed",queue.len(),stop.load(Ordering::Relaxed));return Err(error);}
+            }
+        }
+        state.lock().unwrap().pending=queue.len();
         Ok(())
     }) {
         let mut s=state.lock().unwrap();
-        s.failure_context(&error,None,"inventory","not_committed",queue.len(),stop.load(Ordering::Relaxed));
+        if s.failure.is_none(){s.failure_context(&error,None,"inventory","not_committed",queue.len(),stop.load(Ordering::Relaxed));}
         s.record_stopped_queue(queue.len());
         return;
     }
-    state.lock().unwrap().log("Comparison uses size and whole-second UTC mtime; equal metadata does not prove equal content");
+    state.lock().unwrap().log("Initial sync uploads missing or locally newer files; newer remote files are retained; ambiguous sizes conflict. UTC whole seconds, no tolerance.");
     let mut delete_enabled = options.delete_removed;
     let mut blocked = false;
     let mut rescan_required = false;
@@ -1613,7 +1626,12 @@ fn worker(
                             Ok(meta) if meta.is_file() => {
                                 queue_candidate(
                                     &path, &root, false, &mut queue, &stop, &rules, detected, options.recursive,
-                                ).map(|()|{if let Ok(relative)=path.strip_prefix(&root){if let Some(item)=queue.get_mut(relative){let time=meta.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|t|u32::try_from(t.as_secs()).ok());decisions.record(relative,DecisionReason::Watcher,DecisionMetadata::new(meta.len(),time,None,None));item.force_upload=true;}}})
+                                ).and_then(|()|{
+                                    if let Ok(relative)=path.strip_prefix(&root){if queue.contains_key(relative){
+                                        sftp::sync_notice_order(&sync_policy,&remote,relative,detected).map_err(|error|{state.lock().unwrap().failure_context(&error,Some(relative),"watch","not_committed",queue.len(),stop.load(Ordering::SeqCst));error})?;
+                                        if let Some(item)=queue.get_mut(relative){let time=meta.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|t|u32::try_from(t.as_secs()).ok());decisions.record(relative,DecisionReason::Watcher,DecisionMetadata::new(meta.len(),time,None,None));item.force_upload=true;}
+                                    }}Ok(())
+                                })
                             },
                             Ok(_) => Ok(()),
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1769,10 +1787,10 @@ fn worker(
         // Compare at most four independent files on the existing authenticated
         // session. Publish no authority/skip result until the entire batch has
         // succeeded. Upload/delete paths retain their fresh mutation guards.
-        if absent_candidate.is_none() && ready.as_ref().is_some_and(|p|!directories.contains_key(p)&&queue.get(p).is_some_and(|v|!v.force_upload&&!v.batch_checked))
+        if absent_candidate.is_none() && ready.as_ref().is_some_and(|p|!directories.contains_key(p)&&queue.get(p).is_some_and(|v|(!v.force_upload||connection.as_ref().is_some_and(|c|c.sync_needs_initial(&remote,p)))&&!v.batch_checked))
             && connection.as_ref().is_some_and(|c|!c.needs_recycle()) {
             let mut candidates:Vec<_>=queue.iter().filter(|(p,v)|!directories.contains_key(*p)
-                && !absent_candidates.contains_key(*p) && !v.force_upload && !v.batch_checked && v.last.elapsed()>=Duration::from_millis(500)
+                && !absent_candidates.contains_key(*p) && (!v.force_upload||connection.as_ref().is_some_and(|c|c.sync_needs_initial(&remote,p))) && !v.batch_checked && v.last.elapsed()>=Duration::from_millis(500)
                 && !rules.excludes(p,false).unwrap_or(true) && (options.recursive||p.components().count()==1))
                 .map(|(p,_)|p.clone()).take(4).collect();
             candidates.sort_by_key(|p|(p.components().count(),p.clone()));
@@ -1845,6 +1863,7 @@ fn worker(
                                 queue.remove(&path);consumed=true;
                                 state.lock().unwrap().log(&format!("Skipped unchanged {}",path.display()));
                             },
+                            sftp::FileComparison::RetainedRemote=>{queue.remove(&path);consumed=true;decisions.record(&path,DecisionReason::RetainedRemote,DecisionMetadata::default());state.lock().unwrap().log(&format!("Retained newer remote {}",path.display()));},
                             sftp::FileComparison::SourceChanged=>{
                                 if let Some(item)=queue.get_mut(&path){item.last=Instant::now();item.force_upload=true;}
                                 state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));
@@ -1899,6 +1918,20 @@ fn worker(
             }
         }
         if let Some(path)=ready.as_ref(){
+            // Local content evidence is not a write permit. Even no-op notices
+            // retain fresh remote comparison and event-epoch revalidation.
+            if queue.get(path).is_some_and(|v|v.force_upload)&&!directories.contains_key(path){
+                if let Some(c)=connection.as_mut().filter(|c|!c.needs_recycle()){
+                    let before=event_epoch.load(Ordering::SeqCst);
+                    let result=local_transfer_action(&root,path,&root_identity,delete_enabled&&inventory.contains_key(path),&stop)
+                        .and_then(|action|if action==LocalAction::Upload{sftp::unchanged_sync_notice(c,&root,path,&remote,&stop)}else{Ok(false)});
+                    match result{
+                        Ok(true) if events_drained&&before==observed_epoch&&before==event_epoch.load(Ordering::SeqCst)&&!stop.load(Ordering::SeqCst)=>{queue.remove(path);state.lock().unwrap().pending=queue.len();decisions.record(path,DecisionReason::ContentUnchanged,DecisionMetadata::default());state.lock().unwrap().log("Skipped unchanged content after local notice");continue;},
+                        Ok(true)=>{if let Some(item)=queue.get_mut(path){item.last=Instant::now();}continue;},
+                        Ok(_)=>(),Err(error)=>{state.lock().unwrap().failure_context(&error,Some(path),"compare","not_committed",queue.len(),stop.load(Ordering::SeqCst));break;}
+                    }
+                }
+            }
             if let Some(c)=connection.as_mut(){
                 if let Some(committed)=engine_parallel::run(&mut parallel,path,absent_candidate.as_ref().is_some_and(|a|a.matches(listing_session)),&mut queue,c,&root,root_identity,&remote,&id,&stop,&state,&rules,&options,delete_enabled,&directories,&mut inventory,&mut file_authority_bytes,&mut listing_hints,&mut absent_candidates,listing_session){
                     if committed{last_transfer=Instant::now();}
@@ -1941,6 +1974,7 @@ fn worker(
                 }
             }
             let start = Instant::now();
+            let mut reconnected=false;
             if connection.as_ref().is_some_and(|c| c.needs_recycle()) {
                 parallel.reset();
                 absent_candidates.clear();
@@ -1967,7 +2001,8 @@ fn worker(
                             break;
                         }
                         s.diagnostics=Some(decisions.clone());
-                        connection = Some(s)
+                        s.sync_policy=Some(sync_policy.clone());
+                        connection = Some(s);reconnected=true;
                     }
                     Err(e) => {
                         state.lock().unwrap().failure_context(&e,Some(&path),"connect","not_committed",queue.len()+1,stop.load(Ordering::Relaxed));
@@ -2044,10 +2079,22 @@ fn worker(
                     &stop,
                 )?;
                 let connection = connection.as_mut().unwrap();
-                if action == LocalAction::Upload && !item.force_upload && !absent_candidate.as_ref().is_some_and(|c|c.matches(listing_session)) {
+                // A notice may have bypassed the pre-loop content check while
+                // the old transport was being recycled. Its job-local local
+                // evidence remains valid, but is never permission to overwrite.
+                if action==LocalAction::Upload&&item.force_upload&&reconnected {
+                    let before=event_epoch.load(Ordering::SeqCst);
+                    if sftp::unchanged_sync_notice(connection,&root,&path,&remote,&stop)? {
+                        if !events_drained||before!=observed_epoch||before!=event_epoch.load(Ordering::SeqCst){source_changed=true;}
+                        else{decisions.record(&path,DecisionReason::ContentUnchanged,DecisionMetadata::default());}
+                        return Ok((0,None,LocalAction::Skip,false));
+                    }
+                }
+                if action == LocalAction::Upload && (!item.force_upload||connection.sync_needs_initial(&remote,&path)) && !absent_candidate.as_ref().is_some_and(|c|c.matches(listing_session)) {
                     match sftp::compare_file(connection,&root,&path,&remote,&stop)? {
                         sftp::FileComparison::SourceChanged => { source_changed=true; return Ok((0,None,LocalAction::Skip,false)); },
                         sftp::FileComparison::Unchanged(_stamp) => return Ok((0,None,LocalAction::Skip,false)),
+                        sftp::FileComparison::RetainedRemote=>{decisions.record(&path,DecisionReason::RetainedRemote,DecisionMetadata::default());return Ok((0,None,LocalAction::Skip,false));},
                         sftp::FileComparison::Upload { remote_newer: true } => state.lock().unwrap().log(&format!("Remote newer; source-authoritative overwrite {}",path.display())),
                         sftp::FileComparison::Upload { remote_newer: false } => (),
                     }
@@ -2128,6 +2175,7 @@ fn worker(
                         s.committed_remote_change(&remote, &path);
                     }
                     if action == LocalAction::Delete {
+                        if let Some(c)=connection.as_ref(){c.sync_forget(&remote,&path,is_directory);}
                         if let Some(stamp)=inventory.remove(&path) { file_authority_bytes=file_authority_bytes.saturating_sub(stamp.authority_bytes()+path.as_os_str().len()*2); }
                         s.log(&format!(
                             "{} {}",
@@ -3197,7 +3245,7 @@ mod directory_regression {
         std::fs::write(path, b"generated owned content").unwrap();
     }
     fn settled(engine: &Engine, id: &str) {
-        wait(|| engine.status(id).unwrap().pending == 0);
+        wait(|| {let status=engine.status(id).unwrap();status.pending==0&&serde_json::to_value(status).unwrap()["syncPhase"]=="caught_up"});
         thread::sleep(Duration::from_millis(800));
         let status = engine.status(id).unwrap();
         assert_eq!(status.pending, 0, "{:?}", status.logs);
@@ -3228,11 +3276,13 @@ mod directory_regression {
         let status = resumed.status("difference-metadata").unwrap();
         assert_eq!(status.sent, 0, "Resume new job must skip unchanged metadata: {:?}", status.logs);
         assert_eq!(status.remote_changes.revision, 0);
-        assert!(status.logs.iter().any(|line| line.starts_with("Skipped unchanged ")));
+        assert!(status.logs.iter().any(|line| line.starts_with("Skipped listed unchanged ")));
         set_mtime(&local.join("same.txt"), 1_700_000_001, 0);
-        wait(|| resumed.status("difference-metadata").unwrap().sent == 1);
+        wait(|| resumed.status("difference-metadata").unwrap().logs.iter().any(|line|line=="Skipped unchanged content after local notice"));
+        assert_eq!(resumed.status("difference-metadata").unwrap().sent,0,"mtime-only notification must preserve unchanged remote content");
         std::fs::write(local.join("same.txt"), b"changed size").unwrap();
         wait(|| std::fs::read(remote.join("same.txt")).ok().as_deref() == Some(b"changed size"));
+        wait(||resumed.status("difference-metadata").unwrap().sent==1);
         write(&local, "added.txt");
         wait(|| remote.join("added.txt").is_file());
         settled(&resumed,"difference-metadata");
@@ -3287,13 +3337,23 @@ mod directory_regression {
             engine.stop(name).unwrap();
         }
         let (local, remote) = f.roots("difference-newer");
-        write(&local, "newer.txt"); std::fs::write(remote.join("newer.txt"), b"different remote bytes").unwrap();
+        write(&local, "newer.txt");
+        let retained=vec![b'R';std::fs::metadata(local.join("newer.txt")).unwrap().len()as usize];
+        std::fs::write(remote.join("newer.txt"),&retained).unwrap();
         set_mtime(&local.join("newer.txt"), 1_700_000_000, 0);
         set_mtime(&remote.join("newer.txt"), 1_800_000_000, 0);
         let engine = f.start("difference-newer", &local, SyncOptions { delete_removed: true, ..SyncOptions::default() });
-        wait(|| std::fs::read(remote.join("newer.txt")).ok() == std::fs::read(local.join("newer.txt")).ok());
         settled(&engine, "difference-newer");
-        assert!(engine.status("difference-newer").unwrap().logs.iter().any(|line| line.starts_with("Remote newer; source-authoritative overwrite ")));
+        assert_eq!(engine.status("difference-newer").unwrap().sent,0);
+        assert_eq!(std::fs::read(remote.join("newer.txt")).unwrap(),retained);
+        assert!(engine.status("difference-newer").unwrap().logs.iter().any(|line| line.starts_with("Retained newer remote ")));
+        // A real watched edit is sent even with an old source timestamp,
+        // provided the retained remote baseline has not changed.
+        std::fs::write(local.join("newer.txt"),b"real local change").unwrap();
+        set_mtime(&local.join("newer.txt"),1_700_000_000,0);
+        wait(||std::fs::read(remote.join("newer.txt")).ok().as_deref()==Some(b"real local change"));
+        settled(&engine,"difference-newer");
+        assert_eq!(engine.status("difference-newer").unwrap().sent,1);
         // A changed remote file must not inherit the original deletion authority.
         std::fs::write(remote.join("newer.txt"), b"independent remote edit").unwrap();
         std::fs::remove_file(local.join("newer.txt")).unwrap();

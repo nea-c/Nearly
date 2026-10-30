@@ -3,7 +3,12 @@ import {createFixture} from './sftp-fixture.mjs';
 import fs from 'node:fs';import path from 'node:path';import {fixtureDirectory,runFixtureTest} from './native-test-process.mjs';
 const output=fixtureDirectory('listing-worker');
 let fixture;let changed=false;
-fixture=await createFixture(output,{async beforeStat(op,p){
+fixture=await createFixture(output,{async beforeReadDir(p){
+ const early=p&&path.basename(p).match(/^listing-prebaseline-fallback-(edit|attribute)$/);
+ if(early){const name=path.basename(p);fs.writeFileSync(path.join(output,`${name}-before-capture`),'generated');const end=Date.now()+10000;while(!fs.existsSync(path.join(output,`${name}-continue`))){if(Date.now()>end)throw Error('generated early notice barrier timeout');await new Promise(r=>setTimeout(r,2));}return 3;}
+ const staged=p&&path.basename(p).match(/^listing-staged-(error|cancel)$/);
+ if(staged){fs.writeFileSync(path.join(output,`listing-staged-${staged[1]}-batch-entered`),'generated');if(staged[1]==='error')return 3;await new Promise(resolve=>setTimeout(resolve,2000));return 4;}
+},async beforeStat(op,p){
  const staged=p.match(/^\/listing-staged-(save|error|cancel)\/(a|b)\.txt$/);
  if(staged){const mode=staged[1],name=`listing-staged-${mode}`,marker=path.join(output,`${name}-batch-entered`);if(!fs.existsSync(marker)){fs.writeFileSync(marker,"generated");if(mode==="save"){const peer=path.join(output,name,"deep/peer.txt");fs.writeFileSync(peer,"save");fs.utimesSync(peer,1700000000.5,1700000000.5);}}if(mode==="error")return 3;if(mode==="cancel")await new Promise(resolve=>setTimeout(resolve,200));}
 

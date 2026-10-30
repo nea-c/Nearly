@@ -21,6 +21,9 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 #[path="comparison_snapshot.rs"] mod comparison_snapshot;
+#[path="sync_policy.rs"] mod sync_policy;
+pub(crate) use sync_policy::Policy as SyncPolicy;
+pub(crate) use sync_policy::unchanged_notice as unchanged_sync_notice;
 pub(crate) use comparison_snapshot::comparison_snapshot;
 #[path="sftp_parallel.rs"] mod sftp_parallel;
 pub(crate) use sftp_parallel::{upload_batch,prepare_upload_parent,BatchCommit,BatchUploadResult};
@@ -295,6 +298,7 @@ impl Drop for AbortSocket {
     }
 }
 pub struct Connection {
+    pub(crate) sync_policy:Option<SyncPolicy>,
     pub(crate) diagnostics: Option<crate::engine::sync_decisions::Diagnostics>,
     pub(crate) raw: RawSftpSession,
     session: client::Handle<VerifyHost>,
@@ -629,6 +633,7 @@ pub fn connect(
                     upload_cap,
                     fingerprints: Default::default(),
                     diagnostics: None,
+                    sync_policy:None,
                 },
                 identity,
             ))
@@ -975,6 +980,7 @@ fn matching_metadata(local_size: u64, local_time: Option<SystemTime>, attrs: &Fi
 }
 pub enum FileComparison {
     Unchanged(RemoteStamp),
+    RetainedRemote,
     Upload { remote_newer: bool },
     SourceChanged,
 }
@@ -985,7 +991,7 @@ pub struct UploadReceipt { pub bytes: u64, source: crate::source_change::Snapsho
 // Comparison is metadata-only. Keep the exact source metadata stable across the
 // round trip; unknown times always require upload (which may refuse preservation).
 pub fn compare_file(s: &mut Connection, root: &Path, relative: &Path, remote: &str, stop: &AtomicBool) -> Result<FileComparison, String> {
-    s.run(stop,async {Ok(compare_file_observed(s,root,relative,remote).await?.comparison)})
+    s.run(stop,async {Ok(compare_file_observed(s,root,relative,remote,stop).await?.comparison)})
 }
 // Independent files share one authenticated transport. Each file still verifies
 // its ancestors in order. No result escapes a failed/cancelled batch.
@@ -994,7 +1000,7 @@ pub fn compare_files(s:&mut Connection,root:&Path,paths:&[std::path::PathBuf],re
     let failed_path=std::cell::RefCell::new(None);
     let result=s.run(stop,async {
         let mut results=futures_util::future::try_join_all(paths.iter().map(|path|async {
-            compare_file_observed(s,root,path,remote).await.map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})
+            compare_file_observed(s,root,path,remote,stop).await.map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})
         })).await?;
         // Recheck all local observations after the slowest sibling finishes.
         for (path,result) in paths.iter().zip(&mut results) {result.revalidate().map_err(|e|{*failed_path.borrow_mut()=Some(path.clone());e})?;
@@ -1020,12 +1026,43 @@ impl ListingObservation {
 pub(crate) fn listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool)->Result<crate::listing_hint::Candidate,String>{
     Ok(observe_listing_candidate(root,relative,hint,session,stop)?.candidate())
 }
+pub(crate) enum SyncListing { Upload,Unchanged,RetainedRemote,SourceChanged }
+pub(crate) fn sync_listing_candidate(s:&Connection,root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,remote:&str,stop:&AtomicBool)->Result<SyncListing,String>{
+    let(size,time)=hint.metadata();
+    let version=sync_policy::Version{size,mtime:time.filter(|v|*v!=0).ok_or_else(||sync_policy::conflict("remote metadata unavailable; no overwrite attempted"))?};
+    let mut decision=None;
+    let observation=observe_listing_candidate_before(root,relative,hint,session,stop,|snapshot|{
+        if let Some(d)=&s.diagnostics{d.compared(relative,crate::engine::sync_decisions::Metadata::new(snapshot.length(),protocol_seconds(snapshot.modified()),Some(size),time));}
+        // Establish the stable pre-change content evidence before revalidation.
+        // A later real save must not be rebaselined as a same-second no-op;
+        // a metadata-only change must not overwrite retained remote bytes.
+        decision=sync_policy::initialize(s,root,relative,snapshot,remote,Some(version),stop)?;Ok(())
+    })?;
+    if observation.candidate()==crate::listing_hint::Candidate::SourceChanged{return Ok(SyncListing::SourceChanged);}
+    match decision{
+        Some(sync_policy::Initial::Upload)=>Ok(SyncListing::Upload),Some(sync_policy::Initial::Unchanged)=>Ok(SyncListing::Unchanged),Some(sync_policy::Initial::RetainRemote)=>Ok(SyncListing::RetainedRemote),
+        None=>Ok(match observation.candidate(){crate::listing_hint::Candidate::ListedUnchanged=>SyncListing::Unchanged,crate::listing_hint::Candidate::SourceChanged=>SyncListing::SourceChanged,_=>SyncListing::Upload}),
+    }
+}
+impl Connection {
+    pub(crate) fn sync_mark_initial(&self,remote:&str,relative:&Path)->Result<(),String>{if let Some(p)=&self.sync_policy{p.mark_initial(&recorded_target(remote,relative)?)?;}Ok(())}
+    pub(crate) fn sync_mark_missing(&self,remote:&str,relative:&Path)->Result<(),String>{if let Some(p)=&self.sync_policy{p.missing_initial(&recorded_target(remote,relative)?)?;}Ok(())}
+    pub(crate) fn sync_needs_initial(&self,remote:&str,relative:&Path)->bool{self.sync_policy.as_ref().is_some_and(|p|recorded_target(remote,relative).map_or(true,|target|p.needs_initial(&target)))}
+    pub(crate) fn sync_has_local_baseline(&self,remote:&str,relative:&Path)->bool{self.sync_policy.as_ref().is_some_and(|p|recorded_target(remote,relative).map_or(true,|target|p.has_local(&target)))}
+    pub(crate) fn sync_forget(&self,remote:&str,relative:&Path,descendants:bool){if let(Some(p),Ok(target))=(&self.sync_policy,recorded_target(remote,relative)){p.forget(&target,descendants);}}
+}
+pub(crate) fn sync_notice_order(policy:&SyncPolicy,remote:&str,relative:&Path,detected:std::time::Instant)->Result<(),String>{policy.observe_notice(&recorded_target(remote,relative)?,detected)}
 pub(crate) fn observe_listing_candidate(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool)->Result<ListingObservation,String>{
+    observe_listing_candidate_before(root,relative,hint,session,stop,|_|Ok(()))
+}
+fn observe_listing_candidate_before(root:&Path,relative:&Path,hint:&crate::listing_hint::ListingHint,session:u64,stop:&AtomicBool,before_revalidate:impl FnOnce(&crate::source_change::Snapshot)->Result<(),String>)->Result<ListingObservation,String>{
     crate::file_ops::check(stop)?;
     recorded_target("/",relative)?;
     let source=root.join(relative);
+    #[cfg(test)] listing_test_hooks::before_capture(&source,stop)?;
     let input=std::fs::File::open(&source).map_err(|_|"Local listing comparison source unavailable")?;
     let snapshot=crate::source_change::Snapshot::capture(&input)?;
+    before_revalidate(&snapshot)?;
     #[cfg(test)] listing_test_hooks::after_capture(&source,stop)?;
     let candidate=hint.select(snapshot.length(),protocol_seconds(snapshot.modified()),session,false);
     let mut observation=ListingObservation{candidate,local:ObservedComparison{comparison:FileComparison::Upload{remote_newer:false},source,root:root.to_path_buf(),snapshot}};
@@ -1079,7 +1116,7 @@ impl ObservedComparison {
         Ok(())
     }
 }
-async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&str)->Result<ObservedComparison,String>{
+async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&str,stop:&AtomicBool)->Result<ObservedComparison,String>{
     use crate::engine::sync_decisions::{Reason,Metadata};
     let target = recorded_target(remote, relative)?;
     let source = root.join(relative);
@@ -1096,13 +1133,13 @@ async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&s
             current.push('/'); current.push_str(part);
             match s.raw.lstat(current.clone()).await {
                 Ok(a) if a.attrs.file_type().is_dir() && !a.attrs.is_symlink() => (),
-                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));return Ok(FileComparison::Upload { remote_newer: false });},
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));if s.sync_needs_initial(remote,relative){s.sync_mark_missing(remote,relative)?;}return Ok(FileComparison::Upload { remote_newer: false });},
                 _ => return Err("Remote comparison parent unavailable or unsafe".into()),
             }
         }
         let attrs = match s.raw.lstat(target.clone()).await {
             Ok(a) => a.attrs,
-            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));return Ok(FileComparison::Upload { remote_newer: false });},
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {record(Reason::MissingRemote,Metadata::new(source_snapshot.length(),local_time,None,None));if s.sync_needs_initial(remote,relative){s.sync_mark_missing(remote,relative)?;}return Ok(FileComparison::Upload { remote_newer: false });},
             Err(_) => return Err("Remote comparison lookup failed".into()),
         };
         if !attrs.file_type().is_file() || attrs.is_symlink() { return Err("Remote comparison target is not a regular file".into()); }
@@ -1114,6 +1151,11 @@ async fn compare_file_observed(s:&Connection,root:&Path,relative:&Path,remote:&s
             return Ok(FileComparison::SourceChanged);
         }
         if let Some(d)=&s.diagnostics{d.compared(relative,Metadata::new(source_snapshot.length(),local_time,attrs.size,attrs.mtime));}
+        if s.sync_needs_initial(remote,relative){
+            if let Some(decision)=sync_policy::initialize(s,root,relative,&source_snapshot,remote,Some(sync_policy::Version::attrs(&attrs)?),stop)?{
+                match decision{sync_policy::Initial::RetainRemote=>return Ok(FileComparison::RetainedRemote),sync_policy::Initial::Upload=>return Ok(FileComparison::Upload{remote_newer:false}),sync_policy::Initial::Unchanged=>()}
+            }
+        }
         if matching_metadata(source_snapshot.length(), Some(source_snapshot.modified()), &attrs) {
             let mut stamp = remote_stamp(&attrs)?;
             stamp.parent = Some(directory_guard(&s.raw, parent).await?);
@@ -1269,6 +1311,16 @@ async fn directory_guard(
     raw: &RawSftpSession,
     target: &str,
 ) -> Result<RemoteDirectoryStamp, String> {
+    match inspect_directory(raw,target).await? {
+        DirectoryInspection::Present(stamp)=>Ok(stamp),
+        DirectoryInspection::Missing(_)=>Err("Remote directory guard lookup failed; deletion refused".into()),
+    }
+}
+// The read-only comparison pass also needs a precise first missing ancestor.
+// Gather it in the same strict walk; mutation callers still reject all absence.
+// No path/type/canonical conclusion is reused by another operation.
+enum DirectoryInspection { Present(RemoteDirectoryStamp),Missing(String) }
+async fn inspect_directory(raw:&RawSftpSession,target:&str)->Result<DirectoryInspection,String>{
     let mut chain = Vec::new();
     let mut current = String::from("/");
     let mut paths = vec![current.clone()];
@@ -1280,11 +1332,11 @@ async fn directory_guard(
         paths.push(current.clone());
     }
     for path in paths {
-        let attrs = raw
-            .lstat(path.clone())
-            .await
-            .map_err(|_| "Remote directory guard lookup failed; deletion refused")?
-            .attrs;
+        let attrs=match raw.lstat(path.clone()).await {
+            Ok(value)=>value.attrs,
+            Err(SftpError::Status(status)) if path!="/"&&status.status_code==StatusCode::NoSuchFile=>return Ok(DirectoryInspection::Missing(path)),
+            Err(_)=>return Err("Remote directory guard lookup failed; deletion refused".into()),
+        };
         if !attrs.file_type().is_dir() || attrs.is_symlink() {
             return Err(
                 "Remote directory/ancestor changed type or is a symlink; deletion refused".into(),
@@ -1307,7 +1359,7 @@ async fn directory_guard(
     if names.len() != 1 || names[0].filename != target {
         return Err("Remote directory canonical path changed; deletion refused".into());
     }
-    Ok(RemoteDirectoryStamp { chain: Arc::new(chain) })
+    Ok(DirectoryInspection::Present(RemoteDirectoryStamp { chain: Arc::new(chain) }))
 }
 pub fn authorize_directory(
     s: &mut Connection,
@@ -1534,15 +1586,17 @@ async fn upload_async(
         // Creation still needs its own checked MKDIR/verification sequence.
         if create_parent { checked_directory(&s.raw,parent,true).await?; }
         let stage_parent = directory_guard(&s.raw,parent).await?;
-        let existing=match s.raw.lstat(target.clone()).await {
-            Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}true},
-            Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile=>false,
+        let target_attrs=match s.raw.lstat(target.clone()).await {
+            Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}Some(a.attrs)},
+            Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile=>None,
             Err(_)=>return Err(remote_error("target lookup")),
         };
+        let existing=target_attrs.is_some();
+        if let Some(policy)=&s.sync_policy{policy.check_write(&target,target_attrs.as_ref().map(sync_policy::Version::attrs).transpose()?)?;}
         if existing && !s.posix_rename{return Err("Server lacks posix-rename@openssh.com; safe overwrite is unavailable. The existing target was not deleted.".into());}
         let original=std::fs::File::open(canonical).map_err(|_|"Local source unavailable")?;
         let source_snapshot=crate::source_change::Snapshot::capture(&original)?;
-        let mut fingerprint=(source_snapshot.length()<=upload_fingerprint::MAX_FILE).then(||ring::digest::Context::new(&ring::digest::SHA256));
+        let mut fingerprint=(s.sync_policy.is_some()||source_snapshot.length()<=upload_fingerprint::MAX_FILE).then(||ring::digest::Context::new(&ring::digest::SHA256));
         let mut input=tokio::fs::File::from_std(original.try_clone().map_err(|_|"Local source handle unavailable")?);
         let source_mtime=protocol_seconds(source_snapshot.modified()).ok_or("Local source timestamp unsupported by SFTPv3; upload was not committed")?;
         let handle=s.raw.open(stage.clone(),OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|remote_error("staging open"))?.handle;
@@ -1592,8 +1646,9 @@ async fn upload_async(
         }
         if let Some(l)=ledger{l.bytes.store(offset,Ordering::SeqCst);}
         checked_commit_parent(stop,checked_directory(&s.raw,parent,false)).await?;
+        if let Some(policy)=&s.sync_policy{policy.check_write(&target,sync_policy::observed(s,&target).await?)?;crate::file_ops::check(stop)?;}
         if let Some(l)=ledger{l.phase.store(1,Ordering::SeqCst);}
-        if s.posix_rename {
+        if s.posix_rename && (s.sync_policy.is_none()||existing) {
             let mut data=Vec::new();for value in [&stage,&target]{data.extend_from_slice(&(value.len() as u32).to_be_bytes());data.extend_from_slice(value.as_bytes());}
             match s.raw.extended("posix-rename@openssh.com",data).await.map_err(|_|remote_error("final rename"))? {
                 Packet::Status(status) if status.status_code==StatusCode::Ok=>{},
@@ -1601,9 +1656,11 @@ async fn upload_async(
             }
         }else{s.raw.rename(stage,target.clone()).await.map_err(|_|remote_error("final rename"))?;}
         if let Some(l)=ledger{l.phase.store(2,Ordering::SeqCst);}
-        if let (Some(digest),Ok(mut cache),Ok(mut remote_stamp))=(fingerprint,s.fingerprints.lock(),remote_stamp(&staged)) {
+        let digest=fingerprint.map(|context|context.finish());
+        if let Some(policy)=&s.sync_policy{policy.committed(&target,sync_policy::Version{size:offset,mtime:source_mtime},source_snapshot.clone(),digest.as_ref().ok_or("Upload committed; local baseline digest unavailable")?.clone()).map_err(|e|format!("Upload committed; {e}"))?;}
+        if let (Some(digest),Ok(mut cache),Ok(mut remote_stamp))=(digest,s.fingerprints.lock(),remote_stamp(&staged)) {
             remote_stamp.parent=Some(stage_parent);
-            cache.remember(source.clone(),target,upload_fingerprint::Evidence{source:source_snapshot.clone(),digest:digest.finish(),remote:remote_stamp});
+            if source_snapshot.length()<=upload_fingerprint::MAX_FILE{cache.remember(source.clone(),target,upload_fingerprint::Evidence{source:source_snapshot.clone(),digest,remote:remote_stamp});}
         }
         Ok(SourceOutcome::Complete(UploadReceipt { bytes:offset, source:source_snapshot }))
 }

@@ -17,12 +17,13 @@ export function failureDetails(failure: SyncFailure) {
         watch: "変更監視",
         connect: "接続",
         sync: "同期",
+        conflict: "同期の競合",
       }
     : {};
   return {
     path: failure.relativePath,
     operation: operations[failure.operation] ?? failure.operation,
-    reason: tError(failure.reason),
+    reason: conflictReason(failure.reason),
     pending: failure.pending,
     commit:
       failure.commitState === "not_committed"
@@ -38,8 +39,26 @@ export function failureDetails(failure: SyncFailure) {
             : "Commit outcome unknown",
   };
 }
-export function failureLabels(stopComplete = false) {
-  return getLanguage() === "ja"
+function conflictReason(reason:string){
+ if(getLanguage()!=='ja'||!reason.startsWith('Sync conflict: '))return tError(reason);
+ const messages:Record<string,string>={
+  'remote changed since sync baseline; no overwrite attempted':'同期開始時・直前の反映時からリモートが変更されています。上書きしていません。',
+  'size differs while remote timestamp is equal or newer; review both files':'リモートの日時が同じか新しく、サイズが異なります。両方の内容を確認してください。',
+  'new local file already exists remotely; review both files':'新しいローカルファイルと同じ場所にリモートファイルが存在します。両方の内容を確認してください。',
+  'remote metadata unavailable; no overwrite attempted':'リモートのサイズ・更新日時を確認できないため、上書きしていません。',
+  'local timestamp unavailable; no overwrite attempted':'ローカルの更新日時を確認できないため、上書きしていません。',
+  'remote target is not a regular file; no overwrite attempted':'リモートの対象が通常ファイルではないため、上書きしていません。',
+  'sync baseline limit reached; stop and narrow the sync scope':'同期の基準情報の上限に達しました。停止して同期範囲を狭めてください。',
+  'sync baseline unavailable':'同期の基準情報を取得できません。停止して状態を確認してください。',
+  'initial comparison is incomplete; no overwrite attempted':'初回比較が完了していないため、上書きしていません。',
+  'local source changed while preparing baseline; restart to rescan':'初回の基準情報を準備中にローカルファイルが変更されました。確認して再走査してください。',
+  'local baseline unavailable; restart to rescan':'初回のローカル基準情報を取得できません。確認して再走査してください。',
+  'local baseline read failed; restart to rescan':'初回のローカル基準情報を読み取れません。確認して再走査してください。',
+ };
+ return '同期の競合: '+(messages[reason.slice('Sync conflict: '.length)]??tError(reason.slice('Sync conflict: '.length)));
+}
+export function failureLabels(stopComplete = false,conflict=false) {
+  const labels = getLanguage() === "ja"
     ? {
         title: stopComplete
           ? "エラーのため同期を停止しました"
@@ -64,6 +83,8 @@ export function failureLabels(stopComplete = false) {
         help: "No automatic retry. Resuming scans and compares the latest state.",
         status: "Could not retrieve sync status",
       };
+  if(conflict){labels.title=getLanguage()==='ja'?(stopComplete?'競合のため同期を停止しました':'競合のため停止中です（完了確認待ち）'):(stopComplete?'Sync stopped after a conflict':'Stopping sync after a conflict (completion unconfirmed)');labels.help=getLanguage()==='ja'?'自動上書き・自動再試行は行いません。ローカルとリモートの内容を確認し、残す内容を決めてから再開してください。途中の一時ファイルが残る場合があります。':'No automatic overwrite or retry. Review local and remote content and resolve the difference before resuming. Staging files may remain.';}
+  return labels;
 }
 
 export function applyStatusPollFailure(status: Status, error: unknown): void {

@@ -5,12 +5,13 @@ use serde::{Serialize,Serializer};
 use std::{collections::{BTreeMap,hash_map::RandomState},hash::{BuildHasher,Hash,Hasher},path::Path,sync::{Arc,Mutex}};
 const MAX_EXAMPLES:usize=12;
 #[derive(Clone,Copy)]
-pub(crate) enum Reason { Size, Mtime, MissingAttributes, MissingRemote, Unchanged, SourceChanged, Watcher, ContentUnchanged, Dispatch, ListingUnavailable }
+pub(crate) enum Reason { Size, Mtime, MissingAttributes, MissingRemote, Unchanged, SourceChanged, Watcher, ContentUnchanged, Dispatch, ListingUnavailable,RetainedRemote,Conflict }
 impl Reason {
     fn key(self)->&'static str { match self {
         Self::Size=>"size_mismatch",Self::Mtime=>"mtime_mismatch",Self::MissingAttributes=>"metadata_unavailable",
         Self::MissingRemote=>"remote_missing",Self::Unchanged=>"metadata_unchanged",Self::SourceChanged=>"source_changed_during_check",
         Self::Watcher=>"watcher_forced_candidate",Self::ContentUnchanged=>"uploaded_content_unchanged",Self::Dispatch=>"upload_dispatched",Self::ListingUnavailable=>"listing_fallback",
+        Self::RetainedRemote=>"remote_newer_retained",Self::Conflict=>"sync_conflict",
     }}
 }
 #[derive(Clone,Copy,Default,Serialize)]
@@ -31,12 +32,13 @@ struct Example { id:String,reason:&'static str,#[serde(flatten)] metadata:Metada
 #[derive(Serialize)]
 struct Report {
     version:u8,precision:&'static str,
+    #[serde(rename="comparisonPolicy")] comparison_policy:&'static str,
     // Counts are observations, not unique files or successful transfers.
     counts:BTreeMap<&'static str,u64>,examples:Vec<Example>,
     #[serde(skip)] salt:RandomState,
 }
 impl Default for Report {
-    fn default()->Self{Self{version:1,precision:"UTC Unix seconds (SFTP v3), exact equality",counts:BTreeMap::new(),examples:Vec::new(),salt:RandomState::new()}}
+    fn default()->Self{Self{version:2,precision:"UTC Unix seconds (SFTP v3), no tolerance",comparison_policy:"initial local-newer; watch content changes with remote baseline",counts:BTreeMap::new(),examples:Vec::new(),salt:RandomState::new()}}
 }
 #[derive(Clone,Default)]
 pub(crate) struct Diagnostics(Arc<Mutex<Report>>);
