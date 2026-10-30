@@ -4,8 +4,37 @@ import fs from 'node:fs';
 import path from 'node:path';
 const [output,mode,local]=process.argv.slice(2);
 let modified=false,committed=false,edits=0,inflight=0,maxInflight=0,comparisonPhase=false;const seenStages=new Set(),commits=[],replyPaths=[];
+let listed=false,listingReads=0,targetLookups=0;
+let activeWrites=0,maxWrites=0,maxWritingFiles=0;const writingFiles=new Map();
+let failedStage=null,heldTarget=null;
 const fixture=await createFixture(output,{
+ advertisedOpenHandles:mode==='compare-parallel-advertised-one'||mode==='compare-parallel-limits-unavailable'?1:undefined,
+ rejectLimits:mode==='compare-parallel-limits-unavailable',
+ beforeOpen(target){if((mode==='compare-parallel-handles'&&fixture.openFileHandles>=2)||(mode==='compare-parallel-advertised-one'&&fixture.openFileHandles>=1))throw Error('generated handle pressure');},
+ beforeRmdir(){if(mode==='compare-parallel-mirror'&&fixture.openFileHandles!==0){fs.writeFileSync(path.join(output,'delete-with-open-handles'),'unexpected');return 3;}},
+ async beforeReadDir(target){
+  if(!mode.startsWith('compare-snapshot')||path.basename(target??'')!=='nested')return;
+  listed=true;listingReads++;
+  if(mode==='compare-snapshot-unavailable')return 3;
+  if(mode==='compare-snapshot-cancel'){fs.writeFileSync(path.join(output,'listing-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 4;}
+  if(mode==='compare-snapshot-partial'&&listingReads>1)return 3;
+ },
+ mapReadDir(target,names){
+  if(mode==='compare-snapshot-attrs-unknown')for(const entry of names){delete entry.attrs.mode;delete entry.attrs.size;}
+  if(mode==='compare-snapshot-entry-type')for(const entry of names)if(entry.filename==='file0.txt')entry.attrs.mode=0o120777;
+  if(mode==='compare-snapshot-duplicate'&&names.length)names.push({...names[0]});
+  return names;
+ },
  async beforeWrite(target){
+  if(mode.startsWith('compare-parallel')){activeWrites++;maxWrites=Math.max(maxWrites,activeWrites);writingFiles.set(target,(writingFiles.get(target)??0)+1);maxWritingFiles=Math.max(maxWritingFiles,writingFiles.size);await new Promise(r=>setTimeout(r,30));activeWrites--;const left=writingFiles.get(target)-1;if(left)writingFiles.set(target,left);else writingFiles.delete(target);}
+  if(mode==='compare-parallel-fail'){failedStage??=target;if(target===failedStage)return 3;}
+  if(mode==='compare-parallel-disconnect'){fixture.disconnect();return 4;}
+  if(mode==='compare-parallel-cancel'){fs.writeFileSync(path.join(output,'batch-held'),'generated');const start=Date.now();while(!fs.existsSync(path.join(output,'release-batch'))){if(Date.now()-start>30000)return 4;await new Promise(r=>setTimeout(r,5));}}
+  if(mode==='compare-upload-source'&&!modified){
+   modified=true;fs.writeFileSync(path.join(output,'source-changed'),String(Date.now()));
+   for(let i=0;i<8;i++)fs.writeFileSync(path.join(local,`nested/file${i}.txt`),'latest generated source after comparison');
+  }
+  if(mode==='compare-upload-unsafe')modified=true;
   if(mode==='permission'&&target.startsWith('/upload/job/'))return 3;
   const rootStage=path.posix.dirname(target)==='/upload/job';
   const limit=mode==='change'||mode==='change-permission'||mode==='change-network'||mode==='atomic'?1:mode==='burst'?5:mode==='continuous'?1000:0;
@@ -28,6 +57,11 @@ const fixture=await createFixture(output,{
   if(mode==='change-network'&&target.startsWith('/upload/job/'))setImmediate(()=>fixture.disconnect());
  },
  beforeRename(source,target){
+  if(mode==='compare-parallel-postcancel'&&!heldTarget)heldTarget=target;
+  if(mode==='compare-upload-source'&&target.includes('/nested/file')){
+   const expected=fs.readFileSync(path.join(local,'nested',path.posix.basename(target)));
+   if(!fs.readFileSync(path.join(fixture.remote,source)).equals(expected))fs.writeFileSync(path.join(output,'stale-commit'),'unexpected');
+  }
   commits.push({target,edits});fs.writeFileSync(path.join(output,'commits.json'),JSON.stringify(commits));
   if(target==='/upload/job/a.txt'){
    if((mode==='postchange'||mode==='postsame')&&!modified){modified=true;const source=path.join(local,'a.txt'),old=fs.statSync(source);fs.writeFileSync(source,Buffer.alloc(1024*1024,66));const time=mode==='postsame'?new Date(Math.floor(old.mtimeMs/1000)*1000+900):new Date(Date.now()+7000);fs.utimesSync(source,time,time);}
@@ -37,8 +71,16 @@ const fixture=await createFixture(output,{
     throw Object.assign(Error('synthetic lost acknowledgement'),{code:'EACCES'});
    }
   }
+  if(mode==='compare-parallel-acklost'&&!failedStage){failedStage=source;fs.renameSync(path.join(fixture.remote,source),path.join(fixture.remote,target));throw Error('generated lost rename ACK');}
  },
  async beforeStat(_op,target){
+  if(mode==='compare-parallel-postcancel'&&target===heldTarget){fs.writeFileSync(path.join(output,'post-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 3;}
+  if(mode==='compare-snapshot-target-race'&&target==='/upload/job/nested/file0.txt')targetLookups++;
+  if(mode==='compare-snapshot-junction'&&target==='/upload/job/nested'&&!fs.existsSync(path.join(output,'junction-ready'))){
+   const dir=path.join(fixture.remote,'upload/job/nested'),outside=path.join(fixture.remote,'other/escape');
+   fs.renameSync(dir,dir+'-saved');fs.mkdirSync(outside,{recursive:true});fs.writeFileSync(path.join(outside,'sentinel.txt'),'generated outside-selected-root sentinel');fs.symlinkSync(outside,dir,'junction');fs.writeFileSync(path.join(output,'junction-ready'),'generated');
+  }
+  if(mode==='compare-snapshot-junction'&&target.startsWith('/upload/job/nested/'))fs.writeFileSync(path.join(output,'escape-query'),'unexpected');
   if(mode==='compare-error-listed'&&target.includes('/file')){fs.writeFileSync(path.join(output,'denied-child-lookup'),'generated');return 3;}
   if(mode.startsWith('compare')){
    inflight++;maxInflight=Math.max(maxInflight,inflight);const index=target.match(/file([0-3])\.txt$/);
@@ -54,6 +96,12 @@ const fixture=await createFixture(output,{
   }
   if(mode==='committed'&&committed&&target==='/upload/job/a.txt')return 3;
  },
+ mapStat(target,attrs){
+  if(mode==='compare-upload-unsafe'&&modified&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
+  if(mode==='compare-snapshot-parent'&&listed&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
+  if(mode==='compare-snapshot-target-race'&&targetLookups>=2&&target==='/upload/job/nested/file0.txt')return {...attrs,mode:0o120777};
+  return attrs;
+ },
 });
 // Keep filesystem failure evidence before sending an SFTP error; status is unchanged.
 const recordErrors=fixture.fileSystemErrors.push.bind(fixture.fileSystemErrors);
@@ -62,7 +110,7 @@ if(mode.startsWith('compare'))setInterval(()=>{
  for(const name of fs.readdirSync(output).filter(n=>n==='metrics-request'||n.startsWith('metrics-request-'))){
  const target=path.join(output,name==='metrics-request'?'metrics.json':name.replace('metrics-request-','metrics-')+'.json');
  if(!fs.existsSync(target)){
-  fs.writeFileSync(target+'.tmp',JSON.stringify({counts:fixture.requestCounts,authenticated:fixture.authenticated,maxInflight,connections:fixture.totalConnections,replyPaths}));
+  fs.writeFileSync(target+'.tmp',JSON.stringify({counts:fixture.requestCounts,authenticated:fixture.authenticated,maxInflight,maxWrites,maxWritingFiles,maxOpenFileHandles:fixture.maxOpenFileHandles,openFileHandles:fixture.openFileHandles,connections:fixture.totalConnections,replyPaths}));
   fs.renameSync(target+'.tmp',target);
  }
  }

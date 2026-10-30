@@ -164,6 +164,7 @@ Thumbs.db
 !/scripts/generate-status-badges.mjs
 !/scripts/remote-operation-test.mjs
 !/scripts/new-file-wait-test.mjs
+!/scripts/sync-performance-test.mjs
 !/scripts/text-editor-test.mjs
 !/scripts/text-editor-ui-test.mjs
 !/scripts/editor-window-ui-test.mjs

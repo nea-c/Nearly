@@ -66,3 +66,62 @@ Fixtures generate their own disposable loopback server, keys and files under
 Performance depends on directory depth, network and server latency. These
 changes reduce redundant startup work; they do not guarantee a particular
 real-server startup time or eliminate the complete inventory requirement.
+
+## Bounded independent uploads (local follow-up)
+
+Non-deletion startup may list only the parents of initial local file candidates.
+This read-only pass is bounded and consumed entirely before uploads; it is not
+a persisted cache or mutation authority. Unknown READDIR attributes use fresh
+per-file comparison. Unsupported/denied listing before any successful read
+discards the entire pass and falls back; incomplete reads and network failures
+stop rather than inventing absence. Deletion-enabled inventory is unchanged.
+
+Positive upload candidates can share one authenticated SFTP session in bounded
+same-parent batches. Directory creation and all deletion stay serial. Parent
+preparation hints only avoid redundant creation attempts; every file still
+checks local identity/stability, remote ancestors/type/canonical path, exclusive
+staging, timestamps and the final stop/commit barrier independently. Reconnect
+clears preparation hints; hints never authorize deletion. Case aliases and
+overlapping destinations cannot enter a batch together.
+
+The batch-wide WRITE window remains at most eight 32KiB requests (256KiB),
+divided across active files. This bound is per sync session, not an application-
+wide cap across independent jobs. No additional SSH connections are created.
+Advertised OpenSSH open-handle limits reduce file concurrency before dispatch;
+a rejected advertised limits query selects serial uploads. An unadvertised
+resource limit is a real partial failure, not a trigger to replay writes.
+
+Independent in-flight peers settle after a file error so acknowledged commits
+are retained. Rename-issued/no-ACK outcomes remain unknown; neither unknown
+nor failed writes are automatically retried. The job stops for manual restart
+and a fresh comparison. Cancellation may leave exclusive staging files or
+already committed targets; it never reports those as definitely unsent.
+Source changes use the existing stability wait before another attempt.
+
+SFTPv3 cannot atomically compare-and-rename across ancestor/target mutations.
+Existing same-size/mtime-preserving edits and indistinguishable replacements
+remain protocol limits; these checks are not an unconditional TOCTOU guarantee.
+
+The production default is four independent files, capped further by advertised
+server handles; the internal hard ceiling is eight. A test-only width override
+compares1/2/4/8 without creating a persistent setting.
+
+Single sequential samples, Windows/local disk + generated localhost SFTP,
+4,000 files x512bytes (2,048,000bytes),50directories/two relative directory
+levels, delete OFF, no artificial delay:
+
+| File concurrency | Initial sync | Unchanged restart |20 changed files |
+| --- | ---: | ---: | ---: |
+|1 (listing-only scheduling) |61.347s |5.528s |0.905s |
+|2 |59.486s |5.457s |0.801s |
+|4 (default) |46.350s |5.413s |0.769s |
+|8 |39.193s |5.438s |0.823s |
+
+Four is24.4% faster than the contemporaneous serial sample while using half
+the maximum open-file resources of eight. The prior separate listing-only
+sample was51.808s; these are single samples, not stable throughput guarantees.
+The unchanged pass performs724LSTAT/80READDIR with zero uploads in every case.
+A separate16-file test with20ms artificial delay on each LSTAT (not a full
+network RTT simulation) measured initial upload7.977s/4.711s/3.075s/2.262s
+and deletion-enabled initial sync12.610s/6.877s/4.185s/2.769s for1/2/4/8.
+No live remote or equal-workload WinSCP comparison was performed.

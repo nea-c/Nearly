@@ -20,6 +20,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::AsyncReadExt;
+#[path="comparison_snapshot.rs"] mod comparison_snapshot;
+pub(crate) use comparison_snapshot::comparison_snapshot;
+#[path="sftp_parallel.rs"] mod sftp_parallel;
+pub(crate) use sftp_parallel::{upload_batch,prepare_upload_parent,BatchCommit,BatchUploadResult};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -219,6 +223,7 @@ pub fn probe_host_key(profile: &Profile, stop: &AtomicBool) -> Result<ObservedHo
             .await
             .map_err(|_| "Host-key probe TCP connection timed out")?
             .map_err(|_| "Host-key probe TCP connection failed")?;
+            tcp.set_nodelay(true).map_err(|_| "Host-key probe TCP_NODELAY setup failed")?;
             let stream = tcp
                 .into_std()
                 .map_err(|_| "Host-key probe socket unavailable")?;
@@ -292,6 +297,7 @@ pub struct Connection {
     session: client::Handle<VerifyHost>,
     abort: AbortSocket,
     pub(crate) posix_rename: bool,
+    pub(crate) upload_cap:usize,
 }
 impl Connection {
     pub(crate) fn run<F, T>(&self, stop: &AtomicBool, future: F) -> Result<T, String>
@@ -539,6 +545,9 @@ pub fn connect(
             .await
             .map_err(|_| "TCP connection timed out")?
             .map_err(|_| "TCP connection failed")?;
+            // Explicit latency policy for small request/response exchanges.
+            // connect_stream accepts generic I/O and configures no TCP options.
+            tcp.set_nodelay(true).map_err(|_| "TCP_NODELAY setup failed")?;
             let stream = tcp.into_std().map_err(|_| "TCP socket unavailable")?;
             let abort = AbortSocket(
                 stream
@@ -594,6 +603,15 @@ pub fn connect(
                 },
             );
             let version = raw.init().await.map_err(|_| "SFTP initialization failed")?;
+            // Negotiate before any writes. A failed advertised capability is a
+            // serial fallback, never a reason to replay an in-flight upload.
+            let upload_cap = if version.extensions.get("limits@openssh.com").is_some_and(|v| v == "1") {
+                match raw.limits().await {
+                    Ok(limits) if limits.max_open_handles > 0 => limits.max_open_handles.min(8) as usize,
+                    Ok(_) => 8,
+                    Err(_) => 1,
+                }
+            } else { 8 };
             let posix_rename = version
                 .extensions
                 .get("posix-rename@openssh.com")
@@ -604,6 +622,7 @@ pub fn connect(
                     session,
                     abort,
                     posix_rename,
+                    upload_cap,
                 },
                 identity,
             ))
@@ -1373,21 +1392,14 @@ pub fn delete_owned_directory(
     })
 }
 
-pub fn upload_recorded(
-    s: &mut Connection,
-    root: &Path,
-    relative: &Path,
-    remote: &str,
-    stop: &AtomicBool,
-    id: &str,
-) -> Result<SourceOutcome<(u64, RemoteStamp)>, String> {
-    let target = recorded_target(remote, relative)?;
-    let receipt = match upload(s, root, relative, remote, stop, id)? {
-        SourceOutcome::Complete(receipt) => receipt,
-        SourceOutcome::Changed { .. } => return Ok(SourceOutcome::Changed { committed: None }),
-    };
-    let bytes = receipt.bytes;
-    let stamp=s.run(stop,async {
+pub fn upload_recorded(s:&mut Connection,root:&Path,relative:&Path,remote:&str,stop:&AtomicBool,id:&str)->Result<SourceOutcome<(u64,RemoteStamp)>,String>{
+    recorded_target(remote,relative)?;
+    let receipt=match upload(s,root,relative,remote,stop,id)?{SourceOutcome::Complete(r)=>r,SourceOutcome::Changed{..}=>return Ok(SourceOutcome::Changed{committed:None})};
+    s.run(stop,record_upload_receipt(&*s,root,relative,remote,stop,receipt)).map_err(|reason|format!("Upload committed; {reason}"))
+}
+async fn record_upload_receipt(s:&Connection,root:&Path,relative:&Path,remote:&str,stop:&AtomicBool,receipt:UploadReceipt)->Result<SourceOutcome<(u64,RemoteStamp)>,String>{
+    crate::file_ops::check(stop)?;
+    let target=recorded_target(remote,relative)?;let bytes=receipt.bytes;
         let parent=target.rsplit_once('/').map(|(parent,_)|if parent.is_empty(){"/"}else{parent}).ok_or("Invalid owned target")?;
         checked_directory(&s.raw,parent,false).await?;
         let attrs=s.raw.lstat(target.clone()).await.map_err(|_|"Upload completed but ownership metadata is unavailable; deletion ownership was not recorded")?.attrs;
@@ -1400,9 +1412,8 @@ pub fn upload_recorded(
             return Ok(SourceOutcome::Changed { committed: Some((bytes,stamp)) });
         }
         Ok(SourceOutcome::Complete((bytes,stamp)))
-    }).map_err(|reason| format!("Upload committed; {reason}"))?;
-    Ok(stamp)
 }
+
 pub fn delete_uploaded_file(
     s: &mut Connection,
     remote: &str,
@@ -1451,13 +1462,19 @@ where F:Future<Output=Result<(),String>> {
     // not authorize a new rename after its response arrives.
     crate::file_ops::check(stop)
 }
-pub fn upload(
-    s: &mut Connection,
+pub fn upload(s:&mut Connection,root:&Path,relative:&Path,remote:&str,stop:&AtomicBool,id:&str)->Result<SourceOutcome<UploadReceipt>,String>{
+    s.run(stop,upload_async(&*s,root,relative,remote,stop,id,true,8,None))
+}
+async fn upload_async(
+    s: &Connection,
     root: &Path,
     relative: &Path,
     remote: &str,
     stop: &AtomicBool,
     id: &str,
+    create_parent: bool,
+    write_window: usize,
+    ledger: Option<&sftp_parallel::Ledger>,
 ) -> Result<SourceOutcome<UploadReceipt>, String> {
     if relative
         .components()
@@ -1497,8 +1514,7 @@ pub fn upload(
         .map_err(|_| "Clock unavailable")?
         .as_nanos();
     let stage = format!("{parent}/.syncfiles-{id}-{stamp}-{unique}.part");
-    s.run(stop,async {
-        checked_directory(&s.raw,parent,true).await?;
+        checked_directory(&s.raw,parent,create_parent).await?;
         let stage_parent = directory_guard(&s.raw,parent).await?;
         let existing=match s.raw.lstat(target.clone()).await {
             Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}true},
@@ -1515,7 +1531,7 @@ pub fn upload(
         let mut source_changed=false;
         loop {
             let mut chunks=Vec::new();
-            for _ in 0..8 {
+            for _ in 0..write_window {
                 let mut chunk=vec![0u8;32768];let n=input.read(&mut chunk).await.map_err(|_|"Local read failed")?;
                 if n==0{break;}chunk.truncate(n);chunks.push((offset,chunk));offset+=n as u64;
             }
@@ -1555,7 +1571,9 @@ pub fn upload(
             }
             return Ok(SourceOutcome::Changed { committed: None });
         }
+        if let Some(l)=ledger{l.bytes.store(offset,Ordering::SeqCst);}
         checked_commit_parent(stop,checked_directory(&s.raw,parent,false)).await?;
+        if let Some(l)=ledger{l.phase.store(1,Ordering::SeqCst);}
         if s.posix_rename {
             let mut data=Vec::new();for value in [&stage,&target]{data.extend_from_slice(&(value.len() as u32).to_be_bytes());data.extend_from_slice(value.as_bytes());}
             match s.raw.extended("posix-rename@openssh.com",data).await.map_err(|_|remote_error("final rename"))? {
@@ -1563,12 +1581,22 @@ pub fn upload(
                 _=>return Err(remote_error("final rename")),
             }
         }else{s.raw.rename(stage,target.clone()).await.map_err(|_|remote_error("final rename"))?;}
+        if let Some(l)=ledger{l.phase.store(2,Ordering::SeqCst);}
         Ok(SourceOutcome::Complete(UploadReceipt { bytes:offset, source:source_snapshot }))
-    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore="generated localhost TCP policy"]
+    fn sync_tcp_policy_generated() {
+        let filename=std::env::var("NEARLY_SYNC_PERF").unwrap();
+        let v:serde_json::Value=serde_json::from_slice(&std::fs::read(filename).unwrap()).unwrap();
+        assert_eq!(v["generatedOnly"],true);
+        let profile=Profile{id:"generated".into(),name:"loopback".into(),host:"127.0.0.1".into(),port:v["port"].as_u64().unwrap()as u16,user:"fixture".into(),auth:"key".into(),mode:"sftp".into(),key_file:v["key"].as_str().unwrap().into(),host_key:v["fingerprint"].as_str().unwrap().into()};
+        let (connection,_)=connect(&profile,v["passphrase"].as_str().unwrap(),&AtomicBool::new(false)).unwrap();
+        assert!(connection.abort.0.nodelay().unwrap(),"SFTP latency policy requires TCP_NODELAY on its custom socket");
+    }
     #[test]
     fn mirror_budget_includes_provisional_sibling_results() {
         let budget=MirrorBudget::default();

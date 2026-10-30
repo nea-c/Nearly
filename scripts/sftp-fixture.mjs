@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false} = {}) {
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -127,6 +127,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     writeRequests = 0,
     largeWrites = 0;
   const connections = new Set();
+  let openFileHandles=0,maxOpenFileHandles=0;
   let holdListings = false;
   const pendingListings = [];
   const requestCounts = Object.create(null);
@@ -142,12 +143,14 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     // ssh2 1.17's server has no public API to advertise extensions. This exact
     // VERSION-frame adapter is test-only; the real client never depends on it.
     const channelData = client._protocol.channelData.bind(client._protocol);
+    const limitReplies=new Map();
     client._protocol.channelData = (channel, data) => {
-      if (posixRename && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
+      if (data.length>=9&&data[4]===101&&limitReplies.has(data.readUInt32BE(5))){const id=data.readUInt32BE(5),payload=limitReplies.get(id);limitReplies.delete(id);const reply=Buffer.alloc(9+payload.length);reply.writeUInt32BE(reply.length-4);reply[4]=201;reply.writeUInt32BE(id,5);payload.copy(reply,9);return channelData(channel,reply);}
+      if ((posixRename||advertisedOpenHandles!==undefined) && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
         const version = Buffer.concat([
           data,
-          sshString("posix-rename@openssh.com"),
-          sshString("1"),
+          ...(posixRename?[sshString("posix-rename@openssh.com"),sshString("1")]:[]),
+          ...(advertisedOpenHandles!==undefined?[sshString("limits@openssh.com"),sshString("1")]:[]),
         ]);
         version.writeUInt32BE(version.length - 4, 0);
         return channelData(channel, version);
@@ -282,6 +285,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               const access = flags & 2 ? (flags & 1 ? c.O_RDWR : c.O_WRONLY) : c.O_RDONLY;
               const fd = fs.openSync(local(p), access | (flags & 8 ? c.O_CREAT : 0) | (flags & 16 ? c.O_TRUNC : 0) | (flags & 32 ? c.O_EXCL : 0) | (flags & 4 ? c.O_APPEND : 0));
               handles.set(h.toString("hex"), { fd, p: local(p) });
+              openFileHandles++;maxOpenFileHandles=Math.max(maxOpenFileHandles,openFileHandles);
               stream.handle(id, h);
             } catch {
               stream.status(id, FAILURE);
@@ -292,6 +296,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             const entry=handles.get(h.toString("hex"));
             const target=entry?.p ? '/'+path.relative(remote,entry.p).split(path.sep).join('/') : '';
             const injected=await beforeWrite?.(target,offset,data);
+            if(stream.destroyed||handles.get(h.toString("hex"))!==entry)return;
             if (typeof injected==='number') {stream.status(id,injected);return;}
             try {
               fs.writeSync(
@@ -338,7 +343,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           stream.on("CLOSE", (id, h) => {
             try {
               const e = handles.get(h.toString("hex"));
-              if (e?.fd !== undefined) fs.closeSync(e.fd);
+              if (e?.fd !== undefined) {fs.closeSync(e.fd);openFileHandles--;}
               handles.delete(h.toString("hex"));
               status(id);
             } catch (e) {
@@ -384,6 +389,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             } catch (e) { status(id, e); }
           });
           stream.on("EXTENDED", (id, request, data) => {
+            if(request==='limits@openssh.com'&&advertisedOpenHandles!==undefined){if(rejectLimits)return stream.status(id,8);const payload=Buffer.alloc(32);[1048576,32768,32768,advertisedOpenHandles].forEach((n,i)=>payload.writeBigUInt64BE(BigInt(n),i*8));limitReplies.set(id,payload);return stream.status(id,0);}
             if (request !== "posix-rename@openssh.com")
               return stream.status(id, 8);
             try {
@@ -409,11 +415,8 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             }
           });
           stream.on("close", () => {
-            for (const e of handles.values())
-              if (e.fd !== undefined)
-                try {
-                  fs.closeSync(e.fd);
-                } catch {}
+            for (const e of handles.values())if(e.fd!==undefined){try{fs.closeSync(e.fd);}catch{}openFileHandles--;}
+            handles.clear();
           });
         });
       }),
@@ -447,6 +450,8 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     get requestCounts() {
       return { ...requestCounts };
     },
+    get openFileHandles(){return openFileHandles;},
+    get maxOpenFileHandles(){return maxOpenFileHandles;},
     get requestPaths() { return requestPaths.map(entry=>({...entry})); },
     get connectionCount() {
       return connections.size;

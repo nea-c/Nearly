@@ -14,6 +14,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[path="engine_parallel.rs"] mod engine_parallel;
 #[derive(Clone)]
 pub struct SyncOptions {
     pub exclusion_rules: String,
@@ -494,6 +495,7 @@ fn ready_after_completed_work(completed:bool,queue:&HashMap<PathBuf,Pending>,wat
     completed&&(watcher_pending||queue.values().any(|item|item.last.elapsed()>=Duration::from_millis(500)))
 }
 #[cfg(test)] #[path="new_file_wait_tests.rs"] mod new_file_wait_tests;
+#[cfg(test)] #[path="sync_performance_tests.rs"] mod sync_performance_tests;
 #[cfg(test)]
 mod source_reschedule_tests {
     use super::*;
@@ -1444,7 +1446,9 @@ fn worker(
     state.lock().unwrap().activity.scan_finished();
     state.lock().unwrap().log("Initial local scan completed");
     state.lock().unwrap().pending=queue.len();
+    if initial.upload_cap<4{state.lock().unwrap().log(&format!("Server upload concurrency cap: {}; applies before writes",initial.upload_cap));}
     let mut connection = Some(initial);
+    let mut parallel=engine_parallel::Parallel::default();
     let mut inventory: HashMap<PathBuf, DeletionBasis<sftp::RemoteStamp>> = HashMap::new();
     let mut listing_hints: HashMap<PathBuf,ListingHint> = HashMap::new();
     let mut absent_candidates:HashMap<PathBuf,crate::listing_absence::ListedAbsence>=HashMap::new();
@@ -1495,6 +1499,29 @@ fn worker(
                 }else{enqueue_at(&mut queue,path,Instant::now())?;}
             }
             state.lock().unwrap().log("Mirror inventory verified; only in-scope source-absent files and empty directories may be deleted");
+        } else {
+            // Consume this read-only pass BEFORE any upload. Nothing is retained
+            // as a guard/cache across mutations, reconnects, or watcher events.
+            let paths:Vec<_>=queue.keys().cloned().collect();
+            if let Some(snapshot)=sftp::comparison_snapshot(connection.as_mut().unwrap(),&remote,&paths,listing_session,&stop)?{
+                if local_root_identity(&root)?!=root_identity{return Err("Local root changed during comparison inventory".into());}
+                let mut skipped=0usize;
+                for (path,hint) in snapshot.hints{
+                    crate::file_ops::check(&stop)?;
+                    if local_transfer_action(&root,&path,&root_identity,false,&stop)?!=LocalAction::Upload{continue;}
+                    match sftp::listing_candidate(&root,&path,&hint,listing_session,&stop)?{
+                        Candidate::ListedUnchanged=>{queue.remove(&path);skipped+=1;state.lock().unwrap().log(&format!("Skipped unchanged {} (complete directory listing)",path.display()));},
+                        Candidate::SourceChanged=>if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.last=Instant::now();},
+                        Candidate::FreshComparison=>(),
+                    }
+                }
+                for path in snapshot.missing{if let Some(item)=queue.get_mut(&path){item.force_upload=true;}}
+                if local_root_identity(&root)?!=root_identity{return Err("Local root changed during comparison inventory".into());}
+                let mut status=state.lock().unwrap();status.pending=queue.len();
+                status.log(&format!("Read-only comparison listed {} directories; skipped {} unchanged files",snapshot.directories,skipped));
+            }else{
+                state.lock().unwrap().log("Comparison listing unavailable, ambiguous or over limit; using fresh per-file comparison");
+            }
         }
         Ok(())
     }) {
@@ -1508,6 +1535,7 @@ fn worker(
     let mut blocked = false;
     let mut rescan_required = false;
     let mut last_transfer = Instant::now();
+    let mut parallel_unconsumed_events=false;
     'worker: while !stop.load(Ordering::Relaxed) {
         let mut completed_work=false;
         if state.lock().unwrap().failure.is_some() { break; }
@@ -1800,11 +1828,28 @@ fn worker(
                                 state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));
                                 consumed=true;
                             },
-                            sftp::FileComparison::Upload{..}=>{if let Some(item)=queue.get_mut(&path){item.batch_checked=true;}}
+                            sftp::FileComparison::Upload{remote_newer}=>{
+                                // A positive comparison is only a scheduling decision,
+                                // never deletion authority or a mutation permit. Repeating
+                                // the same metadata walk serially defeats the read batch.
+                                // upload() still checks the current local source, every
+                                // remote ancestor, target type and staging/commit guards.
+                                if let Some(item)=queue.get_mut(&path){item.batch_checked=true;item.force_upload=true;}
+                                if remote_newer {state.lock().unwrap().log(&format!("Remote newer; source-authoritative overwrite {}",path.display()));}
+                            }
                         }
                     }
                     if failed {break;}
                     if consumed {state.lock().unwrap().pending=queue.len();continue;}
+                }
+            }
+        }
+        if let Some(path)=ready.as_ref(){
+            if let Some(c)=connection.as_mut(){
+                if let Some(committed)=engine_parallel::run(&mut parallel,path,absent_candidate.as_ref().is_some_and(|a|a.matches(listing_session)),&mut queue,c,&root,root_identity,&remote,&id,&stop,&state,&rules,&options,delete_enabled,&directories,&mut inventory,&mut file_authority_bytes,&mut listing_hints,&mut absent_candidates,listing_session){
+                    if committed{last_transfer=Instant::now();}
+                    if stop.load(Ordering::SeqCst)||state.lock().unwrap().failure.is_some(){parallel_unconsumed_events=event_epoch.load(Ordering::SeqCst)!=observed_epoch;break;}
+                    thread::yield_now();continue;
                 }
             }
         }
@@ -1843,6 +1888,7 @@ fn worker(
             }
             let start = Instant::now();
             if connection.as_ref().is_some_and(|c| c.needs_recycle()) {
+                parallel.reset();
                 absent_candidates.clear();
                 listing_hints.clear();
                 listing_session=listing_session.saturating_add(1);
@@ -2082,6 +2128,7 @@ fn worker(
     }
     s.speed = 0;
     s.record_stopped_queue(queue.len());
+    s.stop_summary.known_unreflected|=parallel_unconsumed_events;
     if s.failure.is_some() { s.log("Sync stopped after error; manual restart performs a full scan. Staging or already committed changes may remain."); }
     else { s.log("Stopped; pending changes discarded. Restart performs a full scan."); }
 }
