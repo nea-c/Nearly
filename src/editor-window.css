@@ -291,3 +291,18 @@
   border-radius: 8px;
   box-shadow: 0 8px 50px #0005;
 }
+
+.editor-window .editor-tab { --tab-hover-base: var(--surface-raised); --tab-hover-tint: white; }
+.editor-window .editor-tab.active { --tab-hover-base: var(--surface-panel); }
+.editor-window .editor-tab:hover {
+  background: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 12%);
+}
+.editor-window .editor-tab:hover :is(.editor-tab-label, .editor-tab-close) {
+  background: transparent;
+}
+.editor-window .editor-tab:hover .editor-tab-close:hover,
+.editor-window .editor-tab .editor-tab-close:focus-visible {
+  background: color-mix(in srgb, var(--tab-hover-base), var(--tab-hover-tint) 28%);
+}
+
+:root:is([data-theme="light"], [data-theme="mint"]) .editor-window .editor-tab { --tab-hover-tint: var(--text-accent, #2468c9); }

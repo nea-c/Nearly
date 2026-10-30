@@ -15,7 +15,8 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false, responseDelayMs = 0, observeRequest, observeResponse} = {}) {
+  if (!Number.isInteger(responseDelayMs) || responseDelayMs < 0 || responseDelayMs > 100) throw Error('Invalid generated response delay');
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
   const remote = path.join(output, "remote");
@@ -133,8 +134,10 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
   const requestCounts = Object.create(null);
   const requestPaths = [];
   const fileSystemErrors = [];
+  const responseTimers = new Set();
   const server = new Server({ hostKeys: [host] }, (client) => {
     totalConnections++;
+    const connectionNumber = totalConnections;
     if (!available) {
       client.end();
       return;
@@ -143,9 +146,17 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     // ssh2 1.17's server has no public API to advertise extensions. This exact
     // VERSION-frame adapter is test-only; the real client never depends on it.
     const channelData = client._protocol.channelData.bind(client._protocol);
+    // Optional test-only SFTP response hold. This does not model SSH handshake,
+    // bandwidth, loss or a symmetric TCP RTT. Default path preserves return value.
+    const send = (channel, data) => {
+      if (!responseDelayMs) { observeResponse?.(data,connectionNumber); return channelData(channel,data); }
+      const packet=Buffer.from(data);
+      const timer=setTimeout(()=>{responseTimers.delete(timer);if(connections.has(client)){observeResponse?.(packet,connectionNumber);channelData(channel,packet);}},responseDelayMs);
+      responseTimers.add(timer);
+    };
     const limitReplies=new Map();
     client._protocol.channelData = (channel, data) => {
-      if (data.length>=9&&data[4]===101&&limitReplies.has(data.readUInt32BE(5))){const id=data.readUInt32BE(5),payload=limitReplies.get(id);limitReplies.delete(id);const reply=Buffer.alloc(9+payload.length);reply.writeUInt32BE(reply.length-4);reply[4]=201;reply.writeUInt32BE(id,5);payload.copy(reply,9);return channelData(channel,reply);}
+      if (data.length>=9&&data[4]===101&&limitReplies.has(data.readUInt32BE(5))){const id=data.readUInt32BE(5),payload=limitReplies.get(id);limitReplies.delete(id);const reply=Buffer.alloc(9+payload.length);reply.writeUInt32BE(reply.length-4);reply[4]=201;reply.writeUInt32BE(id,5);payload.copy(reply,9);return send(channel,reply);}
       if ((posixRename||advertisedOpenHandles!==undefined) && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
         const version = Buffer.concat([
           data,
@@ -153,9 +164,9 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           ...(advertisedOpenHandles!==undefined?[sshString("limits@openssh.com"),sshString("1")]:[]),
         ]);
         version.writeUInt32BE(version.length - 4, 0);
-        return channelData(channel, version);
+        return send(channel, version);
       }
-      return channelData(channel, data);
+      return send(channel, data);
     };
     client.on("error", () => {});
     client.on("close", () => connections.delete(client));
@@ -187,6 +198,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           for (const operation of ["STAT", "LSTAT", "REALPATH", "OPENDIR", "READDIR", "OPEN", "READ", "WRITE", "FSTAT", "CLOSE", "MKDIR", "RENAME", "REMOVE", "RMDIR", "EXTENDED", "SETSTAT", "FSETSTAT"])
             stream.on(operation, (id,p) => {
               requestCounts[operation] = (requestCounts[operation] || 0) + 1;
+              observeRequest?.(operation,id,connectionNumber,p);
               if (typeof p === 'string' && requestPaths.length < 20000) requestPaths.push({operation,path:p});
             });
           let next = firstHandle;
@@ -485,6 +497,8 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
       for (const respond of pendingListings.splice(0)) respond();
     },
     async close() {
+      for (const timer of responseTimers) clearTimeout(timer);
+      responseTimers.clear();
       pendingListings.length = 0;
       for (const c of connections) c.end();
       await new Promise((r) => server.close(r));

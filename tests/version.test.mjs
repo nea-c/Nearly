@@ -44,9 +44,9 @@ test('patches, prereleases, ambiguous aliases and incompatible Windows values fa
   for (const value of ['v1.0.0','1.0.0','r1.0.0','r01.0','r1.00','r1.0-beta','r1.0+build','r1.0\n','r65536.0']) assert.throws(() => internalVersion(value));
 });
 test('the repository metadata and frontend label match the authoritative milestone', async () => {
-  assert.equal(await checkVersions(), '4.0.0-pre.2');
+  assert.equal(await checkVersions(), '4.0.0-pre.3');
   const frontend = await fs.readFile(path.join(projectRoot,'src/version.ts'),'utf8');
-  assert.match(frontend, /return "r4\.0-pre\.2"/);
+  assert.match(frontend, /return "r4\.0-pre\.3"/);
 });
 test('sync detects every metadata drift and preserves unrelated package/lock data', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'nearly-version-'));

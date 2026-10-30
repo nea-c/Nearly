@@ -15,6 +15,17 @@ use std::{
     time::{Duration, Instant},
 };
 #[path="engine_parallel.rs"] mod engine_parallel;
+#[path="sync_decisions.rs"] pub(crate) mod sync_decisions;
+use sync_decisions::{Diagnostics,Metadata as DecisionMetadata,Reason as DecisionReason};
+#[cfg(test)]
+mod decision_report_contract {
+    #[test]
+    fn new_job_exposes_bounded_anonymous_decision_report() {
+        let status=serde_json::to_value(super::Status::new()).unwrap();
+        assert_eq!(status["syncDecisions"]["precision"], "UTC Unix seconds (SFTP v3), exact equality");
+        assert_eq!(status["syncDecisions"]["examples"].as_array().unwrap().len(),0);
+    }
+}
 #[derive(Clone)]
 pub struct SyncOptions {
     pub exclusion_rules: String,
@@ -330,6 +341,8 @@ pub struct SyncFailure {
 }
 #[derive(Clone, Serialize)]
 pub struct Status {
+    #[serde(rename="syncDecisions")]
+    decisions: Diagnostics,
     #[serde(rename="syncPhase",serialize_with="serialize_sync_phase")]
     activity: crate::taskbar_status::Activity,
     #[serde(skip)]
@@ -357,6 +370,7 @@ fn serialize_sync_phase<S:serde::Serializer>(activity:&crate::taskbar_status::Ac
 impl Status {
     fn new() -> Self {
         Self {
+            decisions: Diagnostics::default(),
             activity: crate::taskbar_status::Activity::new(),
             stop_summary: StopSummary::default(),
             status: "running".into(),
@@ -496,6 +510,7 @@ fn ready_after_completed_work(completed:bool,queue:&HashMap<PathBuf,Pending>,wat
 }
 #[cfg(test)] #[path="new_file_wait_tests.rs"] mod new_file_wait_tests;
 #[cfg(test)] #[path="sync_performance_tests.rs"] mod sync_performance_tests;
+#[cfg(test)] #[path="sync_notice_test_hooks.rs"] pub(crate) mod sync_notice_test_hooks;
 #[cfg(test)]
 mod source_reschedule_tests {
     use super::*;
@@ -1368,7 +1383,7 @@ fn worker(
     root: PathBuf,
     remote: String,
     id: String,
-    initial: sftp::Connection,
+    mut initial: sftp::Connection,
     state: Arc<Mutex<Status>>,
     stop: Arc<AtomicBool>,
     _retry: Arc<AtomicBool>,
@@ -1378,6 +1393,8 @@ fn worker(
     options: SyncOptions,
     root_identity: (u64, u64),
 ) {
+    let decisions=state.lock().unwrap().decisions.clone();
+    initial.diagnostics=Some(decisions.clone());
     let fatal = |error: String| {
         let mut s = state.lock().unwrap();
         if s.failure.is_none() { s.status = if stop.load(Ordering::Relaxed) { "stopping" } else { "failed" }.into(); }
@@ -1407,7 +1424,7 @@ fn worker(
                 callback_stop.store(true,Ordering::SeqCst);
                 return;
             }
-            #[cfg(test)] if let Ok(event)=&event{for path in &event.paths{new_file_wait_tests::mark(path,"watch");}}
+            #[cfg(test)] if let Ok(event)=&event{for path in &event.paths{new_file_wait_tests::mark(path,"watch");sync_notice_test_hooks::observed(path);}}
             if tx.try_send((Instant::now(), event)).is_err() {
                 status.failure_context("Watcher overflow: stop and restart for a full rescan",None,"watch","unknown",0,false);
                 callback_stop.store(true,Ordering::SeqCst);
@@ -1473,7 +1490,7 @@ fn worker(
             for path in queue.keys().filter(|p|!directories.contains_key(*p)) {
                 if !rules.excludes(path,false)? {
                     if let Some(candidate)=snapshot.coverage.candidate(path,listing_session){
-                        if crate::listing_absence::reserve_candidate(&mut candidate_bytes,path.as_os_str().len()){absent_candidates.insert(path.clone(),candidate);}
+                        if crate::listing_absence::reserve_candidate(&mut candidate_bytes,path.as_os_str().len()){decisions.record(path,DecisionReason::MissingRemote,DecisionMetadata::default());absent_candidates.insert(path.clone(),candidate);}
                     }
                 }
             }
@@ -1510,16 +1527,17 @@ fn worker(
                     crate::file_ops::check(&stop)?;
                     if local_transfer_action(&root,&path,&root_identity,false,&stop)?!=LocalAction::Upload{continue;}
                     match sftp::listing_candidate(&root,&path,&hint,listing_session,&stop)?{
-                        Candidate::ListedUnchanged=>{queue.remove(&path);skipped+=1;state.lock().unwrap().log(&format!("Skipped unchanged {} (complete directory listing)",path.display()));},
-                        Candidate::SourceChanged=>if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.last=Instant::now();},
+                        Candidate::ListedUnchanged=>{decisions.record(&path,DecisionReason::Unchanged,DecisionMetadata::default());queue.remove(&path);skipped+=1;state.lock().unwrap().log(&format!("Skipped unchanged {} (complete directory listing)",path.display()));},
+                        Candidate::SourceChanged=>if let Some(item)=queue.get_mut(&path){decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());item.force_upload=true;item.last=Instant::now();},
                         Candidate::FreshComparison=>(),
                     }
                 }
-                for path in snapshot.missing{if let Some(item)=queue.get_mut(&path){item.force_upload=true;}}
+                for path in snapshot.missing{if let Some(item)=queue.get_mut(&path){decisions.record(&path,DecisionReason::MissingRemote,DecisionMetadata::default());item.force_upload=true;}}
                 if local_root_identity(&root)?!=root_identity{return Err("Local root changed during comparison inventory".into());}
                 let mut status=state.lock().unwrap();status.pending=queue.len();
                 status.log(&format!("Read-only comparison listed {} directories; skipped {} unchanged files",snapshot.directories,skipped));
             }else{
+                decisions.record(Path::new(""),DecisionReason::ListingUnavailable,DecisionMetadata::default());
                 state.lock().unwrap().log("Comparison listing unavailable, ambiguous or over limit; using fresh per-file comparison");
             }
         }
@@ -1595,7 +1613,7 @@ fn worker(
                             Ok(meta) if meta.is_file() => {
                                 queue_candidate(
                                     &path, &root, false, &mut queue, &stop, &rules, detected, options.recursive,
-                                ).map(|()|{if let Ok(relative)=path.strip_prefix(&root){if let Some(item)=queue.get_mut(relative){item.force_upload=true;}}})
+                                ).map(|()|{if let Ok(relative)=path.strip_prefix(&root){if let Some(item)=queue.get_mut(relative){let time=meta.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|t|u32::try_from(t.as_secs()).ok());decisions.record(relative,DecisionReason::Watcher,DecisionMetadata::new(meta.len(),time,None,None));item.force_upload=true;}}})
                             },
                             Ok(_) => Ok(()),
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1699,6 +1717,7 @@ fn worker(
                     .and_then(|action|if action==LocalAction::Upload {sftp::listing_candidate(&root,path,&hint,listing_session,&stop)}else{Ok(Candidate::FreshComparison)});
                 match result {
                     Ok(Candidate::ListedUnchanged)=>{
+                        decisions.record(path,DecisionReason::Unchanged,DecisionMetadata::default());
                         if stop.load(Ordering::SeqCst){break;}
                         queue.remove(path);
                         state.lock().unwrap().log(&format!("Skipped listed unchanged {}; deletion uses the complete-listing baseline",path.display()));
@@ -1706,6 +1725,7 @@ fn worker(
                     },
                     Ok(Candidate::FreshComparison)=>(),
                     Ok(Candidate::SourceChanged)=>{
+                        decisions.record(path,DecisionReason::SourceChanged,DecisionMetadata::default());
                         if let Some(item)=queue.get_mut(path){item.force_upload=true;item.last=Instant::now();}
                         state.lock().unwrap().log(&format!("Local source changed; waiting to resend {}",path.display()));
                         continue;
@@ -1788,10 +1808,10 @@ fn worker(
                     // Hint decisions cannot survive a slow peer without local
                     // revalidation. Initial dirtiness is sticky even when the
                     // later size/whole-second mtime happens to match again.
-                    let mut decisions=Vec::new();let mut hint_error=None;
+                    let mut listing_decisions=Vec::new();let mut hint_error=None;
                     for (path,mut observation,was_dirty) in hinted {
                         match observation.revalidate(&stop) {
-                            Ok(candidate)=>decisions.push((path,was_dirty||candidate!=Candidate::ListedUnchanged)),
+                            Ok(candidate)=>listing_decisions.push((path,was_dirty||candidate!=Candidate::ListedUnchanged)),
                             Err(error)=>{hint_error=Some((path,error));break;}
                         }
                     }
@@ -1801,13 +1821,15 @@ fn worker(
                     let mut consumed=false;let mut failed=false;
                     {
                         let mut status=state.lock().unwrap();
-                        for (path,dirty) in decisions {
+                        for (path,dirty) in listing_decisions {
                             if stop.load(Ordering::SeqCst)||status.failure.is_some(){break 'worker;}
                             listing_hints.remove(&path);
                             if dirty {
+                                decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());
                                 if let Some(item)=queue.get_mut(&path){item.force_upload=true;item.last=Instant::now();}
                                 status.log(&format!("Local source changed; waiting to resend {}",path.display()));
                             }else{
+                                decisions.record(&path,DecisionReason::Unchanged,DecisionMetadata::default());
                                 queue.remove(&path);
                                 status.log(&format!("Skipped listed unchanged {}; deletion uses the complete-listing baseline",path.display()));
                             }
@@ -1842,6 +1864,38 @@ fn worker(
                     if failed {break;}
                     if consumed {state.lock().unwrap().pending=queue.len();continue;}
                 }
+            }
+        }
+        // Recheck only bounded, previously-uploaded content after local notices.
+        // No initial tree hashing, no cross-connection cache, no write authority.
+        // Parallel dispatch excludes cached candidates until this check consumes them.
+        if let (Some(selected),Some(c))=(ready.as_ref(),connection.as_mut()) {
+            if queue.get(selected).is_some_and(|item|item.force_upload)
+                &&c.has_upload_fingerprint(&root,selected,&remote)&&!c.needs_recycle() {
+                let mut candidates=vec![selected.clone()];
+                for (path,item) in &queue {
+                    if candidates.len()>=4{break;}
+                    if path!=selected&&path.parent()==selected.parent()&&item.force_upload
+                        &&item.last.elapsed()>=Duration::from_millis(500)
+                        &&!directories.contains_key(path)&&c.has_upload_fingerprint(&root,path,&remote){candidates.push(path.clone());}
+                }
+                for path in candidates {
+                    if rules.excludes(&path,false).unwrap_or(true)||(!options.recursive&&path.components().count()!=1){c.forget_upload_fingerprint(&root,&path,&remote);continue;}
+                    let before=event_epoch.load(Ordering::SeqCst);
+                    let result=local_transfer_action(&root,&path,&root_identity,delete_enabled&&inventory.contains_key(&path),&stop)
+                        .and_then(|action|if action==LocalAction::Upload{sftp::unchanged_uploaded_content(c,&root,&path,&remote,&stop)}else{Ok(false)});
+                    match result {
+                        Ok(true) if events_drained&&before==observed_epoch&&before==event_epoch.load(Ordering::SeqCst)&&!stop.load(Ordering::SeqCst)=>{
+                            queue.remove(&path);
+                            let mut status=state.lock().unwrap();status.pending=queue.len();
+                            status.log("Skipped unchanged content after local notice");
+                            decisions.record(&path,DecisionReason::ContentUnchanged,DecisionMetadata::default());
+                        },
+                        Ok(_)=>c.forget_upload_fingerprint(&root,&path,&remote),
+                        Err(error)=>{state.lock().unwrap().failure_context(&error,Some(&path),"compare","not_committed",queue.len(),stop.load(Ordering::SeqCst));break 'worker;}
+                    }
+                }
+                if !queue.contains_key(selected){continue;}
             }
         }
         if let Some(path)=ready.as_ref(){
@@ -1906,12 +1960,13 @@ fn worker(
                 suspend_directories(&mut directories);
                 directory_authority_bytes=0;
                 match sftp::connect(&p, &passphrase, &stop) {
-                    Ok((s, identity)) => {
+                    Ok((mut s, identity)) => {
                         if identity != expected_identity {
                             state.lock().unwrap().failure_context("Server identity changed; stop and verify before starting again",Some(&path),"connect","not_committed",queue.len()+1,false);
                             queue.insert(path, item);
                             break;
                         }
+                        s.diagnostics=Some(decisions.clone());
                         connection = Some(s)
                     }
                     Err(e) => {
@@ -2032,6 +2087,7 @@ fn worker(
             match transfer {
                 Ok((bytes, stamp, action, changed)) => {
                     if source_changed && action == LocalAction::Skip {
+                        decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());
                         let mut status=state.lock().unwrap();
                         if stop.load(Ordering::SeqCst) || status.failure.is_some() { break; }
                         item.last=Instant::now(); item.force_upload=true; queue.insert(path.clone(),item);
@@ -2090,6 +2146,7 @@ fn worker(
                     s.speed = if s.failure.is_some() {0} else {(bytes as f64 / start.elapsed().as_secs_f64().max(0.001)) as u64};
                     s.pending = queue.len();
                     if source_changed && !stop.load(Ordering::SeqCst) && s.failure.is_none() {
+                        decisions.record(&path,DecisionReason::SourceChanged,DecisionMetadata::default());
                         item.last=Instant::now(); item.force_upload=true; queue.insert(path.clone(),item);
                         s.pending=queue.len(); s.speed=0;
                         s.log(&format!("Local source changed; waiting to resend {}",path.display()));
