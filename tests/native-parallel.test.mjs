@@ -11,13 +11,15 @@ test('single build retains root resource harness and Cargo runtime environment',
  const deps=path.join(target,'debug','deps');fs.mkdirSync(deps,{recursive:true});
  const main=path.join(deps,'nearly-abcd.exe'), resource=path.join(deps,'windows_version_resource-abcd.exe');
  for(const file of [main,resource])fs.writeFileSync(file,'dummy');
- const root=path.resolve('src-tauri');
+ const root=path.join(target,'fixture-package');fs.mkdirSync(root);
+ fs.writeFileSync(path.join(root,'Cargo.toml'),'[package]\nname = "nearly"\nversion = "1.2.0-pre.7"\n');
  const rows=[main,resource].map((executable,i)=>({reason:'compiler-artifact',manifest_path:path.join(root,'Cargo.toml'),target:{name:i?'windows_version_resource':'nearly',kind:[i?'test':'bin']},profile:{test:true},executable}));
  rows.push({reason:'compiler-artifact',manifest_path:path.join(root,'vendor','Cargo.toml'),target:{name:'dependency',kind:['lib']},profile:{test:true},executable:main});
  rows.push({reason:'build-script-executed',linked_paths:['native='+deps]},{reason:'build-finished',success:true});
  const result=resolveBuild(rows,root,target,deps,{PATH:'original'});
  assert.deepEqual(result.executables,[main,resource]);assert.equal(result.mainExecutable,main);
- assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.1');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
+ assert.equal(result.env.CARGO_PKG_VERSION,'1.2.0-pre.7');
+ assert.equal(result.env.CARGO_PKG_VERSION_PRE,'pre.7');assert.equal(result.env.CARGO_PKG_VERSION_PATCH,'0');
  assert.equal(result.cwd,root);assert.equal(result.env.CARGO_MANIFEST_DIR,root);
  assert.ok(result.env.PATH.includes(deps));assert.ok(result.env.PATH.endsWith('original'));
  assert.throws(()=>resolveBuild(rows.slice(0,-1),root,target,deps,{}),/successful/i);

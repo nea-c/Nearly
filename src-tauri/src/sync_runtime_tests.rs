@@ -2,6 +2,8 @@
 use crate::{engine::{Engine,SyncOptions},sftp::Profile};
 use std::{fs,io::{BufRead,BufReader},path::{Path,PathBuf},process::{Child,Command,Stdio},thread,time::{Duration,Instant}};
 struct Fixture { child:Child, root:PathBuf, remote:PathBuf, profile:Profile, secret:String }
+#[path="sync_snapshot_tests.rs"] mod sync_snapshot_tests;
+#[path="sync_parallel_tests.rs"] mod sync_parallel_tests;
 impl Fixture {
  fn start(mode:&str)->Self {
   let root=std::env::temp_dir().join(format!("nearly-sync-runtime-{}-{}-{}",std::process::id(),mode,getrandom::u64().unwrap()));
@@ -36,6 +38,32 @@ fn changed_worker_comparison_candidates(f:&Fixture){
  stable_comparison_candidates(f);
  // These tests target fresh-comparison failure/cancel, not listing equality.
  for i in 0..8{fs::write(f.root.join(format!("local/nested/file{i}.txt")),b"changed local requires fresh comparison").unwrap();}
+}
+
+#[test]
+fn positive_batch_comparison_keeps_source_change_and_fresh_parent_guards(){
+ let f=Fixture::start("compare-upload-source");changed_worker_comparison_candidates(&f);
+ let e=Engine::default();f.start_job(&e,"positive-source",f.root.join("local"),"/upload/job",false);
+ let start=Instant::now();loop{
+  let s=e.status("positive-source").unwrap();assert!(s.failure.is_none(),"{:?}",s.logs);
+  if (0..8).all(|i|fs::read(f.remote.join(format!("upload/job/nested/file{i}.txt"))).is_ok_and(|b|b==b"latest generated source after comparison"))&&s.pending==0{break;}
+  assert!(start.elapsed()<Duration::from_secs(30),"{:?}",s.logs);thread::sleep(Duration::from_millis(5));
+ }
+ assert!(f.root.join("server/source-changed").exists());
+ assert!(!f.root.join("server/stale-commit").exists(),"changed staging bytes must not be committed");
+ assert!(!fs::read_dir(f.remote.join("upload/job/nested")).unwrap().any(|p|p.unwrap().file_name().to_string_lossy().ends_with(".part")));
+ assert!(e.status("positive-source").unwrap().logs.iter().any(|l|l.contains("Local source changed")));
+ e.stop("positive-source").unwrap();
+}
+
+#[test]
+fn positive_batch_comparison_never_authorizes_commit_after_parent_becomes_symlink(){
+ let f=Fixture::start("compare-upload-unsafe");changed_worker_comparison_candidates(&f);
+ let e=Engine::default();f.start_job(&e,"positive-unsafe",f.root.join("local"),"/upload/job",false);
+ let status=f.wait_failed(&e,"positive-unsafe");assert!(status["errorCount"].as_u64().unwrap()>0);
+ for i in 0..8{assert_eq!(fs::read(f.remote.join(format!("upload/job/nested/file{i}.txt"))).unwrap(),b"stable");}
+ assert!(f.metrics()["counts"]["EXTENDED"].is_null(),"no final rename after fresh parent guard refuses");
+ e.stop("positive-unsafe").unwrap();
 }
 
 #[test]
