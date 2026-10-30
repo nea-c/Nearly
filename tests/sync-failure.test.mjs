@@ -9,6 +9,11 @@ import {
 import { setLanguage } from "../.test-build/i18n.js";
 import { localizeNativeError } from "../.test-build/native-errors.js";
 const module = await import("../.test-build/sync-failure.js").catch(() => ({}));
+test('sync conflicts are explicit and localized without offering automatic overwrite',()=>{
+ setLanguage('ja');const details=module.failureDetails({relativePath:'generated/file.txt',operation:'conflict',reason:'Sync conflict: remote changed since sync baseline; no overwrite attempted',commitState:'not_committed',pending:1,requiresRescan:true});
+ assert.equal(details.operation,'同期の競合');assert.match(details.reason,/リモート/);assert.match(module.failureLabels(true,true).title,/競合/);assert.match(module.failureLabels(true,true).help,/自動/);
+ setLanguage('en');assert.match(module.failureLabels(true,true).title,/conflict/);assert.match(module.failureLabels(true,true).help,/No automatic/);setLanguage('ja');
+});
 test("new scan and stopped summaries translate with committed failure context intact", () => {
   for (const original of [
     "Initial local scan completed",

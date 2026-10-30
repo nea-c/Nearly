@@ -94,6 +94,7 @@ Thumbs.db
 !/docs/actions-signing.md
 /scripts/*
 !/scripts/ui-shard-test.mjs
+!/scripts/ui-dev-server.mjs
 !/scripts/native-parallel-test.mjs
 !/scripts/native-test-process.mjs
 !/scripts/initial-scan-check.mjs

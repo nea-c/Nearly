@@ -2946,7 +2946,7 @@ function paintPolledStatus() {
   }
 }
 function syncFailureMarkup(t?: SyncTab) {
-  const labels=failureLabels(t?.stopComplete===true||t?.status==='stopped');
+  const labels=failureLabels(t?.stopComplete===true||t?.status==='stopped',t?.failure?.operation==='conflict');
   const failure=t?.failure?failureDetails(t.failure):undefined;
   if(!failure&&!t?.statusError)return t?.status==='running' && t.deletionRescanRequired ? html`<div class="sync-rescan" role="status"><strong>${esc(deletionRescanLabels().title)}</strong><p>${esc(deletionRescanLabels().help)}</p></div>` : '';
   return html`<div class="sync-failure" role="alert"><strong>${esc(labels.title)}</strong>${failure?html`<dl><dt>${esc(labels.path)}</dt><dd>${esc(failure.path??'—')}</dd><dt>${esc(labels.operation)}</dt><dd>${esc(failure.operation)}</dd><dt>${esc(labels.reason)}</dt><dd>${esc(failure.reason)}</dd><dt>${esc(labels.pending)}</dt><dd>${failure.pending}</dd></dl><p>${esc(failure.commit)}</p>`:''}${t?.statusError?html`<p>${esc(labels.status)}: ${esc(tError(t.statusError))}</p>`:''}<p>${esc(labels.help)}</p></div>`;

@@ -45,6 +45,29 @@ fn listing_worker_hint_capture_change_debounces_and_sends_final_source(){
  e.stop(n).unwrap();stopped_marker(&f,n);
 }
 #[test]#[ignore="generated localhost listing fixture"]
+fn listing_worker_hint_capture_metadata_only_change_never_overwrites_remote(){
+ for newer in [false,true]{
+  let f=Fixture::load();let n=if newer{"listing-hint-meta-newer"}else{"listing-hint-meta-equal"};let(l,r)=f.tree(n);
+  stamped(&l,"hint-race.txt",b"same",1700000000);stamped(&r,"hint-race.txt",b"diff",if newer{1700000040}else{1700000000});
+  for marker in ["hint-captured","hint-continue"]{let p=f.root.join(marker);if p.exists(){std::fs::remove_file(p).unwrap();}}
+  let base=f.root.clone();let source=l.join("hint-race.txt");let writer=thread::spawn(move||{
+   wait(||base.join("hint-captured").exists());std::fs::File::options().write(true).open(source).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::new(1700000000,500000000))).unwrap();std::fs::write(base.join("hint-continue"),b"generated").unwrap();
+  });
+  let e=f.start(n,&l);writer.join().unwrap();caught(&e,n);let s=e.status(n).unwrap();assert_eq!(s.sent,0);assert_eq!(std::fs::read(r.join("hint-race.txt")).unwrap(),b"diff");assert_eq!(std::fs::read(l.join("hint-race.txt")).unwrap(),b"same");assert!(s.logs.iter().any(|line|line=="Skipped unchanged content after local notice"));e.stop(n).unwrap();stopped_marker(&f,n);
+ }
+}
+#[test]#[ignore="generated localhost listing fixture"]
+fn listing_worker_notice_before_first_content_baseline_is_explicit_conflict(){
+ for fallback in [false,true]{for edit in [false,true]{
+  let f=Fixture::load();let n=match(fallback,edit){(false,false)=>"listing-prebaseline-attribute",(false,true)=>"listing-prebaseline-edit",(true,false)=>"listing-prebaseline-fallback-attribute",(true,true)=>"listing-prebaseline-fallback-edit"};let(l,r)=f.tree(n);
+  stamped(&l,"prebaseline.txt",b"same",1700000000);stamped(&r,"prebaseline.txt",b"diff",1700000040);
+  let probe=crate::engine::sync_notice_test_hooks::register(l.canonicalize().unwrap());let base=f.root.clone();let source=l.join("prebaseline.txt");
+  let writer=thread::spawn(move||{wait(||base.join(format!("{n}-before-capture")).exists());let before=probe.count();if edit{std::fs::write(&source,b"save").unwrap();}std::fs::File::options().write(true).open(source).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::new(1700000000,if edit{0}else{500000000}))).unwrap();wait(||probe.count()>before);std::fs::write(base.join(format!("{n}-continue")),b"generated").unwrap();});
+  let e=if fallback{let e=Engine::default();e.start(n.into(),f.profile.clone(),l.to_string_lossy().into_owned(),format!("/{n}"),zeroize::Zeroizing::new(f.secret.clone()),SyncOptions::default()).unwrap();e}else{f.start(n,&l)};writer.join().unwrap();wait(||{let s=e.status(n).unwrap();s.failure.is_some()||s.activity.phase()==crate::taskbar_status::NativeSyncState::CaughtUp});let s=e.status(n).unwrap();
+  assert_eq!(s.sent,0);assert_eq!(std::fs::read(r.join("prebaseline.txt")).unwrap(),b"diff");assert_eq!(std::fs::read(l.join("prebaseline.txt")).unwrap(),if edit{b"save"}else{b"same"});assert_eq!(s.failure.as_ref().map(|f|f.operation.as_str()),Some("conflict"),"early notice must not silently become a content no-op");assert_eq!(s.failure.as_ref().unwrap().pending,1,"conflicting source stays pending rather than disappearing");e.stop(n).unwrap();stopped_marker(&f,n);
+ }}
+}
+#[test]#[ignore="generated localhost listing fixture"]
 fn listing_worker_fresh_file_match_cannot_rebase_listing_stamp(){
  let f=Fixture::load();let n="listing-fixed-file";let(l,r)=f.tree(n);for root in [&l,&r]{stamped(root,"parent/a.txt",b"same",1700000000);}
  let e=f.start(n,&l);caught(&e,n);stamped(&r,"parent/a.txt",b"new source",1700000001);
@@ -97,7 +120,7 @@ fn stopped_marker(f:&Fixture,n:&str){std::fs::write(f.root.join(format!("{n}-sto
 #[test]#[ignore="generated localhost pipeline fixture"]
 fn startup_pipeline_deletes_only_after_complete_inventory(){
  let f=Fixture::load();let n="pipeline-delete";let(l,r)=f.tree(n);
- for i in 0..8 {write(&l,&format!("d{i}/sub/a.txt"),b"new generated content");write(&r,&format!("d{i}/sub/a.txt"),b"old");write(&r,&format!("d{i}/sub/orphan.txt"),b"remove generated only");}
+ for i in 0..8 {stamped(&l,&format!("d{i}/sub/a.txt"),b"new generated content",1700000040);stamped(&r,&format!("d{i}/sub/a.txt"),b"old",1700000000);write(&r,&format!("d{i}/sub/orphan.txt"),b"remove generated only");}
  let e=f.start(n,&l);caught(&e,n);assert_eq!(e.status(n).unwrap().sent,8);
  for i in 0..8{assert!(!r.join(format!("d{i}/sub/orphan.txt")).exists());assert_eq!(std::fs::read(l.join(format!("d{i}/sub/a.txt"))).unwrap(),std::fs::read(r.join(format!("d{i}/sub/a.txt"))).unwrap());}
  e.stop(n).unwrap();stopped_marker(&f,n);
@@ -128,7 +151,7 @@ fn startup_pipeline_missing_shared_parents_and_empty_directories(){
 #[test]#[ignore="generated localhost pipeline fixture"]
 fn startup_pipeline_source_change_and_true_comparison_error(){
  let f=Fixture::load();let n="pipeline-compare-fail";let(l,r)=f.tree(n);
- for i in 0..8{write(&l,&format!("d{i}/a.txt"),b"changed");write(&r,&format!("d{i}/a.txt"),b"old");}
+ for i in 0..8{stamped(&l,&format!("d{i}/a.txt"),b"changed",1700000040);stamped(&r,&format!("d{i}/a.txt"),b"old",1700000000);}
  let e=f.start(n,&l);wait(||e.status(n).unwrap().stop_complete);assert!(e.status(n).unwrap().error_count>0);assert_eq!(e.status(n).unwrap().sent,0);e.stop(n).unwrap();stopped_marker(&f,n);
 }
 #[test]#[ignore="generated localhost pipeline fixture"]
@@ -148,7 +171,7 @@ fn startup_pipeline_shared_entry_budget_discards_snapshot(){
 fn startup_pipeline_directory_mutation_failure_requires_manual_restart(){
  let f=Fixture::load();let n="pipeline-confirm-fail";let(l,r)=f.tree(n);
  for i in 0..8{for root in [&l,&r]{std::fs::create_dir_all(root.join(format!("d{i}"))).unwrap();}}
- write(&l,"file.txt",b"new generated file");write(&r,"file.txt",b"old");
+ stamped(&l,"file.txt",b"new generated file",1700000040);stamped(&r,"file.txt",b"old",1700000000);
  let e=f.start(n,&l);caught(&e,n);assert_eq!(e.status(n).unwrap().sent,1);
  // No-op post-list directory checks are deliberately omitted. The real
  // deletion must still execute fresh guards and stop on this permission fault.
@@ -159,19 +182,19 @@ fn startup_pipeline_directory_mutation_failure_requires_manual_restart(){
 }
 #[test]#[ignore="generated localhost pipeline fixture"]
 fn startup_pipeline_source_change_during_inventory_sends_latest(){
- let f=Fixture::load();let n="pipeline-source-change";let(l,r)=f.tree(n);for i in 0..8{write(&l,&format!("d{i}/a.txt"),b"original");write(&r,&format!("d{i}/a.txt"),b"original");}
+ let f=Fixture::load();let n="pipeline-source-change";let(l,r)=f.tree(n);for i in 0..8{stamped(&l,&format!("d{i}/a.txt"),b"original",1700000040);stamped(&r,&format!("d{i}/a.txt"),b"original",1700000000);}
  let e=f.start(n,&l);wait(||f.root.join("source-inventory-held").exists());write(&l,"d0/a.txt",b"latest generated content saved during inventory");write(&l,"new-parent/new.txt",b"new generated file during inventory");caught(&e,n);
  assert_eq!(std::fs::read(r.join("d0/a.txt")).unwrap(),b"latest generated content saved during inventory");assert_eq!(std::fs::read(r.join("new-parent/new.txt")).unwrap(),b"new generated file during inventory");e.stop(n).unwrap();stopped_marker(&f,n);
 }
 
 #[test]#[ignore="generated localhost listing fixture"]
-fn listing_worker_staged_hint_revalidates_after_fresh_batch_and_stops_on_failure(){
+fn listing_worker_peer_edit_is_preserved_and_inventory_failure_stops_mutations(){
  for mode in ["save","error","cancel"] {
   let f=Fixture::load();let n=format!("listing-staged-{mode}");let(l,r)=f.tree(&n);
   for root in [&l,&r] {for name in ["a.txt","b.txt","deep/peer.txt"] {stamped(root,name,b"same",1700000000);}}
   write(&l,"a.txt",b"fresh candidate a");write(&l,"b.txt",b"fresh candidate b");
   let e=f.start(&n,&l);let observed=e.jobs.lock().unwrap().get(&n).unwrap().status.clone();
-  if mode=="save" {caught(&e,&n);let status=e.status(&n).unwrap();assert_eq!(status.sent,3);assert_eq!(std::fs::read(r.join("deep/peer.txt")).unwrap(),b"save");assert!(status.logs.iter().any(|line|line.contains("Local source changed; waiting to resend")));}
+  if mode=="save" {caught(&e,&n);let status=e.status(&n).unwrap();assert_eq!(status.sent,3);assert_eq!(std::fs::read(r.join("deep/peer.txt")).unwrap(),b"save");assert!(status.logs.iter().any(|line|line.strip_prefix("Uploaded ").is_some_and(|path|path.replace('\\',"/")=="deep/peer.txt")),"edited peer must have its own acknowledged upload");}
   else {wait(||f.root.join(format!("{n}-batch-entered")).exists());if mode=="cancel" {e.stop(&n).unwrap();}else{wait(||e.status(&n).unwrap().stop_complete);assert!(e.status(&n).unwrap().error_count>0);}let status=observed.lock().unwrap().clone();assert_eq!(status.sent,0);if mode=="cancel"{assert_eq!(status.error_count,0);}assert!(!status.logs.iter().any(|line|line.contains("Skipped listed unchanged deep")));for name in ["a.txt","b.txt","deep/peer.txt"]{assert_eq!(std::fs::read(r.join(name)).unwrap(),b"same");}}
   for dir in [&r,&r.join("deep")] {assert!(!std::fs::read_dir(dir).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().ends_with(".part")));}
   if mode!="cancel"{e.stop(&n).unwrap();}stopped_marker(&f,&n);

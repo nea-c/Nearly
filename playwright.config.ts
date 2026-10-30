@@ -11,8 +11,8 @@ export default defineConfig({
     viewport: { width: 1280, height: 920 },
   },
   webServer: {
-    command: "npm run dev",
-    url: "http://127.0.0.1:1420",
+    command: "node scripts/ui-dev-server.mjs",
+    url: "http://127.0.0.1:1420/__qa_ready",
     reuseExistingServer: false,
     env: { NEARLY_ENABLE_MOCK: "1" },
   },

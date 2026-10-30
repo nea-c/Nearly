@@ -3,6 +3,8 @@ import {createFixture} from './sftp-fixture.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 const [output,mode,local]=process.argv.slice(2);
+const policyLstatDelay=Number(process.env.NEARLY_POLICY_LSTAT_DELAY_MS??20);
+if(mode==='compare-snapshot-policy-bulk'&&![0,20].includes(policyLstatDelay))throw Error('Generated bulk fixture delay must be0or20ms');
 let modified=false,committed=false,edits=0,inflight=0,maxInflight=0,comparisonPhase=false;const seenStages=new Set(),commits=[],replyPaths=[];
 let listed=false,listingReads=0,targetLookups=0;
 let activeWrites=0,maxWrites=0,maxWritingFiles=0;const writingFiles=new Map();
@@ -29,6 +31,9 @@ const fixture=await createFixture(output,{
   return names;
  },
  async beforeWrite(target){
+  if((mode==='compare-snapshot-policy-postwrite'||mode==='compare-snapshot-policy-create-race')&&!modified){
+   modified=true;fs.writeFileSync(path.join(fixture.remote,'upload/job/nested/file0.txt'),'external-during-write');
+  }
   if(mode==='compare-guard-postwrite')modified=true;
   if(mode.startsWith('compare-parallel')){activeWrites++;maxWrites=Math.max(maxWrites,activeWrites);writingFiles.set(target,(writingFiles.get(target)??0)+1);maxWritingFiles=Math.max(maxWritingFiles,writingFiles.size);await new Promise(r=>setTimeout(r,30));activeWrites--;const left=writingFiles.get(target)-1;if(left)writingFiles.set(target,left);else writingFiles.delete(target);}
   if(mode==='compare-parallel-fail'){failedStage??=target;if(target===failedStage)return 3;}
@@ -61,6 +66,7 @@ const fixture=await createFixture(output,{
   if(mode==='change-network'&&target.startsWith('/upload/job/'))setImmediate(()=>fixture.disconnect());
  },
  beforeRename(source,target){
+  if(mode==='compare-snapshot-policy-final-create-race'&&!modified){modified=true;fs.writeFileSync(path.join(fixture.remote,target),'external-during-write');}
   if(mode==='compare-parallel-postcancel'&&!heldTarget)heldTarget=target;
   if(mode==='compare-upload-source'&&target.includes('/nested/file')){
    const expected=fs.readFileSync(path.join(local,'nested',path.posix.basename(target)));
@@ -78,6 +84,11 @@ const fixture=await createFixture(output,{
   if(mode==='compare-parallel-acklost'&&!failedStage){failedStage=source;fs.renameSync(path.join(fixture.remote,source),path.join(fixture.remote,target));throw Error('generated lost rename ACK');}
  },
  async beforeStat(_op,target){
+  if(mode==='compare-snapshot-walk-denied'&&target==='/upload')return 3;
+  if(mode==='compare-snapshot-walk-server-error'&&target==='/upload')return 4;
+  if(mode==='compare-snapshot-walk-cancel'&&target==='/upload'){
+   fs.writeFileSync(path.join(output,'walk-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 4;
+  }
   if(mode==='compare-guard-server-error'&&target==='/upload/job/nested')return 3;
   if(mode==='compare-guard-cancel'&&target==='/upload/job/nested'){
    fs.writeFileSync(path.join(output,'guard-held'),'generated');await new Promise(r=>setTimeout(r,3000));return 4;
@@ -107,13 +118,15 @@ const fixture=await createFixture(output,{
    // A 20ms reply can finish before the fourth request reaches the server.
    // Hold comparison-phase replies long enough to observe the real four-slot
    // batch; startup inventory stays fast and performance modes stay at 20ms.
-   const delay=workerBoundary&&comparisonPhase?500:mode==='compare-reorder'&&index?(4-Number(index[1]))*30:20;
-   await new Promise(r=>setTimeout(r,delay));inflight--;if(index)replyPaths.push(target);
+   const delay=workerBoundary&&comparisonPhase?500:mode==='compare-reorder'&&index?(4-Number(index[1]))*30:mode==='compare-snapshot-policy-bulk'?policyLstatDelay:20;
+   if(delay>0)await new Promise(r=>setTimeout(r,delay));inflight--;if(index)replyPaths.push(target);
    if(mode.startsWith('compare-error')&&maxInflight===4&&target.includes('/file'))return 3;
   }
   if(mode==='committed'&&committed&&target==='/upload/job/a.txt')return 3;
  },
  mapStat(target,attrs){
+  if(mode==='compare-snapshot-walk-unknown'&&target==='/upload'){const changed={...attrs};delete changed.mode;return changed;}
+  if(mode==='compare-snapshot-walk-post-permissions'&&listed&&target==='/upload')return {...attrs,mode:0o40700};
   if(mode==='compare-guard-postwrite'&&modified&&target==='/upload/job/nested')return {...attrs,mode:0o120777};
   if(mode==='compare-guard-target-type'&&target.endsWith('.txt'))return {...attrs,mode:0o40755};
   if(mode==='compare-guard-unknown-mode'&&target==='/upload/job/nested'){const changed={...attrs};delete changed.mode;return changed;}
@@ -122,11 +135,20 @@ const fixture=await createFixture(output,{
   if(mode==='compare-snapshot-target-race'&&targetLookups>=2&&target==='/upload/job/nested/file0.txt')return {...attrs,mode:0o120777};
   return attrs;
  },
+ mapRealpath(target,canonical){
+  if(target==='/upload/job/nested'&&(mode==='compare-snapshot-walk-canonical-before'||mode==='compare-snapshot-walk-canonical-after'&&listed))return '/other/generated-alias';
+  return canonical;
+ },
 });
 // Keep filesystem failure evidence before sending an SFTP error; status is unchanged.
 const recordErrors=fixture.fileSystemErrors.push.bind(fixture.fileSystemErrors);
 fixture.fileSystemErrors.push=(...errors)=>{const count=recordErrors(...errors);fs.writeFileSync(path.join(output,'filesystem-errors.json'),JSON.stringify(fixture.fileSystemErrors));return count;};
 if(mode.startsWith('compare'))setInterval(()=>{
+ if(mode==='compare-snapshot-policy-reconnect'&&fs.existsSync(path.join(output,'request-disconnect'))&&!fs.existsSync(path.join(output,'disconnected'))){
+  // Drop the old transport, then permit a new SSH handshake. Other modes that
+  // model a persistent outage intentionally keep disconnect()'s unavailable flag.
+  fixture.disconnect();fixture.resume();fs.writeFileSync(path.join(output,'disconnected'),'generated');
+ }
  for(const name of fs.readdirSync(output).filter(n=>n==='metrics-request'||n.startsWith('metrics-request-'))){
  const target=path.join(output,name==='metrics-request'?'metrics.json':name.replace('metrics-request-','metrics-')+'.json');
  if(!fs.existsSync(target)){

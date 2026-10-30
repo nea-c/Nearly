@@ -17,6 +17,10 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
     let positive=|path:&Path,item:&Pending|item.force_upload||(path==ready&&selected_absent)||absent.get(path).is_some_and(|a|a.matches(session));
     let eligible=|path:&Path,item:&Pending|{
         item.last.elapsed()>=Duration::from_millis(500)&&positive(path,item)&&!directories.contains_key(path)
+            &&!connection.sync_needs_initial(remote,path)
+            // Initial skips/retains have local content evidence too. Never let
+            // an unclassified metadata-only peer piggyback on another edit.
+            &&!connection.sync_has_local_baseline(remote,path)
             &&!connection.has_upload_fingerprint(root,path,remote)
             &&(!delete_enabled||path.ancestors().skip(1).filter(|p|!p.as_os_str().is_empty()).all(|p|directories.get(p).and_then(Option::as_ref).is_some_and(|b|b.expected(session).is_ok())))
             &&!rules.excludes(path,false).unwrap_or(true)&&(options.recursive||path.components().count()==1)

@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false, responseDelayMs = 0, observeRequest, observeResponse} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, mapRealpath, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false, responseDelayMs = 0, observeRequest, observeResponse} = {}) {
   if (!Number.isInteger(responseDelayMs) || responseDelayMs < 0 || responseDelayMs > 100) throw Error('Invalid generated response delay');
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
@@ -245,7 +245,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               stream.name(id, [
                 {
                   filename:
-                    "/" + path.relative(remote, resolved).replaceAll("\\", "/"),
+                    mapRealpath?.(p,"/" + path.relative(remote, resolved).replaceAll("\\", "/")) ?? "/" + path.relative(remote, resolved).replaceAll("\\", "/"),
                   longname: "",
                   attrs: attrs(fs.statSync(resolved)),
                 },

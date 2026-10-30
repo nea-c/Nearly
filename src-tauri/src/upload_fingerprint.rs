@@ -71,7 +71,7 @@ pub(crate) fn unchanged_uploaded_content(s: &mut Connection, root: &Path, relati
         local.revalidate()?;
         if matches!(local.comparison, FileComparison::SourceChanged) { return Ok(false); }
         // Still do fresh remote ancestry/type/size/time/parent checks. No cached authorization.
-        let comparison = compare_file_observed(s, root, relative, remote).await?;
+        let comparison = compare_file_observed(s, root, relative, remote,stop).await?;
         if !matches!(comparison.comparison, FileComparison::Unchanged(ref stamp) if stamp == &evidence.remote) { return Ok(false); }
         local.revalidate()?;
         crate::file_ops::check(stop)?;

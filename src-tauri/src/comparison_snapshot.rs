@@ -11,22 +11,6 @@ fn listing_unavailable(error:&SftpError)->bool{
     matches!(error,SftpError::Status(s) if matches!(s.status_code,StatusCode::PermissionDenied|StatusCode::OpUnsupported))
 }
 
-// Walk ancestors in order: never query descendants of an observed symlink.
-async fn first_missing(raw:&RawSftpSession,path:&str)->Result<Option<String>,String>{
-    let root=raw.lstat("/").await.map_err(|_|"Remote comparison root lookup failed")?.attrs;
-    if !root.file_type().is_dir()||root.is_symlink(){return Err("Remote comparison root is not a directory".into());}
-    let mut current=String::new();
-    for part in path.split('/').filter(|p|!p.is_empty()){
-        current.push('/');current.push_str(part);
-        match raw.lstat(current.clone()).await{
-            Ok(a) if a.attrs.file_type().is_dir()&&!a.attrs.is_symlink()=>(),
-            Err(SftpError::Status(s)) if s.status_code==StatusCode::NoSuchFile=>return Ok(Some(current)),
-            _=>return Err("Remote comparison parent unavailable or unsafe".into()),
-        }
-    }
-    Ok(None)
-}
-
 /// Scope reads to parents of the initial local files. A limit/ambiguous listing
 /// returns None: discard the ENTIRE pass and use ordinary fresh comparisons.
 /// Real permission/network/partial-read errors are errors, never absence.
@@ -55,11 +39,15 @@ pub(crate) fn comparison_snapshot(s:&mut Connection,remote:&str,paths:&[PathBuf]
             bytes=bytes.saturating_add(parent.len().saturating_mul(4).saturating_add(256));
             if bytes>16*1024*1024{return Ok(None);}
             if missing_parents.iter().any(|p|parent==*p||parent.starts_with(&format!("{p}/"))){result.missing.extend(files);continue;}
-            if let Some(missing)=first_missing(&s.raw,&parent).await?{
-                if missing==root||root.starts_with(&format!("{missing}/")){return Err("Remote sync root disappeared during comparison".into());}
-                missing_parents.insert(missing);result.missing.extend(files);continue;
-            }
-            let before=directory_guard(&s.raw,&parent).await?;
+            // One strict, ordered walk both distinguishes absence and captures
+            // the pre-listing guard. Do not weaken or cache the fresh post-walk.
+            let before=match inspect_directory(&s.raw,&parent).await?{
+                DirectoryInspection::Present(stamp)=>stamp,
+                DirectoryInspection::Missing(missing)=>{
+                    if missing==root||root.starts_with(&format!("{missing}/")){return Err("Remote sync root disappeared during comparison".into());}
+                    missing_parents.insert(missing);result.missing.extend(files);continue;
+                },
+            };
             let handle=match s.raw.opendir(parent.clone()).await{
                 Ok(h)=>h.handle,
                 Err(e) if listing_unavailable(&e)=>return Ok(None),

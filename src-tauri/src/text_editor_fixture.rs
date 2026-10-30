@@ -44,7 +44,13 @@ fn sync_boundaries(out:&Path,remote:&Path,profile:crate::sftp::Profile,secret:&s
  start("other-tab-sync").unwrap();for id in ["during-start","caught-up"]{if id=="caught-up"{caught("other-tab-sync");}let stop=engine.claim_operation(id).unwrap();assert!(broker.open(&engine,"editor-window","another-tab",id,target(),&stop).is_err());engine.finish_operation(id);}engine.stop("other-tab-sync").unwrap();
  let stop=engine.claim_operation("reopen-after-stop").unwrap();let view=broker.open(&engine,"editor-window","editor-tab","reopen-after-stop",target(),&stop).unwrap();engine.finish_operation("reopen-after-stop");let stale=broker.get("editor-window",&view.token).unwrap();
  let stop=engine.claim_operation("after-stop").unwrap();broker.save(&engine,"editor-window",&view.token,"after-stop","editor saved\n",&stop).unwrap();engine.finish_operation("after-stop");let edited=b"\xef\xbb\xbfeditor saved\r\n";assert_eq!(fs::read(if local_side{file.clone()}else{remote.join("docs/file.txt")}).unwrap(),edited);broker.close("editor-window",&view.token).unwrap();drop(stale);
- start("resumed-other-tab").unwrap();caught("resumed-other-tab");let authoritative=fs::read(&file).unwrap();assert_eq!(fs::read(remote.join("docs/file.txt")).unwrap(),authoritative);engine.stop("resumed-other-tab").unwrap();if !local_side{assert_eq!(authoritative,original);}assert!(broker.get("editor-window",&view.token).is_err());
+ start("resumed-other-tab").unwrap();
+ if local_side{caught("resumed-other-tab");assert_eq!(fs::read(remote.join("docs/file.txt")).unwrap(),edited);assert_eq!(fs::read(&file).unwrap(),edited);}
+ else{
+  let end=Instant::now()+Duration::from_secs(20);loop{let status=engine.status("resumed-other-tab").unwrap();if let Some(failure)=status.failure{assert_eq!(failure.operation,"conflict");assert_eq!(status.sent,0);break;}assert!(Instant::now()<end,"resumed sync must preserve the newer editor save");std::thread::sleep(Duration::from_millis(5));}
+  assert_eq!(fs::read(remote.join("docs/file.txt")).unwrap(),edited);assert_eq!(fs::read(&file).unwrap(),original);
+ }
+ engine.stop("resumed-other-tab").unwrap();assert!(broker.get("editor-window",&view.token).is_err());
 }
 fn origin_lifecycle(out:&Path,remote:&Path,profile:crate::sftp::Profile,secret:&str){
  let state=crate::AppState::default();

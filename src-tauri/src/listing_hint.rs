@@ -31,6 +31,7 @@ impl<T> DeletionBasis<T> {
     }
 }
 impl ListingHint {
+    pub(crate) fn metadata(&self)->(u64,Option<u32>){(self.size,self.mtime)}
     pub(crate) fn from_listing(size: u64, mtime: Option<u32>, session: u64) -> Self {
         Self { size, mtime, session }
     }

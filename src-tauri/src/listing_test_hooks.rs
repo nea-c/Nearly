@@ -1,5 +1,15 @@
 //! Deterministic generated-fixture race only. Never compiled into product builds.
 use std::{path::Path,sync::atomic::AtomicBool,time::{Duration,Instant}};
+pub(super) fn before_capture(source:&Path,stop:&AtomicBool)->Result<(),String>{
+ if source.file_name().is_none_or(|name|name!="prebaseline.txt"){return Ok(());}
+ let Some(base)=std::env::var_os("NEARLY_LISTING_TEST_ROOT")else{return Ok(());};let base=std::path::PathBuf::from(base);
+ if !base.file_name().is_some_and(|name|name.to_string_lossy().starts_with("listing-worker-"))||base.parent().and_then(Path::file_name).is_none_or(|name|name!="test-results"){return Err("Invalid generated listing fixture".into());}
+ let base=base.canonicalize().map_err(|_|"Generated listing fixture unavailable")?;
+ if !source.canonicalize().map_err(|_|"Generated source unavailable")?.starts_with(&base){return Err("Generated source escaped fixture".into());}
+ let name=source.parent().and_then(Path::file_name).and_then(|s|s.to_str()).ok_or("Generated job missing")?;
+ std::fs::write(base.join(format!("{name}-before-capture")),b"generated").map_err(|_|"Generated marker failed")?;
+ let end=Instant::now()+Duration::from_secs(10);while !base.join(format!("{name}-continue")).exists(){crate::file_ops::check(stop)?;if Instant::now()>end{return Err("Generated prebaseline barrier timeout".into());}std::thread::sleep(Duration::from_millis(2));}Ok(())
+}
 pub(super) fn after_capture(source:&Path,stop:&AtomicBool)->Result<(),String>{
  if source.file_name().is_none_or(|name|name!="hint-race.txt"){return Ok(());}
  let Some(base)=std::env::var_os("NEARLY_LISTING_TEST_ROOT") else{return Ok(());};
