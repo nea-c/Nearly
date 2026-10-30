@@ -1,9 +1,12 @@
 import {test,expect} from '@playwright/test';
-for(const language of ['ja','en'])test(`settings displays r4.0-pre.1 immediately left of close in ${language}`,async({page})=>{
+import fs from 'node:fs';
+import {displayVersion} from '../../scripts/version.mjs';
+const versionLabel=displayVersion(JSON.parse(fs.readFileSync(new URL('../../version.json',import.meta.url),'utf8')).version);
+for(const language of ['ja','en'])test(`settings displays ${versionLabel} immediately left of close in ${language}`,async({page})=>{
   await page.addInitScript(language=>localStorage.setItem('syncfiles-v1',JSON.stringify({version:1,theme:'forest',language})),language);
   await page.goto('/');await page.locator('#settings-toggle').click();
   const version=page.locator('#settings-version'),close=page.locator('#settings-close');
-  await expect(version).toHaveText('r4.0-pre.1');await expect(close).toBeVisible();
+  await expect(version).toHaveText(versionLabel);await expect(close).toBeVisible();
   const a=await version.boundingBox(),b=await close.boundingBox();expect(a).not.toBeNull();expect(b).not.toBeNull();
   expect(a!.x+a!.width).toBeLessThan(b!.x);expect(b!.x-a!.x-a!.width).toBeLessThanOrEqual(16);
   expect(Math.abs(a!.y+a!.height/2-b!.y-b!.height/2)).toBeLessThanOrEqual(1);
