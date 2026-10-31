@@ -1,4 +1,32 @@
 use super::*;
+fn concurrent_paths(f:&Fixture)->Vec<PathBuf>{
+ (0..8).map(|i|{let p=PathBuf::from(format!("dir{i}/file{i}.txt"));let target=f.remote.join("upload/job").join(&p);fs::create_dir_all(target.parent().unwrap()).unwrap();fs::write(&target,b"generated").unwrap();p}).collect()
+}
+#[test]fn directory_comparison_overlaps_independent_guards_with_bounded_server_cap(){
+ for(mode,cap)in[("compare-snapshot-concurrent",4u64),("compare-snapshot-concurrent-one",1),("compare-snapshot-concurrent-two",2)]{
+  let f=Fixture::start(mode);let paths=concurrent_paths(&f);let stop=AtomicBool::new(false);let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();
+  let snapshot=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop).unwrap().unwrap();assert_eq!(snapshot.hints.len(),8);assert_eq!(snapshot.directories,8);assert!(snapshot.missing.is_empty());
+  let metrics=f.metrics();let active=metrics["maxInflight"].as_u64().unwrap();if cap>1{assert!(active>1,"independent directory guards must overlap: {metrics}");}assert!(active<=cap,"server/request bound: {metrics}");assert_eq!(metrics["authenticated"],1);assert!(metrics["maxOpenDirectoryHandles"].as_u64().unwrap()<=cap);assert_eq!(metrics["openDirectoryHandles"],0);
+  for op in["WRITE","REMOVE","RMDIR","RENAME","OPEN","MKDIR"]{assert!(metrics["counts"][op].is_null(),"{op}: {metrics}");}
+  if cap<4{assert_eq!(metrics["counts"]["EXTENDED"],1,"read-only limits negotiation");}else{assert!(metrics["counts"]["EXTENDED"].is_null());}
+ }
+}
+#[test]fn directory_comparison_discards_all_peers_on_partial_ambiguous_or_mutated_listing(){
+ for mode in["compare-snapshot-concurrent-unavailable","compare-snapshot-concurrent-partial","compare-snapshot-concurrent-parent","compare-snapshot-concurrent-close-last","compare-snapshot-concurrent-budget"]{
+  let f=Fixture::start(mode);let paths=concurrent_paths(&f);let stop=AtomicBool::new(false);let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();let result=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop);
+  if mode.ends_with("-unavailable")||mode.ends_with("-budget"){assert!(result.unwrap().is_none(),"whole-pass fallback");}else{assert!(result.is_err(),"whole-pass error");}
+  let mut metrics=f.metrics();let deadline=Instant::now()+Duration::from_secs(1);let mut attempt=0;while metrics["openDirectoryHandles"]!=0{assert!(Instant::now()<deadline,"read handles must settle or disconnect: {metrics}");attempt+=1;thread::sleep(Duration::from_millis(10));metrics=f.metrics_for(&format!("settled{attempt}"));}
+  assert!(metrics["maxOpenDirectoryHandles"].as_u64().unwrap()<=4);assert!(metrics["maxInflight"].as_u64().unwrap()<=4);for op in["WRITE","REMOVE","RMDIR","EXTENDED"]{assert!(metrics["counts"][op].is_null());}
+ }
+}
+#[test]fn directory_comparison_cancellation_in_serial_and_concurrent_passes_publishes_nothing(){
+ for first_missing in [false,true]{
+ use std::sync::{Arc,atomic::Ordering};
+ let f=Fixture::start("compare-snapshot-concurrent-cancel");let mut paths=concurrent_paths(&f);if first_missing{paths.push(PathBuf::from("a-uncreated/file.txt"));}let stop=Arc::new(AtomicBool::new(false));let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();let signal=stop.clone();let held=f.root.join("server/concurrent-list-held");
+ let cancel=thread::spawn(move||{let deadline=Instant::now()+Duration::from_secs(10);while !held.exists(){assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}let start=Instant::now();signal.store(true,Ordering::SeqCst);start});
+ assert!(crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop).is_err());assert!(cancel.join().unwrap().elapsed()<Duration::from_secs(1));
+ }
+}
 use std::sync::atomic::AtomicBool;
 fn caught(e:&Engine,id:&str,sent:u64){let start=Instant::now();loop{let s=e.status(id).unwrap();assert!(s.failure.is_none(),"{:?}",s.logs);if s.sent>=sent&&serde_json::to_value(&s).unwrap()["syncPhase"]=="caught_up"{return;}assert!(start.elapsed()<Duration::from_secs(20),"{:?}",s.logs);thread::sleep(Duration::from_millis(5));}}
 fn paths()->Vec<PathBuf>{(0..8).map(|i|PathBuf::from(format!("nested/file{i}.txt"))).collect()}
@@ -119,4 +147,26 @@ fn combined_comparison_walk_cancel_is_prompt_and_publishes_no_snapshot(){
  let cancel=thread::spawn(move||{let deadline=Instant::now()+Duration::from_secs(10);while !held.exists(){assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}let started=Instant::now();signal.store(true,Ordering::SeqCst);started});
  assert!(crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths(),1,&stop).is_err());assert!(cancel.join().unwrap().elapsed()<Duration::from_secs(1));
  let metrics=f.metrics();for op in ["OPENDIR","WRITE","REMOVE","RMDIR","RENAME","EXTENDED"]{assert!(metrics["counts"][op].is_null());}
+}
+
+#[test]
+fn directory_comparison_missing_first_parent_avoids_speculative_duplicate_walks(){
+ let f=Fixture::start("compare-snapshot-concurrent");let paths:Vec<_>=(0..8).map(|i|PathBuf::from(format!("uncreated/sub{i}/file{i}.txt"))).collect();let stop=AtomicBool::new(false);let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();let snapshot=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop).unwrap().unwrap();assert_eq!(snapshot.missing.len(),8);assert!(snapshot.hints.is_empty());assert_eq!(snapshot.directories,0);let m=f.metrics();assert_eq!(m["maxInflight"],1,"first missing parent should keep this pass serial");assert_eq!(m["counts"]["LSTAT"],4,"fresh ancestor walk once, then original pass-local missing-parent cache");assert!(m["counts"]["OPENDIR"].is_null());
+}
+
+#[test]
+fn adaptive_directory_choice_does_not_classify_other_parents_or_survive_a_pass(){
+ for first_missing in [false,true]{
+  let f=Fixture::start("compare-snapshot-concurrent");let existing=PathBuf::from(if first_missing{"z-existing/sub/file.txt"}else{"a-existing/sub/file.txt"});let missing=PathBuf::from(if first_missing{"a-missing/sub/file.txt"}else{"z-missing/sub/file.txt"});let target=f.remote.join("upload/job").join(&existing);fs::create_dir_all(target.parent().unwrap()).unwrap();fs::write(&target,b"generated").unwrap();let paths=vec![existing.clone(),missing.clone()];let stop=AtomicBool::new(false);let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();
+  let a=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop).unwrap().unwrap();assert!(a.hints.contains_key(&existing));assert_eq!(a.missing,vec![missing.clone()]);assert_eq!(a.directories,1);
+  fs::remove_file(&target).unwrap();let created=f.remote.join("upload/job").join(&missing);fs::create_dir_all(created.parent().unwrap()).unwrap();fs::write(created,b"newly present").unwrap();
+  let b=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,2,&stop).unwrap().unwrap();assert!(b.hints.contains_key(&missing));assert!(!b.hints.contains_key(&existing));assert_eq!(b.missing,vec![existing.clone()]);assert_eq!(b.directories,2);drop(c);
+  let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();let r=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,3,&stop).unwrap().unwrap();assert!(r.hints.contains_key(&missing));assert_eq!(r.missing,vec![existing]);assert_eq!(f.metrics()["connections"],2);
+ }
+}
+#[test]
+fn missing_first_parent_does_not_hide_later_partial_or_symlink_listing_errors(){
+ for mode in ["compare-snapshot-concurrent-unavailable","compare-snapshot-concurrent-partial","compare-snapshot-concurrent-parent"]{
+  let f=Fixture::start(mode);let all=concurrent_paths(&f);let paths=vec![PathBuf::from("a-uncreated/sub/file.txt"),all[3].clone()];let stop=AtomicBool::new(false);let(mut c,_)=crate::sftp::connect(&f.profile,&f.secret,&stop).unwrap();let r=crate::sftp::comparison_snapshot(&mut c,"/upload/job",&paths,1,&stop);if mode.ends_with("unavailable"){assert!(r.unwrap().is_none());}else{assert!(r.is_err());}
+ }
 }

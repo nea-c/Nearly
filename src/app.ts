@@ -1225,6 +1225,7 @@ function bindOperations() {
   bindFileActions(actionHost);
   bindFileDrop({ ...actionHost,
     uploadAllowed: () => native && !previewBootstrap && !(incomingTransfer && ["dragging","pending"].includes(incomingTransfer.phase)) && !nativeDrag && !windowClosing && !w.starting && !dialog && !splitterDragging && !pointerReordering() && !!w.connection && w.connection.mode === "sftp" && !w.connecting && !w.loading.remote && !workspaceMoving(w.id) && !closingWorkspaces.has(w.id) && !store.tabs.some(tab => tab.status !== "stopped" && tab.id === w.jobId),
+    uploadBlockedBySync: () => store.tabs.some(tab => tab.status !== "stopped" && tab.id === w.jobId),
     remoteDirectory: path => !!w.trees.remote.peek(path),
     localDirectory: path => !!w.trees.local.peek(path),
     dragging: (value, cancel) => {selectionDrag=value;finishSelectionDrag=cancel;},

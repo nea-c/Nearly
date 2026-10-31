@@ -58,7 +58,7 @@ test('remote multi-delete dispatches one frozen batch and preserves partial outc
  await expect.poll(()=>page.evaluate(()=>(window as any).batchCalls.filter((c:any)=>c.cmd==='run_file_operation').length)).toBe(1);
  expect(await page.evaluate(()=>(window as any).batchCalls.find((c:any)=>c.cmd==='run_file_operation').args.request.items)).toEqual([{source:'/sample-a.txt'},{source:'/sample-b.txt'}]);
  await expect(page.locator('.operation-feedback progress')).toHaveAttribute('max','2');
- await page.evaluate(()=>(window as any).releaseBatch());await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','false');await expect(page.locator('.operation-feedback')).toContainText('Generated permission failure');
+ await page.evaluate(()=>(window as any).releaseBatch());await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','false');await expect(page.locator('.operation-feedback')).toContainText('Generated permission failure');await expect(page.locator('.operation-feedback progress')).toHaveAttribute('value','1');await expect(page.locator('.operation-feedback progress')).toHaveAttribute('max','2');
 });
 for(const theme of ['light','dark'])test(`sample progress preview ${theme}`,async({page})=>{
  await page.goto('/');await page.evaluate(async(theme)=>{

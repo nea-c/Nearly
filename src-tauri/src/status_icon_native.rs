@@ -32,16 +32,18 @@ pub fn apply(hwnd:HWND,index:usize,images:[Image<'static>;5])->Result<(),String>
 
 // Keep the Shell's standard 16px overlay canvas; a 14px HICON alone may be
 // enlarged back to 16px. Nearest-neighbor shrink the adopted corner to 14px
-// inside transparent padding, anchored at the same top/right canvas edges.
+// inside transparent padding, at x2/y2 (approved candidate C).
 // No recoloring, circle mask, or cleanup of the original folder corner pixels.
 // The Shell still chooses placement and DPI rasterization of the whole canvas.
-fn badge_pixels(image:&Image<'_>)->Result<Image<'static>,String>{
+fn badge_pixels(image:&Image<'_>,index:usize)->Result<Image<'static>,String>{
  if image.width()!=32||image.height()!=32{return Err("Expected a 32px adopted composite".into());}
+ if !(1..5).contains(&index){return Err("Invalid badge state".into());}
+ if index==2 {return Ok(tauri::include_image!("./icons/badges/done-overlay.png"));}
  let mut pixels=vec![0u8;16*16*4];
  for y in 0..14usize {for x in 0..14usize {
   // Pixel-center sampling matches the user-approved code-rendered preview.
   let sx=(2*x+1)*16/(2*14);let sy=(2*y+1)*16/(2*14);
-  let source=(sy*32+16+sx)*4;let destination=(y*16+2+x)*4;
+  let source=(sy*32+16+sx)*4;let destination=((y+2)*16+2+x)*4;
   pixels[destination..destination+4].copy_from_slice(&image.rgba()[source..source+4]);
  }}
  Ok(Image::new_owned(pixels,16,16))
@@ -51,7 +53,7 @@ fn badge_handles(images:[Image<'static>;5])->Result<[usize;4],String>{
  let mut cache=BADGES.lock().map_err(|_|"Badge cache lock failed")?;
  if let Some(value)=*cache{return Ok(value);}
  let mut value=[0usize;4];
- for i in 0..4 {match badge_pixels(&images[i+1]).and_then(|image|create(&image)){
+ for i in 0..4 {match badge_pixels(&images[i+1],i+1).and_then(|image|create(&image)){
   Ok(handle)=>value[i]=handle,
   Err(error)=>{for handle in &value[..i]{unsafe{let _=DestroyIcon(HICON(*handle as *mut _));}}return Err(error);}
  }}
@@ -110,20 +112,21 @@ pub fn button_epoch(hwnd:HWND)->Result<u64,String>{
 #[cfg(test)]mod tests{
  use super::*;
  fn images()->[Image<'static>;5]{[tauri::include_image!("./icons/icon-source.png"),tauri::include_image!("./icons/badges/sync.png"),tauri::include_image!("./icons/badges/done.png"),tauri::include_image!("./icons/badges/error.png"),tauri::include_image!("./icons/badges/paused.png")]}
- #[test]fn shell_badges_keep_fixed_canvas_with_14px_upper_right_artwork(){
+ #[test]fn shell_badges_keep_fixed_canvas_with_14px_lowered_artwork(){
   // Pixel-center nearest-neighbor 16 -> 14, matching the accepted preview.
   let sample=[0usize,1,2,4,5,6,7,8,9,10,12,13,14,15];
-  for image in &images()[1..] {
-   let badge=badge_pixels(image).unwrap();
+  for (i,image) in images()[1..].iter().enumerate() {
+   let badge=badge_pixels(image,i+1).unwrap();
    assert_eq!((badge.width(),badge.height()),(16,16));
    let mut bounds=(16usize,16usize,0usize,0usize);
    for y in 0..16usize {for x in 0..16usize {
     let pixel=&badge.rgba()[(y*16+x)*4..(y*16+x+1)*4];
-    if x<2||y>=14 {assert_eq!(pixel,[0,0,0,0],"Transparent padding at {x},{y}");}
-    else {let source=(sample[y]*32+16+sample[x-2])*4;assert_eq!(pixel,&image.rgba()[source..source+4]);}
+    if x<2||y<2 {assert_eq!(pixel,[0,0,0,0],"Transparent padding at {x},{y}");}
+    else if i!=1 {let source=(sample[y-2]*32+16+sample[x-2])*4;assert_eq!(pixel,&image.rgba()[source..source+4]);}
     if pixel[3]>0 {bounds.0=bounds.0.min(x);bounds.1=bounds.1.min(y);bounds.2=bounds.2.max(x);bounds.3=bounds.3.max(y);}
    }}
-   assert_eq!(bounds,(2,0,15,13));
+   assert_eq!(bounds,(2,2,15,15));
+   if i==1 {let digest=ring::digest::digest(&ring::digest::SHA256,badge.rgba());let hex=digest.as_ref().iter().map(|v|format!("{v:02x}")).collect::<String>();assert_eq!(hex,"701420f13de887ab608b3e66428f9354de35b6fd0350c400e2efa62e9aa88531","exact approved candidate C RGBA");}
    // Deterministic integer DPI simulation: padding/art remain in proportion.
    // This does not assert how the Windows Shell actually rasterizes at that DPI.
    for canvas in [16usize,20,24,32,48] {
@@ -132,16 +135,21 @@ pub fn button_epoch(hwnd:HWND)->Result<u64,String>{
      let sx=(2*x+1)*16/(2*canvas);let sy=(2*y+1)*16/(2*canvas);
      if badge.rgba()[(sy*16+sx)*4+3]>0 {scaled_bounds.0=scaled_bounds.0.min(x);scaled_bounds.1=scaled_bounds.1.min(y);scaled_bounds.2=scaled_bounds.2.max(x);scaled_bounds.3=scaled_bounds.3.max(y);}
     }}
-    assert_eq!(scaled_bounds.0,(canvas+3)/8);assert_eq!(scaled_bounds.1,0);
-    assert_eq!(scaled_bounds.2,canvas-1);assert_eq!(scaled_bounds.3,canvas-(canvas+4)/8-1);
+    assert_eq!(scaled_bounds.0,(canvas+3)/8);assert_eq!(scaled_bounds.1,(canvas+3)/8);
+    assert_eq!(scaled_bounds.2,canvas-1);assert_eq!(scaled_bounds.3,canvas-1);
    }
   }
-  assert!(badge_pixels(&Image::new_owned(vec![0;16*16*4],16,16)).is_err());
+  assert!(badge_pixels(&Image::new_owned(vec![0;16*16*4],16,16),1).is_err());
+ }
+ #[test]fn approved_c_badges_fit_at_y2_without_clipping(){
+  for (i,image) in images()[1..].iter().enumerate(){let badge=badge_pixels(image,i+1).unwrap();for y in 0..2usize{for x in 0..16usize{assert_eq!(&badge.rgba()[(y*16+x)*4..(y*16+x+1)*4],&[0,0,0,0],"two transparent top rows");}}
+   let visible:Vec<_>=badge.rgba().chunks_exact(4).enumerate().filter(|(_,p)|p[3]>0).map(|(i,_)|(i%16,i/16)).collect();assert_eq!((visible.iter().map(|p|p.0).min(),visible.iter().map(|p|p.1).min(),visible.iter().map(|p|p.0).max(),visible.iter().map(|p|p.1).max()),(Some(2),Some(2),Some(15),Some(15)));
+  }
  }
  #[test]fn native_badge_hicons_preserve_14px_artwork_alpha_and_fixed_canvas(){
   use windows::Win32::{Graphics::Gdi::{CreateCompatibleDC,DeleteDC,DeleteObject,GetDIBits,BITMAPINFO,BITMAPINFOHEADER,BI_RGB,DIB_RGB_COLORS},UI::WindowsAndMessaging::{GetIconInfo,ICONINFO}};
-  for image in &images()[1..] {
-   let badge=badge_pixels(image).unwrap();let icon=HICON(create(&badge).unwrap() as *mut _);
+  for (i,image) in images()[1..].iter().enumerate() {
+   let badge=badge_pixels(image,i+1).unwrap();let icon=HICON(create(&badge).unwrap() as *mut _);
    let mut info=ICONINFO::default();unsafe{GetIconInfo(icon,&mut info).unwrap();}
    let dc=unsafe{CreateCompatibleDC(None)};assert!(!dc.is_invalid());
    let mut bitmap=BITMAPINFO::default();bitmap.bmiHeader=BITMAPINFOHEADER {biSize:std::mem::size_of::<BITMAPINFOHEADER>() as u32,biWidth:16,biHeight:-16,biPlanes:1,biBitCount:32,biCompression:BI_RGB.0,..Default::default()};
@@ -157,7 +165,7 @@ pub fn button_epoch(hwnd:HWND)->Result<u64,String>{
  }
  #[test]fn restored_shell_badges_keep_state_handles_and_clear_with_null(){
   let images=images();
-  for index in 1..5 {let badge=badge_pixels(&images[index]).unwrap();assert_eq!((badge.width(),badge.height()),(16,16));
+  for index in 1..5 {let badge=badge_pixels(&images[index],index).unwrap();assert_eq!((badge.width(),badge.height()),(16,16));
    assert!(!overlay_handle(index,images.clone()).unwrap().is_invalid());
   }
   assert!(overlay_handle(0,images.clone()).unwrap().is_invalid());assert!(overlay_handle(5,images.clone()).is_err());

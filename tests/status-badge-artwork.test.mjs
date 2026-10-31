@@ -16,3 +16,7 @@ test('r3.6 regression restores shell badges and avoids a duplicate composite win
  assert.doesNotMatch(adapter,/window\.set_overlay_icon\(None\)/);
  assert.match(adapter,/TaskbarState::Idle => BASE/);
 });
+
+test('approved C directly renders the exact native14 check geometry',async()=>{
+ const m=await import('../scripts/status-badge-artwork.mjs');assert.equal(typeof m.doneBadge14MarkSvg,'function');const svg=m.doneBadge14MarkSvg();assert.match(svg,/width="14" height="14" viewBox="0 0 14 14"/);assert.match(svg,/d="M3\.25 7 L5\.75 9\.5 L10\.5 4\.5"/);assert.match(svg,/stroke="#17212B" stroke-width="2\.1"/);assert.match(svg,/stroke-linecap="round" stroke-linejoin="round"/);assert.ok(!svg.includes('<image'));
+});

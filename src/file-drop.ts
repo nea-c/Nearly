@@ -9,6 +9,7 @@ import { childPath, supportedName } from "./tree.js";
 import { getLanguage, tError } from "./i18n.js";
 export interface DropHost extends ActionHost {
   uploadAllowed(): boolean;
+  uploadBlockedBySync?(): boolean;
   remoteDirectory(path: string): boolean;
   localDirectory(path: string): boolean;
   dragging(value: boolean, cancel?: () => void): void;
@@ -65,12 +66,23 @@ const allowed = (host: DropHost) =>
   !!host.sessionId &&
   host.profile?.mode === "sftp" &&
   !host.panes.remote.loading;
+// Eligibility for explaining a rejected upload, never authority to perform one.
+const syncBlocked = (host: DropHost) => native && !operationBusy() && host.valid() && !!host.sessionId && host.profile?.mode === 'sftp' && !host.panes.remote.loading && !!host.uploadBlockedBySync?.();
+function notifySyncBlocked(host: DropHost) {
+ if (!syncBlocked(host)) return false;
+ let notice = document.querySelector<HTMLElement>('.drop-sync-notice');
+ if (!notice) { notice=document.createElement('div');notice.className='notice window-close-notice drop-sync-notice';notice.setAttribute('role','alert');document.body.append(notice); }
+ const text=document.createElement('span');text.textContent=say('同期中のためアップロードできません。同期を停止してから再試行してください。','Uploads are unavailable during synchronization. Stop synchronization, wait for it to finish, then retry.');
+ const close=document.createElement('button');close.type='button';close.textContent='×';close.setAttribute('aria-label',say('通知を閉じる','Dismiss notification'));close.onclick=()=>notice?.remove();notice.replaceChildren(text,close);
+ return true;
+}
 /** Only actual list rows and model-backed tree directories may supply destinations. */
 export function remoteDropTarget(
   host: DropHost,
   element: Element | null,
+  explainBlocked = false,
 ): string | undefined {
-  if (!element || !host.valid() || !allowed(host)) return;
+  if (!element || !host.valid() || !(allowed(host) || (explainBlocked && syncBlocked(host)))) return;
   if (
     element.closest(
       "thead,button:not([data-tree-select]),input,select,[data-column-resize],[data-parent-row]",
@@ -322,9 +334,10 @@ function nativeDrop(event: NativeFileDrop) {
   if (event.type === "leave" || !host || overlay || !event.position) return;
   const point = physicalToCss(event.position, window.devicePixelRatio),
     element = point && document.elementFromPoint(point.x, point.y);
-  const remote = remoteDropTarget(host, element || null);
+  const remote = remoteDropTarget(host, element || null, event.type === "drop");
   if (remote === undefined) return;
   if (event.type === "drop") {
+    if (Array.isArray(event.paths) && event.paths.length && event.paths.every(path => typeof path === "string" && !!path && !path.includes("\0")) && notifySyncBlocked(host)) return;
     if (
       Array.isArray(event.paths) &&
       event.paths.every((path) => typeof path === "string")
@@ -356,7 +369,7 @@ export function bindFileDrop(host: DropHost) {
       !host ||
       !row ||
       overlay ||
-      !allowed(host) ||
+      !(allowed(host) || (row.closest<HTMLElement>('[data-list]')?.dataset.list === "local" && syncBlocked(host))) ||
       !host.valid() ||
       marqueeWhitespace(target, event.clientX, event.clientY) ||
       target?.closest("button,input,thead")
@@ -365,7 +378,7 @@ export function bindFileDrop(host: DropHost) {
     const list = row.closest<HTMLElement>("[data-list]");
     if (list?.dataset.workspace !== host.workspaceId) return;
     const side = list.dataset.list as 'local'|'remote', direction = side==='local'?'upload':'download';
-    const destinationAt = (element:Element|null)=>direction==='upload'?remoteDropTarget(host,element):localDropTarget(host,element);
+    const destinationAt = (element:Element|null, explainBlocked=false)=>direction==='upload'?remoteDropTarget(host,element,explainBlocked):localDropTarget(host,element);
     const entry = host.panes[side].entries.find(
       (e) => e.name === row.dataset.name,
     );
@@ -412,8 +425,9 @@ export function bindFileDrop(host: DropHost) {
       );
       if (commit && e && host.valid()) {
         const remote = destinationAt(
-          document.elementFromPoint(e.clientX, e.clientY),
+          document.elementFromPoint(e.clientX, e.clientY), true,
         );
+        if (remote !== undefined && direction === "upload" && notifySyncBlocked(host)) return;
         if (remote !== undefined)
           confirmUpload(
             host,

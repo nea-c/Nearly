@@ -12,3 +12,8 @@ export function statusBadgeSvg(state,baseDataUrl,size=32){
  if(!Number.isInteger(size)||size<16)throw Error('Invalid icon size');
  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 32 32"><image href="${baseDataUrl}" width="32" height="32" style="image-rendering:pixelated"/><svg x="16" y="0" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="${badgeColors[state]}"/><g fill="none" stroke="#17212B" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round">${marks[state]}</g></svg></svg>`;
 }
+
+// User-selected candidate C; render at14px directly, never shrink a16px mark.
+export function doneBadge14MarkSvg(){
+ return '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14"><path d="M3.25 7 L5.75 9.5 L10.5 4.5" fill="none" stroke="#17212B" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}

@@ -26,7 +26,7 @@ pub(crate) use sync_policy::Policy as SyncPolicy;
 pub(crate) use sync_policy::unchanged_notice as unchanged_sync_notice;
 pub(crate) use comparison_snapshot::comparison_snapshot;
 #[path="sftp_parallel.rs"] mod sftp_parallel;
-pub(crate) use sftp_parallel::{upload_batch,prepare_upload_parent,BatchCommit,BatchUploadResult};
+pub(crate) use sftp_parallel::{upload_batch,upload_rolling,prepare_upload_parent,BatchCommit,BatchUploadResult};
 #[path="upload_fingerprint.rs"] mod upload_fingerprint;
 pub(crate) use upload_fingerprint::unchanged_uploaded_content;
 

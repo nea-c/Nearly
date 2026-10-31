@@ -501,10 +501,13 @@ function showOperation(
       status: "待機中",
       error: "",
     }));
+    const selectionProgress=statuses.length>1&&(action==='copy'||action==='delete');
+    if(selectionProgress)feedback.selectionProgress(0,statuses.length);
     const draw = () => {
       const successes = statuses.filter((s) => s.status === "完了").length,
         failed = statuses.filter((s) => s.status === "失敗").length,
         skipped = statuses.filter((s) => s.status === "未実行").length;
+      if(selectionProgress)feedback.selectionProgress(successes,statuses.length);
       results.innerHTML = html`<p class="operation-summary">
           ${esc(text`${successes} 件完了 / ${failed} 件失敗`)}${skipped ? esc(text` / ${skipped} 件未実行`) : ""}
         </p>
