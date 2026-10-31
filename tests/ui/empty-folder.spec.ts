@@ -39,16 +39,19 @@ for (const side of ["local", "remote"] as const) for (const nested of [false, tr
     for (const theme of ["light", "dark"]) {
       await page.locator("#settings-toggle").click();
       await page.locator("#theme-select").selectOption(theme);
+      await expect(page.locator("#theme-select")).toBeEnabled();
+      await expect(page.locator("html")).toHaveAttribute("data-theme",theme);
       await page.locator("#settings-close").click();
-      expect(await list.locator(".empty").evaluate(e => getComputedStyle(e).borderBottomWidth)).toBe("0px");
+      await expect(list.locator(".empty")).toHaveCSS("border-bottom-width","0px");
       const bounds = await list.evaluate(e => {
         const outer = e.getBoundingClientRect(), message = e.querySelector('.empty-message')!.getBoundingClientRect();
         return { left: message.left - outer.left, right: outer.right - message.right };
       });
       expect(bounds.left).toBeGreaterThanOrEqual(0);
       expect(bounds.right).toBeGreaterThanOrEqual(0);
-      expect(await list.locator("th").first().evaluate(e => parseFloat(getComputedStyle(e).borderBottomWidth))).toBeGreaterThan(0);
-      if (nested) expect(await list.locator("[data-parent-row] td").first().evaluate(e => parseFloat(getComputedStyle(e).borderBottomWidth))).toBeGreaterThan(0);
+      // Re-resolve through any committed redraw; persistent missing borders still fail.
+      await expect.poll(()=>list.locator("th").first().evaluate(e => parseFloat(getComputedStyle(e).borderBottomWidth))).toBeGreaterThan(0);
+      if (nested) await expect.poll(()=>list.locator("[data-parent-row] td").first().evaluate(e => parseFloat(getComputedStyle(e).borderBottomWidth))).toBeGreaterThan(0);
       await page.screenshot({ path: `test-results/empty-${side}-${nested ? "nested" : "root"}-${theme}.png` });
     }
   });

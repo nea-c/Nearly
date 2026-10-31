@@ -35,7 +35,9 @@ async function manage(page, action, id = undefined) {
   // Real pointer actionability waits for the post-save row to settle; a direct
   // contextmenu dispatch can run before the deferred committed-tree render.
   if (id !== null && await row.count()) await row.first().click({button:'right',position:{x:20,y:12}});
-  else await page.locator('#connection-tree').dispatchEvent('contextmenu',{clientX:100,clientY:150});
+  // The tree has 4px top padding: use its background, with real actionability
+  // waits so a queued committed-tree render cannot dismiss a premature menu.
+  else await page.locator('#connection-tree').click({button:'right',position:{x:8,y:2}});
   await page.locator(`[data-menu-action="${action}"]`).click();
 }
 async function rowDrag(page, source, target, position, drop = true) {
@@ -346,7 +348,9 @@ test('connection management is context-only and an empty or selected background 
   await expect(page.locator('#connection-context-menu [data-menu-action]')).toHaveCount(2);
   await page.locator('[data-menu-action="add-profile"]').click();
   await expect(page.locator('#profile-form')).toBeVisible();
-  await page.keyboard.press('Escape');
+  // Close the profile modal explicitly before interacting with the tree behind it.
+  await page.locator('#profile-form #cancel').click();
+  await expect(page.locator('#profile-form')).toHaveCount(0);
   await manage(page,'add-group',null);
   await page.locator('#connection-node-name').fill('First root');
   await page.locator('#connection-node-submit').click();
