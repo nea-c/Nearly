@@ -21,7 +21,7 @@ test('installer metadata distinguishes a selectable default from the registered 
 const config = JSON.parse(await fs.readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url)));
 const pe = Buffer.alloc(80); pe.write('MZ'); pe.writeUInt32LE(64,60); pe.writeUInt32LE(0x4550,64);
 test('only reviewed per-user unsigned installer policy is accepted',()=>{
-  assert.equal(validateInstallerPolicy(config),'Nearly_r4.0-pre.5_x64-setup.exe');
+  assert.equal(validateInstallerPolicy(config),'Nearly_r4.0-pre.6_x64-setup.exe');
   for(const [version,label] of [['1.10.0','r1.10'],['2.0.0','r2.0']]) assert.equal(validateInstallerPolicy({...config,version}),`Nearly_${label}_x64-setup.exe`);
   for(const version of ['1.0.1','r1.0','1.0.0-beta','1.0.0+build']) assert.throws(()=>validateInstallerPolicy({...config,version}));
   for(const change of [c=>c.bundle.windows.nsis.installMode='perMachine', c=>c.bundle.createUpdaterArtifacts=true,c=>c.bundle.windows.webviewInstallMode.type='downloadBootstrapper']){

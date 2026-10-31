@@ -157,12 +157,12 @@ fn remote_batch(engine:&crate::engine::Engine,request:Request,stop:&AtomicBool)-
     let endpoints=(profile.host.as_str(),profile.port).to_socket_addrs().map_err(|_|"Cannot resolve remote endpoint")?.collect();
     let (mut connection,identity)=sftp::connect(&profile,&request.passphrase,stop)?;
     engine.reserve_operation(&request.id,vec![],paths,identity,endpoints,false)?;
-    let progress=engine.operation_progress(&request.id);let mut outcomes=Vec::new();let mut failed=false;let mut completed=0;
+    let progress=engine.operation_progress(&request.id);if let Some(p)=&progress{p.selection(selected.len());}let mut outcomes=Vec::new();let mut failed=false;let mut completed=0;
     for (index,(source,target)) in selected.iter().enumerate(){
         if failed || stop.load(Ordering::SeqCst){outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:false,message:"Not attempted after cancellation or earlier failure; refresh before retrying".into()});continue;}
         if let Some(p)=&progress{p.item(index+1,selected.len());}
         match sftp::file_operation_tracked(&mut connection,request.action,source,target.as_deref(),stop,progress.as_deref()){
-            Ok(out)=>{completed+=out.completed;outcomes.push(ItemOutcome{source:source.clone(),completed:true,attempted:true,message:out.message});}
+            Ok(out)=>{if let Some(p)=&progress{p.selection_committed();}completed+=out.completed;outcomes.push(ItemOutcome{source:source.clone(),completed:true,attempted:true,message:out.message});}
             Err(error)=>{failed=true;outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:true,message:format!("{error}. Partial/uncertain targets may remain; refresh before retrying")});}
         }
     }

@@ -11,6 +11,8 @@ pub struct Snapshot {
     pub entries: usize,
     pub item: usize,
     pub item_count: usize,
+    pub selection_completed: Option<usize>,
+    pub selection_total: Option<usize>,
 }
 /// Largest integer exactly represented by the renderer's JavaScript number type.
 pub const MAX_EXACT_BYTE_TOTAL:u64=9_007_199_254_740_991;
@@ -27,10 +29,13 @@ pub fn checked_byte_total(sizes:impl IntoIterator<Item=Option<u64>>)->Result<u64
 }
 pub struct Progress(Mutex<Snapshot>);
 impl Default for Progress {
-    fn default()->Self { Self(Mutex::new(Snapshot{phase:"connecting",unit:"bytes",done:0,total:None,entries:0,item:1,item_count:1})) }
+    fn default()->Self { Self(Mutex::new(Snapshot{phase:"connecting",unit:"bytes",done:0,total:None,entries:0,item:1,item_count:1,selection_completed:None,selection_total:None})) }
 }
 impl Progress {
     pub fn snapshot(&self)->Snapshot {self.0.lock().unwrap_or_else(|e|e.into_inner()).clone()}
+    /// Selected top-level roots, independent from each root's recursive inventory.
+    pub fn selection(&self,total:usize){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());if s.selection_total.is_none(){s.selection_total=Some(total);s.selection_completed=Some(0);}}
+    pub fn selection_committed(&self){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());if let (Some(done),Some(total))=(s.selection_completed,s.selection_total){s.selection_completed=Some(done.saturating_add(1).min(total));}}
     pub fn item(&self,item:usize,count:usize){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.item=item;s.item_count=count;s.phase="scanning";s.done=0;s.total=None;s.entries=0;}
     pub fn phase(&self,phase:&'static str){self.0.lock().unwrap_or_else(|e|e.into_inner()).phase=phase;}
     pub fn plan(&self,unit:&'static str,total:u64){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.unit=unit;s.total=Some(total);s.done=0;s.entries=0;s.phase=if unit=="entries"{"deleting"}else{"copying"};}
@@ -49,4 +54,11 @@ impl Progress {
  #[test]fn acknowledged_bytes_and_committed_entries_are_separate(){let p=Progress::default();assert!(p.snapshot().total.is_none());p.item(2,3);p.plan("bytes",100);p.bytes(64);let s=p.snapshot();assert_eq!((s.done,s.entries,s.item,s.item_count),(64,0,2,3));p.phase("finalizing");assert_eq!(p.snapshot().phase,"finalizing");p.committed();assert_eq!(p.snapshot().entries,1);p.item(3,3);assert_eq!(p.snapshot().done,0);assert_eq!(p.snapshot().total,None);}
  #[test]fn transfer_position_preserves_acknowledged_batch_and_skips_reduce_only_total(){let p=Progress::default();p.plan("bytes",170000);p.bytes(32768);p.position(2,3);assert_eq!((p.snapshot().done,p.snapshot().total,p.snapshot().item),(32768,Some(170000),2));p.skip_bytes(70000);assert_eq!((p.snapshot().done,p.snapshot().total),(32768,Some(100000)));p.phase("finalizing");assert_eq!(p.snapshot().entries,0);}
  #[test]fn delete_counts_only_successful_mutations(){let p=Progress::default();p.plan("entries",5);p.committed();p.committed();assert_eq!((p.snapshot().done,p.snapshot().total),(2,Some(5)));p.phase("finalizing");assert_eq!(p.snapshot().done,2);}
+}
+
+#[cfg(test)]mod selection_tests{
+ use super::*;
+ #[test]fn selected_roots_are_not_recursive_entries_and_never_reset_between_items(){let p=Progress::default();p.selection(3);p.item(1,3);p.plan("entries",10);for _ in 0..10{p.committed();}assert_eq!(p.snapshot().selection_completed,Some(0));p.selection_committed();p.item(2,3);p.plan("bytes",u64::MAX);p.bytes(100);assert_eq!((p.snapshot().selection_completed,p.snapshot().selection_total),(Some(1),Some(3)));p.selection(9);assert_eq!(p.snapshot().selection_total,Some(3));p.selection_committed();p.item(3,3);p.plan("bytes",0);p.selection_committed();p.selection_committed();assert_eq!((p.snapshot().selection_completed,p.snapshot().selection_total),(Some(3),Some(3)));}
+ #[test]fn partial_error_cancel_and_unknown_do_not_increment_successful_roots(){let p=Progress::default();p.selection(5);p.item(1,5);p.selection_committed();p.item(2,5);p.plan("entries",10);p.committed();p.phase("finalizing");assert_eq!(p.snapshot().selection_completed,Some(1));assert_eq!(p.snapshot().selection_total,Some(5));}
+ #[test]fn nonselection_transfers_keep_selection_absent_and_empty_does_not_divide(){let p=Progress::default();p.plan("bytes",0);assert!(p.snapshot().selection_total.is_none());p.selection(0);assert_eq!(p.snapshot().selection_completed,Some(0));}
 }

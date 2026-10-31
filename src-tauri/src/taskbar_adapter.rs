@@ -26,13 +26,10 @@ pub fn start(app: tauri::AppHandle, engine: Arc<Engine>, ownership:Arc<Mutex<cra
                             applied.retain(|label,_|states.contains_key(label));failures.retain(|label,_|states.contains_key(label));
                             for (label,state) in &states {
                                 let window=&windows[label];
-                                let result=(||{
-                                    let hwnd=windows::Win32::Foundation::HWND(window.hwnd()?.0);
-                                    let epoch=crate::status_icon_native::button_epoch(hwnd).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
-                                    let key=(*state,group,epoch);
-                                    if applied.get(label)!=Some(&key){apply(window,*state,group)?;applied.insert(label.clone(),key);}
-                                    Ok::<_,tauri::Error>(())
-                                })();
+                                let key=window.hwnd().map_err(|e|e.to_string()).and_then(|hwnd|crate::status_icon_native::button_epoch(windows::Win32::Foundation::HWND(hwnd.0))).map(|epoch|(*state,group,epoch));
+                                let mut cached=applied.get(label).copied();
+                                let result=crate::taskbar_effects::apply(&mut cached,key,||apply_icon(window,group).map_err(|e|e.to_string()),||apply_progress(window,*state).map_err(|e|e.to_string()));
+                                if let Some(key)=cached{applied.insert(label.clone(),key);}else{applied.remove(label);}
                                 match result{Ok(())=>{failures.remove(label);},Err(e)=>{let message=e.to_string();if failures.get(label)!=Some(&message){eprintln!("Taskbar presentation failed for {label}: {message}");failures.insert(label.clone(),message);}}}
                             }
                         }
@@ -56,18 +53,25 @@ pub fn start(app: tauri::AppHandle, engine: Arc<Engine>, ownership:Arc<Mutex<cra
 }
 
 pub fn apply(window: &tauri::WebviewWindow, state: TaskbarState, group:TaskbarState) -> tauri::Result<()> {
+    let mut cached=None;
+    crate::taskbar_effects::apply(&mut cached,Ok(()),||apply_icon(window,group).map_err(|e|e.to_string()),||apply_progress(window,state).map_err(|e|e.to_string())).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))
+}
+fn apply_progress(window:&tauri::WebviewWindow,state:TaskbarState)->tauri::Result<()> {
     let (status, progress) = match state {
         TaskbarState::Idle | TaskbarState::Paused | TaskbarState::CaughtUp => (ProgressBarStatus::None, None),
         TaskbarState::Working => (ProgressBarStatus::Indeterminate, None),
         // This is an attention color, never a measured completion percentage.
         TaskbarState::Error => (ProgressBarStatus::Error, Some(100)),
     };
-    // Clear stale completion before applying the new progress state.
+    window.set_progress_bar(ProgressBarState { status: Some(status), progress })
+}
+fn apply_icon(window:&tauri::WebviewWindow,group:TaskbarState)->tauri::Result<()> {
+    // Shell rendering position remains unqualified.
     // Restore the r3.6 Shell path. Placement is chosen by Windows and remains
     // visually unqualified; do not treat API success as proof of rendering.
     let index=match group {TaskbarState::Idle=>0,TaskbarState::Working=>1,TaskbarState::CaughtUp=>2,TaskbarState::Error=>3,TaskbarState::Paused=>4};
     crate::status_icon_native::apply_shell(windows::Win32::Foundation::HWND(window.hwnd()?.0),index,[BASE,SYNC,DONE,ERROR,PAUSED]).map_err(|e|tauri::Error::Io(std::io::Error::other(e)))?;
-    window.set_progress_bar(ProgressBarState { status: Some(status), progress })
+    Ok(())
 }
 
 // Decode full composites at compile time. Each transition borrows fixed RGBA

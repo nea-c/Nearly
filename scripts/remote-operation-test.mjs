@@ -2,7 +2,7 @@
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
 import {createFixture} from './sftp-fixture.mjs';import {fixtureDirectory,runFixtureTest} from './native-test-process.mjs';
 const measurements=[];
-for(const [mode,baseline] of [['copy',true],['copy',false],['delete',true],['delete',false],['collision',false],['cancel',false],['overlap',false],['symlink',false],['changed',false],['write-failed',false],['cancel-during',false],['disconnect',false],['cancel-delete',false]]){
+for(const [mode,baseline] of [['copy',true],['copy',false],['delete',true],['delete',false],['collision',false],['cancel',false],['overlap',false],['symlink',false],['changed',false],['write-failed',false],['cancel-during',false],['disconnect',false],['cancel-delete',false],['mixed-copy',false],['mixed-delete',false]]){
  const out=fixtureDirectory('remote-operation-'+mode+'-'+baseline);let f;
  f=await createFixture(out,{async beforeStat(_op,p){if(mode==='cancel-delete'&&p==='/bench/source1'){fs.writeFileSync(path.join(out,'mutation-held'),'generated');const start=Date.now();while(!fs.existsSync(path.join(out,'mutation-release'))){assert.ok(Date.now()-start<20000);await new Promise(r=>setTimeout(r,5));}await new Promise(r=>setTimeout(r,100));return 4;}},mapStat(p,a){return mode==='symlink'&&p==='/bench/source1'?{...a,mode:0o120777}:a;},async beforeWrite(p){if(mode==='write-failed')return 4;if(mode==='changed'&&p==='/bench/copy0')fs.writeFileSync(path.join(f.remote,'bench/source0'),'concurrent generated change');
   if(['cancel-during','disconnect'].includes(mode)&&p==='/bench/copy1'){

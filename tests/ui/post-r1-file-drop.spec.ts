@@ -55,6 +55,7 @@ async function setup(page, mode = "sftp", connect = true, language = "en") {
             if (cmd === "prepare_file_operation" && window.holdPrepare)
               await new Promise((r) => (window.releasePrepare = r));
             if (cmd === "run_upload") {
+              if (window.uploadError) throw Error("Generated unknown remote outcome");
               if (window.simulateRecreate) window.recreated = true;
               if (window.holdRun)
                 await new Promise((r) => (window.releaseRun = r));
@@ -258,6 +259,7 @@ test("partial and cancelled are typed warnings; running cancel never abandons", 
   await nativeDrop(page);
   await page.locator("#upload-confirm").click();
   await expect(page.locator(".operation-feedback")).toContainText("Cancelled");
+  await expect(page.locator(".operation-feedback progress")).toBeHidden();
 });
 test("folder pointer upload includes contents by default and Escape cancels gestures", async ({
   page,
@@ -579,3 +581,8 @@ test("upload invalidates attempted root descendants while preserving sibling cac
     page.locator('[data-list=remote] [data-name="fresh.txt"]'),
   ).toBeVisible();
 });
+
+ test('cancelled confirmation creates no progress; upload exception keeps uncertainty without a running meter',async({page})=>{
+ await setup(page);await nativeDrop(page);await page.locator('#upload-cancel').click();await expect(page.locator('.operation-feedback')).toHaveCount(0);expect(await page.evaluate(()=>window.calls.some(c=>c.cmd==='prepare_file_operation'||c.cmd==='run_upload'))).toBe(false);
+ await page.evaluate(()=>window.uploadError=true);await nativeDrop(page);await page.locator('#upload-confirm').click();await expect(page.locator('.operation-feedback')).toHaveAttribute('data-complete','true');await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','false');await expect(page.locator('.operation-feedback')).toContainText('Generated unknown remote outcome');await expect(page.locator('.operation-feedback')).toContainText('New partial targets may remain');await expect(page.locator('.operation-feedback progress')).toBeHidden();
+ });

@@ -129,6 +129,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     largeWrites = 0;
   const connections = new Set();
   let openFileHandles=0,maxOpenFileHandles=0;
+  let openDirectoryHandles=0,maxOpenDirectoryHandles=0;
   let holdListings = false;
   const pendingListings = [];
   const requestCounts = Object.create(null);
@@ -264,6 +265,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
                   list: fs.readdirSync(local(p)),
                   p: local(p),
                 });
+                openDirectoryHandles++;maxOpenDirectoryHandles=Math.max(maxOpenDirectoryHandles,openDirectoryHandles);
                 stream.handle(id, h);
               } catch {
                 stream.status(id, 2);
@@ -356,6 +358,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             try {
               const e = handles.get(h.toString("hex"));
               if (e?.fd !== undefined) {fs.closeSync(e.fd);openFileHandles--;}
+              if (e?.list !== undefined) openDirectoryHandles--;
               handles.delete(h.toString("hex"));
               status(id);
             } catch (e) {
@@ -428,6 +431,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           });
           stream.on("close", () => {
             for (const e of handles.values())if(e.fd!==undefined){try{fs.closeSync(e.fd);}catch{}openFileHandles--;}
+            for (const e of handles.values())if(e.list!==undefined)openDirectoryHandles--;
             handles.clear();
           });
         });
@@ -464,6 +468,8 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     },
     get openFileHandles(){return openFileHandles;},
     get maxOpenFileHandles(){return maxOpenFileHandles;},
+    get openDirectoryHandles(){return openDirectoryHandles;},
+    get maxOpenDirectoryHandles(){return maxOpenDirectoryHandles;},
     get requestPaths() { return requestPaths.map(entry=>({...entry})); },
     get connectionCount() {
       return connections.size;

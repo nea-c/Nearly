@@ -27,6 +27,10 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
     };
     if !queue.get(ready).is_some_and(|item|eligible(ready,item)){return None;}
     let parent=ready.parent().unwrap_or(Path::new(""));
+    // Bound cloned paths/identity keys as well as active handles. This is not
+    // a cross-operation authority cache; every admitted file is checked again.
+    let cost=|p:&Path|p.as_os_str().len().saturating_add(root.as_os_str().len()).saturating_mul(8).saturating_add(512);
+    let mut path_bytes=cost(ready);if path_bytes>16*1024*1024{return None;}
     let mut paths=vec![ready.to_path_buf()];
     // Case-only watcher aliases must settle serially, not poison the whole job
     // by entering a batch with two names for the same Windows source.
@@ -34,12 +38,14 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
     let mut sources=HashSet::new();if let Some(key)=source_key(ready){sources.insert(key);}
     let mut targets=HashSet::from([ready.to_string_lossy().to_lowercase()]);
     for (path,item) in queue.iter(){
-        if paths.len()>=limit{break;}
+        if stop.load(Ordering::SeqCst){return Some(false);}
+        if paths.len()>=10000{break;}
         if path.as_path()==ready||path.parent()!=Some(parent)||!eligible(path,item){continue;}
+        let next=path_bytes.saturating_add(cost(path));if next>16*1024*1024{break;}
         let Some(key)=source_key(path)else{continue;};
         let target=path.to_string_lossy().to_lowercase();
         if sources.contains(&key)||targets.contains(&target){continue;}
-        sources.insert(key);targets.insert(target);paths.push(path.clone());
+        path_bytes=next;sources.insert(key);targets.insert(target);paths.push(path.clone());
     }
     if paths.len()<2{return None;}
     for path in &paths{
@@ -72,7 +78,7 @@ pub(super) fn run(parallel:&mut Parallel,ready:&Path,selected_absent:bool,queue:
         }
         s.pending=base+count-resolved.get();s.speed=if s.failure.is_some()||outcome.result.is_err(){0}else{(bytes.get()as f64/started.elapsed().as_secs_f64().max(0.001))as u64};
     };
-    let outcomes=match sftp::upload_batch(connection,root,&paths,remote,stop,id,delete_enabled,&verify,&on_complete){
+    let outcomes=match sftp::upload_rolling(connection,root,&paths,remote,stop,id,delete_enabled,limit,&verify,&on_complete){
         Ok(outcomes)=>outcomes,
         Err(error)=>{for(path,item)in paths.iter().zip(items){queue.insert(path.clone(),item);}state.lock().unwrap().failure_context(&error,Some(ready),"upload","not_committed",queue.len(),stop.load(Ordering::SeqCst));return Some(false);}
     };

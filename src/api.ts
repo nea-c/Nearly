@@ -202,7 +202,7 @@ export interface FileOperationRequest {
   passphrase: string;
   confirmDelete: boolean;
 }
-export interface OperationProgress {phase:string;unit:'bytes'|'entries';done:number;total:number|null;entries:number;item:number;itemCount:number}
+export interface OperationProgress {phase:string;unit:'bytes'|'entries';done:number;total:number|null;entries:number;item:number;itemCount:number;selectionCompleted?:number|null;selectionTotal?:number|null}
 declare global {
   interface Window {
     __TAURI__?: {

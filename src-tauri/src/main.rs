@@ -12,6 +12,7 @@ mod initial_scan;
 mod sync_runtime_tests;
 mod local_watch;
 mod taskbar_status;
+mod taskbar_effects;
 mod error_attention;
 #[cfg(windows)]
 mod taskbar_adapter;

@@ -27,10 +27,27 @@ export function operationFeedback(title: string, results: HTMLElement, cancel: H
  const meter=document.createElement('div');meter.className='operation-progress';meter.hidden=true;
  const gauge=document.createElement('progress');gauge.setAttribute('aria-label',getLanguage()==='ja'?'操作の進捗':'Operation progress');
  const label=document.createElement('span');label.className='operation-progress-label';meter.append(gauge,label);heading.after(meter);
+ let selection: {done:number;total:number}|undefined;
  let generation=0,finished=false,pollTimer:ReturnType<typeof setTimeout>|undefined;
  let activeId:string|undefined,inFlight=false,nextPollAt=0;
  const words=(ja:string,en:string)=>getLanguage()==='ja'?ja:en;
+ const selectionText=()=>words('全'+selection!.total+'項目中'+selection!.done+'項目完了',selection!.done+' of '+selection!.total+' items completed');
+ const updateSelection=(done:number,total:number)=>{
+  if(finished||!Number.isSafeInteger(total)||total<=0||!Number.isSafeInteger(done)||done<0||done>total)return;
+  if(selection&&(selection.total!==total||done<selection.done))return;
+  selection={done,total};meter.hidden=false;gauge.max=total;
+  if(done<total)gauge.value=done;else gauge.removeAttribute('value');
+  label.textContent=selectionText();
+ };
  const render=(sample:OperationProgress)=>{
+  if(sample.selectionTotal!=null&&sample.selectionCompleted!=null)updateSelection(sample.selectionCompleted,sample.selectionTotal);
+  if(selection){
+   meter.hidden=false;gauge.max=selection.total;if(selection.done<selection.total)gauge.value=selection.done;else gauge.removeAttribute('value');
+   const phase=({scanning:words('走査中','Scanning'),copying:words('コピー中','Copying'),deleting:words('削除中','Deleting'),finalizing:words('確定中','Finalizing'),connecting:words('接続中','Connecting')} as Record<string,string>)[sample.phase]??words('準備中','Preparing');
+   const safe=Number.isSafeInteger(sample.done)&&sample.done>=0&&sample.total!==null&&Number.isSafeInteger(sample.total)&&sample.total>=sample.done;
+   const detail=sample.unit==='bytes'&&safe?' '+sample.done.toLocaleString()+' / '+sample.total!.toLocaleString()+' B':'';
+   label.textContent=selectionText()+' · '+words('現在項目: ','Current item: ')+phase+detail;return;
+  }
   meter.hidden=false;
   const amount=sample.unit==='bytes'?sample.done.toLocaleString()+' / '+(sample.total?.toLocaleString() ?? '?')+' B':sample.done+' / '+(sample.total ?? '?')+' '+words('件','entries');
   const phase=({uploading:words('アップロード中','Uploading'),downloading:words('ダウンロード中','Downloading'),waiting:words('確認待ち','Waiting for confirmation'),connecting:words('接続中','Connecting'),scanning:words('走査中','Scanning'),copying:words('コピー中','Copying'),deleting:words('削除中','Deleting'),finalizing:words('確定中','Finalizing')} as Record<string,string>)[sample.phase] ?? words('準備中','Preparing');
@@ -59,7 +76,7 @@ export function operationFeedback(title: string, results: HTMLElement, cancel: H
  };
  cancel.disabled=false;
  const remove = () => { clearTimer(card); card.remove(); };
- return {track,finish(success: boolean | 'cancelled' = false){finished=true;++generation;clearTimeout(pollTimer);if(!meter.hidden){if(success===true){gauge.max=1;gauge.value=1;}else gauge.removeAttribute('value');label.textContent=success===true?words('完了','Completed'):words('未完了・結果を確認してください','Operation incomplete — inspect results');}release();clearTimer(card);card.dataset.complete='true';card.dataset.success=String(success===true);card.dataset.dismissible=String(success===true||success==='cancelled');cancel.disabled=false;cancel.textContent=t('閉じる');cancel.dataset.feedbackClose='';cancel.onclick=remove;
+ return {track,selectionProgress:updateSelection,finish(success: boolean | 'cancelled' = false){finished=true;++generation;clearTimeout(pollTimer);if(selection){meter.hidden=false;if(success===true)selection.done=selection.total;gauge.max=selection.total;gauge.hidden=success!==true&&selection.done===selection.total;gauge.value=selection.done;label.textContent=selectionText()+(success===true?'':' · '+words('未完了・結果を確認してください','Incomplete — inspect results'));}else if(!meter.hidden){if(success===true){gauge.max=1;gauge.value=1;}else gauge.removeAttribute('value');label.textContent=success===true?words('完了','Completed'):words('未完了・結果を確認してください','Operation incomplete — inspect results');}if(success!==true&&!selection)meter.hidden=true;release();clearTimer(card);card.dataset.complete='true';card.dataset.success=String(success===true);card.dataset.dismissible=String(success===true||success==='cancelled');cancel.disabled=false;cancel.textContent=t('閉じる');cancel.dataset.feedbackClose='';cancel.onclick=remove;
    if(success===true||success==='cancelled')timers.set(card,setTimeout(remove,5000));
  }, remove(){if(card.dataset.complete !== "true")return;release();remove();}};
 }
