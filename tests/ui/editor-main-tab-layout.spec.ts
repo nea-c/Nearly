@@ -22,7 +22,7 @@ test('editor tab design follows the main geometry and paint across themes, selec
    // client surfaces. Keep that bounded allowance at the 8px corners only;
    // interior fills, straight borders and focus paint retain a 2-level bound.
    let different=0,max=0;const examples:any[]=[];for(let i=0;i<samples[0].length;i+=4){const x=i/4%boxes[0].width,y=Math.floor(i/4/boxes[0].width),d=Math.max(...[0,1,2,3].map(k=>Math.abs(samples[0][i+k]-samples[1][i+k])));max=Math.max(max,d);const corner=y<8&&(x<8||x>=boxes[0].width-8);if(d>(corner?8:2)){different++;if(examples.length<6)examples.push({x,y,main:[...samples[0].slice(i,i+4)],editor:[...samples[1].slice(i,i+4)]});}}
-   return {different,max,examples};
+   return {different,max,examples,mainBox:boxes[0],editorBox:boxes[1],devicePixelRatio:window.devicePixelRatio,userAgent:navigator.userAgent};
   },{pngs:pngs.map(png=>png.toString('base64')),boxes});
  }
  const measure=(el:Element)=>{const css=getComputedStyle(el),r=el.getBoundingClientRect(),label=el.querySelector<HTMLElement>('[role=tab]')!,l=label.getBoundingClientRect(),close=el.querySelector<HTMLElement>('button:not([role=tab])')!,c=close.getBoundingClientRect(),s=getComputedStyle(label),ink=label.lastElementChild!.getBoundingClientRect();return {x:r.x,top:r.y,width:r.width,height:r.height,radius:css.borderRadius,border:[css.borderTopWidth,css.borderRightWidth,css.borderBottomWidth,css.borderLeftWidth,css.borderLeftColor],background:css.backgroundColor,label:{font:s.font,color:s.color,padding:s.padding,top:l.top-r.top,height:l.height,textTop:ink.top-r.top},close:{x:c.x-r.x,y:c.y-r.y,width:c.width,height:c.height,color:getComputedStyle(close).color,radius:getComputedStyle(close).borderRadius}};};
@@ -38,7 +38,7 @@ test('editor tab design follows the main geometry and paint across themes, selec
     if(state==='focus'){await page.keyboard.press('Tab');await editor.keyboard.press('Tab');await main.locator('[role=tab]').focus();await edit.locator('[role=tab]').focus();}
     const m=await main.evaluate(measure),e=await edit.evaluate(measure);records.push({theme,selected,state,index,main:m,editor:e});fs.writeFileSync(path.join(out,'measurements.json'),JSON.stringify(records,null,2));
     expect.soft(e).toEqual(m);
-    if(selected===0||state==='normal'){const result=await paintedDifference(main,edit);paint.push({theme,selected,state,index,...result});fs.writeFileSync(path.join(out,'paint-differences.json'),JSON.stringify(paint,null,2));expect.soft(result.different,theme+'/'+selected+'/'+state+' actual contour/background/focus paint').toBe(0);}
+    if(selected===0||state==='normal'){const result=await paintedDifference(main,edit);paint.push({theme,selected,state,index,...result});fs.writeFileSync(path.join(out,'paint-differences.json'),JSON.stringify(paint,null,2));expect.soft(result.different,theme+'/'+selected+'/'+state+' actual contour/background/focus paint '+JSON.stringify(result)).toBe(0);}
    }
   }
   await page.evaluate(()=>{(document.activeElement as HTMLElement)?.blur();});await editor.evaluate(()=>{(document.activeElement as HTMLElement)?.blur();});await page.mouse.move(1100,800);await editor.mouse.move(1100,800);await page.screenshot({path:path.join(out,`main-${theme}.png`)});await editor.screenshot({path:path.join(out,`editor-${theme}.png`)});
