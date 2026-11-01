@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';import fs from 'node:fs';import path from 'node:path';
-import {controlledPaintDiagnostic} from './paint-diagnostic.js';
+import {compareTabPaint} from './tab-paint-comparison.js';
 const out=path.resolve('../editor-main-tab-layout/qa');fs.mkdirSync(out,{recursive:true});
 const themes=['light','dark','midnight','forest','mint'];
 test('editor tab design follows the main geometry and paint across themes, selection, hover and focus',async({page,context})=>{
@@ -8,24 +8,8 @@ test('editor tab design follows the main geometry and paint across themes, selec
  await page.goto('/');await expect(page.locator('#add-tab')).toBeVisible();for(let i=0;i<4;i++)await page.locator('#add-tab').click();
  const editor=await context.newPage();await editor.addInitScript(()=>{(window as any).__TAURI__={core:{invoke:async(cmd:string)=>{if(cmd==='register_window')return {label:'text-editor',ownedWorkspaceIds:[]};if(cmd==='load_settings')return {theme:'forest',language:'en'};if(cmd==='list_text_documents')return ['first','second','middle','fourth','last'].map(token=>({token,path:'/generated/'+token+'.js',side:'remote',connectionLabel:'Generated server',text:Array.from({length:32},(_,i)=>'const generatedLine'+i+' = '+i+';').join('\n'),encoding:'UTF-8',newline:'LF'}));}},event:{listen:async()=>()=>{}}};});
  await editor.goto('/editor.html');await expect(editor.locator('.editor-tab')).toHaveCount(5);
- const records:any[]=[],paint:any[]=[];let plannedDiagnosed=false,failureDiagnosed=false;
- async function paintedDifference(main:any,edit:any){
-  const elements=[main,edit],owners=[page,editor],boxes=await Promise.all(elements.map(el=>el.boundingBox()));
-  // Keep real button backgrounds, borders and focus paint. Only semantic
-  // connection icons / document text and glyph ink are excluded here; their
-  // metrics and close ink are tested independently in the unmasked UI.
-  for(const el of elements)await el.evaluate((node:Element)=>{for(const span of node.querySelectorAll<HTMLElement>('button > span')){span.dataset.qaVisibility=span.style.visibility;span.style.visibility='hidden';}});
-  const pngs=await Promise.all(owners.map(owner=>owner.screenshot({scale:'css'})));
-  for(const el of elements)await el.evaluate((node:Element)=>{for(const span of node.querySelectorAll<HTMLElement>('button > span')){span.style.visibility=span.dataset.qaVisibility??'';delete span.dataset.qaVisibility;}});
-  return editor.evaluate(async({pngs,boxes})=>{
-   const samples=await Promise.all(pngs.map(async(png:string,i:number)=>{const image=new Image();image.src='data:image/png;base64,'+png;await image.decode();const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;const c=canvas.getContext('2d')!;c.drawImage(image,0,0);const r=boxes[i];return c.getImageData(r.x,r.y,r.width,r.height+1).data;}));
-   // Rounded-edge coverage can differ by a few RGB levels between the two
-   // client surfaces. Keep that bounded allowance at the 8px corners only;
-   // interior fills, straight borders and focus paint retain a 2-level bound.
-   let different=0,max=0;const examples:any[]=[];for(let i=0;i<samples[0].length;i+=4){const x=i/4%boxes[0].width,y=Math.floor(i/4/boxes[0].width),d=Math.max(...[0,1,2,3].map(k=>Math.abs(samples[0][i+k]-samples[1][i+k])));max=Math.max(max,d);const corner=y<8&&(x<8||x>=boxes[0].width-8);if(d>(corner?8:2)){different++;if(examples.length<6)examples.push({x,y,main:[...samples[0].slice(i,i+4)],editor:[...samples[1].slice(i,i+4)]});}}
-   return {different,max,examples,mainBox:boxes[0],editorBox:boxes[1],devicePixelRatio:window.devicePixelRatio,userAgent:navigator.userAgent};
-  },{pngs:pngs.map(png=>png.toString('base64')),boxes});
- }
+ const records:any[]=[],paint:any[]=[];
+ const paintedDifference=(main:any,edit:any)=>compareTabPaint(page,editor,main,edit);
  const measure=(el:Element)=>{const css=getComputedStyle(el),r=el.getBoundingClientRect(),label=el.querySelector<HTMLElement>('[role=tab]')!,l=label.getBoundingClientRect(),close=el.querySelector<HTMLElement>('button:not([role=tab])')!,c=close.getBoundingClientRect(),s=getComputedStyle(label),ink=label.lastElementChild!.getBoundingClientRect();return {x:r.x,top:r.y,width:r.width,height:r.height,radius:css.borderRadius,border:[css.borderTopWidth,css.borderRightWidth,css.borderBottomWidth,css.borderLeftWidth,css.borderLeftColor],background:css.backgroundColor,label:{font:s.font,color:s.color,padding:s.padding,top:l.top-r.top,height:l.height,textTop:ink.top-r.top},close:{x:c.x-r.x,y:c.y-r.y,width:c.width,height:c.height,color:getComputedStyle(close).color,radius:getComputedStyle(close).borderRadius}};};
  for(const theme of themes){await page.evaluate(t=>document.documentElement.dataset.theme=t,theme);await editor.evaluate(t=>document.documentElement.dataset.theme=t,theme);
   for(const selected of [0,2,4]){
@@ -40,8 +24,7 @@ test('editor tab design follows the main geometry and paint across themes, selec
     const m=await main.evaluate(measure),e=await edit.evaluate(measure);records.push({theme,selected,state,index,main:m,editor:e});fs.writeFileSync(path.join(out,'measurements.json'),JSON.stringify(records,null,2));
     expect.soft(e).toEqual(m);
     if(selected===0||state==='normal'){const result=await paintedDifference(main,edit);paint.push({theme,selected,state,index,...result});fs.writeFileSync(path.join(out,'paint-differences.json'),JSON.stringify(paint,null,2));
-     const planned=!plannedDiagnosed&&theme==='forest'&&selected===2&&state==='normal',failed=!failureDiagnosed&&result.different>0;
-     if(planned||failed){if(planned)plannedDiagnosed=true;if(failed)failureDiagnosed=true;try{const diagnostic={theme,selected,state,index,...await controlledPaintDiagnostic(page,editor,main,edit)};const json=JSON.stringify(diagnostic);if(json.length>65536)throw Error('Diagnostic exceeds bounded log size');console.log('PAINT_CONTEXT_DIAGNOSTIC '+json);fs.writeFileSync(path.join(out,`controlled-paint-diagnostic-${theme}-${selected}-${state}.json`),json);}catch(error){console.log('PAINT_CONTEXT_DIAGNOSTIC_ERROR '+String(error));}}
+     expect.soft(result.labelPaints[1],theme+'/'+selected+'/'+state+' label background under normalized content').toEqual(result.labelPaints[0]);
      expect.soft(result.different,theme+'/'+selected+'/'+state+' actual contour/background/focus paint '+JSON.stringify(result)).toBe(0);}
    }
   }
