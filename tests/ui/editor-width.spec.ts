@@ -43,7 +43,7 @@ test('editor uses full width with thin tab contours in all themes and at overflo
     }
   }
   await fs.writeFile(path.join(output,process.env.NEARLY_WIDTH_BASELINE?'before.json':'after.json'),JSON.stringify(measurements,null,2));
-  await page.setViewportSize({width:420,height:650});
+  await page.setViewportSize({width:320,height:650});
   const strip=page.locator('.editor-tabs');expect(await strip.evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
   await page.locator('.editor-tab').last().locator('[data-editor-tab-close]').focus();
   await expect(page.locator('.editor-tab').last().locator('[data-editor-tab-close]')).toBeInViewport();

@@ -24,7 +24,7 @@ export function titlebar(store: Store, active: string, settingsOpen: boolean) {
         (job ? " / " + (job.remote.split("/").pop() || "/") : "");
       const indicator=workspaceIndicator(w,job,getLanguage());
       const endpoint = p ? `${p.user}@${p.host}:${p.port}` : t("未接続");
-      return html`<div class="tab ${active === w.id ? "active" : ""}"><button role="tab" aria-selected="${active === w.id}" data-tab="${esc(w.id)}" aria-label="${esc(name + " — " + indicator.label)}" title="${esc(name + " — " + endpoint + " — " + indicator.label)}">${statusIcon(indicator,syncIndicatorClass(job))}<span>${esc(name)}</span></button><button data-close="${esc(w.id)}" aria-label="${esc(text`${p?.name || t("作業")} のタブを閉じる`)}" ${w.starting ? "disabled" : ""}>×</button></div>`;
+      return html`<div class="tab ${active === w.id ? "active" : ""}"><button role="tab" aria-selected="${active === w.id}" data-tab="${esc(w.id)}" aria-label="${esc(name + " — " + indicator.label)}" title="${esc(name + " — " + endpoint + " — " + indicator.label)}">${statusIcon(indicator,syncIndicatorClass(job))}<span>${esc(name)}</span></button><button data-close="${esc(w.id)}" aria-label="${esc(text`${p?.name || t("作業")} のタブを閉じる`)}" ${w.starting ? "disabled" : ""}><span class="tab-close-mark" aria-hidden="true">×</span></button></div>`;
     })
     .join(
       "",

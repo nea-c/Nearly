@@ -111,8 +111,8 @@ test('joined editor tabs preserve reference inset with close controls and focus 
       const t=el.getBoundingClientRect(),s=el.parentElement!.getBoundingClientRect();
       return {left:t.left-s.left,right:s.right-t.right,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content};
     });
-    // The chosen outline reference has a 4px leading inset, and no trailing gap.
-    expect(last?geometry.right:geometry.left).toBeCloseTo(last?0:4,0);
+    // The shared main outline has a 3px leading inset, and no trailing gap.
+    expect(last?geometry.right:geometry.left).toBeCloseTo(last?0:3,0);
     expect(geometry.before).toBe('none');expect(geometry.after).toBe('none');
     await page.keyboard.press('Tab');
     await tab.locator('[data-editor-tab-close]').focus();

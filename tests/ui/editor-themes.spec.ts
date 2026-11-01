@@ -114,7 +114,11 @@ test("editor applies every existing theme on startup and subsequent settings cha
       input:getComputedStyle(document.querySelector('.syntax-layer')!).backgroundColor,
     }));
     expect(join.background,theme).toBe(join.path);
-    expect(join.background,theme).toBe(join.input);
+    // Tab/path follow the main chrome; the editing surface keeps its palette.
+    const selected={light:'rgb(242, 245, 249)',dark:'rgb(27, 27, 27)',midnight:'rgb(18, 24, 32)',forest:'rgb(25, 35, 31)',mint:'rgb(238, 247, 241)'};
+    const editing={light:'rgb(255, 255, 255)',dark:'rgb(36, 36, 36)',midnight:'rgb(27, 36, 48)',forest:'rgb(35, 50, 44)',mint:'rgb(251, 254, 251)'};
+    expect(join.background,theme+' main selected chrome').toBe(selected[theme]);
+    expect(join.input,theme+' unchanged editing surface').toBe(editing[theme]);
     expect(join.foot,theme).toBe('none');
     for(const selector of ['.editor-tab-label','.editor-tab-close'])
       expect(await page.locator(selector).evaluate(el=>getComputedStyle(el).backgroundColor),theme+' transparent tab control').toBe('rgba(0, 0, 0, 0)');

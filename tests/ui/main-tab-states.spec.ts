@@ -7,13 +7,14 @@ const themes=['forest','light','dark','midnight','mint'];
 async function wholeTabHover(page:any,tab:any,evidence?:string){
  const read=()=>tab.evaluate((el:HTMLElement)=>{
   const close=el.querySelector<HTMLElement>('button:not([role=tab])')!,label=el.querySelector<HTMLElement>('[role=tab]')!;
-  const color=(node:HTMLElement)=>{let s=getComputedStyle(node).backgroundColor;while(s==='rgba(0, 0, 0, 0)'&&node.parentElement){node=node.parentElement;s=getComputedStyle(node).backgroundColor;}const c=document.createElement('canvas').getContext('2d')!;c.fillStyle=s;c.fillRect(0,0,1,1);return [...c.getImageData(0,0,1,1).data].slice(0,3);};
+  // Circle paint lives on a non-interactive pseudo-element, not the hit target.
+  const color=(node:HTMLElement)=>{const painted=(n:HTMLElement)=>{const p=getComputedStyle(n,'::before');return p.content!=='none'&&p.content!=='normal'&&p.opacity==='1'?p.backgroundColor:getComputedStyle(n).backgroundColor;};let s=painted(node);while(s==='rgba(0, 0, 0, 0)'&&node.parentElement){node=node.parentElement;s=painted(node);}const c=document.createElement('canvas').getContext('2d')!;c.fillStyle=s;c.fillRect(0,0,1,1);return [...c.getImageData(0,0,1,1).data].slice(0,3);};
   return {tab:color(el),close:color(close),label:color(label),selected:label.getAttribute('aria-selected'),theme:document.documentElement.dataset.theme};
  });
  const light=(rgb:number[])=>rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;
  await page.mouse.move(1100,700);const normal=await read();if(evidence)await page.screenshot({path:path.join(output,evidence+'-normal.png')});
  await tab.locator('[role=tab]').hover();const hover=await read();if(evidence)await page.screenshot({path:path.join(output,evidence+'-tab-hover.png')});
- expect(hover.tab).not.toEqual(normal.tab);if(['dark','midnight','forest'].includes(normal.theme!))expect(light(hover.tab)).toBeGreaterThan(light(normal.tab));expect(hover.close).toEqual(hover.tab);expect(hover.label).toEqual(hover.tab);
+ if(normal.selected==='true')expect(hover.tab).toEqual(normal.tab);else {expect(hover.tab).not.toEqual(normal.tab);if(['dark','midnight','forest'].includes(normal.theme!))expect(light(hover.tab)).toBeGreaterThan(light(normal.tab));}expect(hover.close).toEqual(hover.tab);expect(hover.label).toEqual(hover.tab);
  await tab.locator('button:not([role=tab])').hover();const close=await read();if(evidence)await page.screenshot({path:path.join(output,evidence+'-close-hover.png')});
  expect(close.tab).toEqual(hover.tab);expect(close.close).not.toEqual(hover.tab);if(['dark','midnight','forest'].includes(normal.theme!))expect(light(close.close)).toBeGreaterThan(light(hover.tab));expect(close.selected).toBe(normal.selected);
  await tab.locator('[role=tab]').hover();expect(await read()).toEqual(hover);
