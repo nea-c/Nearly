@@ -37,6 +37,64 @@ function delta(a:{rgba:number[]},b:{rgba:number[]}){
  for(let i=0;i<a.rgba.length;i+=4){const d=Math.max(...[0,1,2,3].map(k=>Math.abs(a.rgba[i+k]-b.rgba[i+k])));max=Math.max(max,d);if(d){count++;if(examples.length<6)examples.push({x:168+i/4%12,y:Math.floor(i/4/12),a:a.rgba.slice(i,i+4),b:b.rgba.slice(i,i+4)});}}
  return {count,max,examples};
 }
+async function borderNine(page:Page,rect:{x:number;y:number;width:number;height:number}){
+ const raw=await sample(page,rect),rgba:number[]=[];
+ for(let y=0;y<9;y++)rgba.push(...raw.rgba.slice((y*12+3)*4,(y*12+12)*4));
+ const png=await page.evaluate(data=>{const c=document.createElement('canvas');c.width=9;c.height=9;c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(data),9,9),0,0);return c.toDataURL('image/png').split(',')[1];},rgba);
+ return {rgba,point:rgba.slice((5*9+8)*4,(5*9+9)*4),png};
+}
+function nineDelta(a:{rgba:number[]},b:{rgba:number[]}){
+ let count=0,max=0;const examples=[];
+ for(let i=0;i<a.rgba.length;i+=4){const d=Math.max(...[0,1,2,3].map(k=>Math.abs(a.rgba[i+k]-b.rgba[i+k])));max=Math.max(max,d);if(d){count++;if(examples.length<6)examples.push({x:171+i/4%9,y:Math.floor(i/4/9),a:a.rgba.slice(i,i+4),b:b.rgba.slice(i,i+4)});}}
+ return {count,max,examples};
+}
+export async function observeUnmaskedBorder(mainPage:Page,editorPage:Page,main:Locator,editor:Locator){
+ const configs=await Promise.all([main,editor].map(configuration));
+ for(const target of [main,editor])if(!await target.evaluate(el=>Array.from(el.querySelectorAll('button > span')).every(span=>getComputedStyle(span).visibility==='visible')))throw Error('Unmasked history contains a visibility mask');
+ const a=await borderNine(mainPage,configs[0].rect),b=await borderNine(editorPage,configs[1].rect);
+ return {configs,main:{point:a.point,png:a.png},editor:{point:b.point,png:b.png},comparison:nineDelta(a,b)};
+}
+export async function visibilityMaskPaintDiagnostic(mainPage:Page,editorPage:Page,main:Locator,editor:Locator){
+ const targets=[main,editor],pages=[mainPage,editorPage],configs=await Promise.all(targets.map(configuration));
+ const saved=await Promise.all(targets.map(t=>t.evaluate(el=>Array.from(el.querySelectorAll<HTMLElement>('button > span'),span=>({style:span.getAttribute('style'),qa:span.getAttribute('data-qa-visibility')})))));
+ const captures:{label:string;point:number[];png:string}[]=[],raw=new Map<string,Awaited<ReturnType<typeof borderNine>>>();
+ async function capture(label:string,index:number){const value=await borderNine(pages[index],configs[index].rect);raw.set(label,value);captures.push({label,point:value.point,png:value.png});}
+ async function visibility(masked:boolean){
+  for(let i=0;i<targets.length;i++)await targets[i].evaluate((el,{masked,saved})=>{
+   Array.from(el.querySelectorAll<HTMLElement>('button > span')).forEach((span,n)=>{
+    if(masked){span.dataset.qaVisibility=span.style.visibility;span.style.visibility='hidden';}
+    else{
+     // Flush pending CSSOM attribute serialization before removing it. Edge's
+     // lazy style serialization otherwise recreates style="" after removal
+     // (reproduced in an app-free span fixture). Preserve absence as absence.
+     span.getAttribute('style');
+     if(saved[n].style===null)span.removeAttribute('style');else span.setAttribute('style',saved[n].style!);
+     if(saved[n].qa===null)span.removeAttribute('data-qa-visibility');else span.setAttribute('data-qa-visibility',saved[n].qa!);
+     if(span.getAttribute('style')!==saved[n].style||span.getAttribute('data-qa-visibility')!==saved[n].qa)throw Error('Visibility attributes differ at restore boundary');
+    }
+   });
+  },{masked,saved:saved[i]});
+ }
+ try{
+  // These five stages precede ANY node replacement or other style control.
+  for(const stage of ['unmasked0','masked0','unmasked1','masked1','unmasked2']){await visibility(stage.startsWith('masked'));await capture(stage+'-main',0);await capture(stage+'-editor',1);}
+  await capture('outer-before',1);
+  // Independent outer-host-only control: reuse ALL original child nodes and
+  // handlers, restore the original host before any further application action.
+  await editor.evaluate(el=>{const host=el.cloneNode(false) as HTMLElement;(host as any).__maskOriginalHost=el;host.dataset.maskPaintHost='';while(el.firstChild)host.append(el.firstChild);el.replaceWith(host);});
+  try{await capture('outer-fresh-same-children',1);}
+  finally{await editorPage.evaluate(()=>{const host=document.querySelector<HTMLElement>('[data-mask-paint-host]');if(host){const original=(host as any).__maskOriginalHost;while(host.firstChild)original.append(host.firstChild);host.replaceWith(original);}});}
+  await capture('outer-restored',1);
+  const pair=(a:string,b:string)=>({a,b,...nineDelta(raw.get(a)!,raw.get(b)!)});
+  const stages=['unmasked0','masked0','unmasked1','masked1','unmasked2'];
+  const comparisons=[...stages.map(s=>pair(s+'-main',s+'-editor')),...['main','editor'].flatMap(side=>[pair('unmasked0-'+side,'masked0-'+side),pair('unmasked0-'+side,'unmasked1-'+side),pair('masked0-'+side,'masked1-'+side),pair('unmasked1-'+side,'unmasked2-'+side)]),pair('outer-before','outer-fresh-same-children'),pair('outer-before','outer-restored')];
+  return {version:1,region:'Unmodified upper-right 9x9, x171..179/y0..8; includes x179,y5 and no label/glyph pixels',configs,captures,comparisons};
+ }finally{
+  await editorPage.evaluate(()=>{const host=document.querySelector<HTMLElement>('[data-mask-paint-host]');if(host){const original=(host as any).__maskOriginalHost;while(host.firstChild)original.append(host.firstChild);host.replaceWith(original);}});
+  await visibility(false);
+  for(let i=0;i<targets.length;i++){const restored=await targets[i].evaluate(el=>Array.from(el.querySelectorAll<HTMLElement>('button > span'),span=>({style:span.getAttribute('style'),qa:span.getAttribute('data-qa-visibility')})));if(JSON.stringify(restored)!==JSON.stringify(saved[i]))throw Error('Visibility diagnostic did not restore exact original attributes '+JSON.stringify({target:i,expected:saved[i],actual:restored}));}
+ }
+}
 export async function controlledPaintDiagnostic(mainPage:Page,editorPage:Page,main:Locator,editor:Locator){
  const targets=[main,editor],pages=[mainPage,editorPage];
  const configs=await Promise.all(targets.map(configuration));
