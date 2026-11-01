@@ -16,14 +16,17 @@ async function originalInactivePalette(page,kind:'main'|'editor',theme:string) {
     return {stripBackground:bg(strip),stripEffective:effective(strip),tabBackground:bg(tab),tabEffective:effective(tab),
       labelColor:getComputedStyle(label).color,labelBackground:bg(label),labelEffective:effective(label),closeColor:getComputedStyle(close).color,closeBackground:bg(close),closeEffective:effective(close)};
   },kind);
-  // Contours intentionally use the existing main-border token now. Keep every
-  // original background/foreground; separate raster tests verify the new stroke.
-  const {borderColor:_oldBorder,...normal}=originalPalettes[theme][kind].normal;
-  await page.mouse.move(100,500);expect(await read(),theme+' '+kind+' original inactive/strip normal palette').toEqual(normal);
+  // Main colors remain historical; editor chrome now shares the entire main
+  // palette, including foregrounds, while retaining transparent inner buttons.
+  const {borderColor:_oldBorder,...previous}=originalPalettes[theme][kind].normal;
+  const main=originalPalettes[theme].main.normal;
+  const normal=kind==='main'?previous:{...previous,stripBackground:main.stripEffective,stripEffective:main.stripEffective,
+    tabBackground:main.tabBackground,tabEffective:main.tabEffective,labelColor:main.labelColor,closeColor:main.closeColor,labelBackground:'rgba(0, 0, 0, 0)',closeBackground:'rgba(0, 0, 0, 0)',labelEffective:main.tabEffective,closeEffective:main.tabEffective};
+  await page.mouse.move(100,500);expect(await read(),theme+' '+kind+' reference inactive/strip normal palette').toEqual(normal);
   // Hover backgrounds intentionally brighten the entire tab now; retain the
   // original normal palette above and original foreground colors on hover.
-  await tab.locator('[role=tab]').hover();expect((await read()).labelColor,theme+' '+kind+' label hover foreground').toBe(originalPalettes[theme][kind].labelHover.labelColor);
-  await tab.locator('button:not([role=tab])').hover();expect((await read()).closeColor,theme+' '+kind+' close hover foreground').toBe(originalPalettes[theme][kind].closeHover.closeColor);
+  await tab.locator('[role=tab]').hover();expect((await read()).labelColor,theme+' '+kind+' label hover foreground').toBe(originalPalettes[theme].main.labelHover.labelColor);
+  await tab.locator('button:not([role=tab])').hover();expect((await read()).closeColor,theme+' '+kind+' close hover foreground').toBe(originalPalettes[theme].main.closeHover.closeColor);
 }
 
 test('main first middle and last tabs share one flush joined shape in every theme',async({page})=>{
@@ -108,7 +111,7 @@ test('editor first middle and last tabs share one flush joined shape and scrolli
         return {shape:{radius:css.borderRadius,before:getComputedStyle(el,'::before').content,after:getComputedStyle(el,'::after').content,background:css.backgroundColor},pathBackground:getComputedStyle(path).backgroundColor,
           leading:strip.firstElementChild!.getBoundingClientRect().left-content.getBoundingClientRect().left,top:bounds.top-shell.getBoundingClientRect().top,height:bounds.height,join:path.getBoundingClientRect().top-bounds.bottom,contentJoin:content.getBoundingClientRect().top-path.getBoundingClientRect().bottom};
       });
-      expect(geometry.leading,theme+' first editor-tab inset').toBe(4);expect(geometry.top,theme+' reference editor top gap').toBe(8);expect(geometry.height).toBe(40);
+      expect(geometry.leading,theme+' first editor-tab inset').toBe(3);expect(geometry.top,theme+' reference editor top gap').toBe(5);expect(geometry.height).toBe(37);
       expect(geometry.join).toBe(0);expect(geometry.contentJoin).toBe(0);expect(geometry.shape.background).toBe(geometry.pathBackground);
       expect(geometry.shape.before).toBe('none');expect(geometry.shape.after).toBe('none');
       if(expected)expect(geometry.shape,theme+' same editor selected shape at '+index).toEqual(expected);else expected=geometry.shape;
@@ -119,7 +122,7 @@ test('editor first middle and last tabs share one flush joined shape and scrolli
       await page.screenshot({path:path.join(output,'editor-'+theme+'.png')});
     }
   }
-  await page.setViewportSize({width:800,height:650});
+  await page.setViewportSize({width:320,height:650});
   const strip=page.locator('.editor-tabs');expect(await strip.evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);
   await strip.evaluate(el=>el.scrollLeft=el.scrollWidth);
   await page.keyboard.press('Tab');await page.locator('.editor-tab').last().locator('[data-editor-tab-close]').focus();

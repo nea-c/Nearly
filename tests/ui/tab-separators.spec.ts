@@ -6,7 +6,7 @@ const themes=['forest','light','dark','midnight','mint'];
 async function uniformLowerEdge(page:any,tabs:any,index:number){
  const samples=await tabs.evaluateAll((nodes:HTMLElement[])=>{
   const strip=nodes[0].parentElement!,end=strip.getBoundingClientRect().right;
-  return {border:getComputedStyle(strip).getPropertyValue('--border-main').trim()||'#ccd7e5',samples:nodes.flatMap((el,i)=>{
+  return {border:getComputedStyle(strip).getPropertyValue('--editor-tab-border').trim()||getComputedStyle(strip).getPropertyValue('--border-main').trim()||'#ccd7e5',samples:nodes.flatMap((el,i)=>{
    const r=el.getBoundingClientRect(),next=nodes[i+1]?.getBoundingClientRect();
    const center=Math.floor((r.top+r.bottom)/2);
    return [{kind:'tab',index:i,x:Math.floor((r.left+r.right)/2),y:Math.floor(r.bottom-1)},
@@ -35,7 +35,7 @@ async function verify(page:any,tabs:any,index:number){
  const baseline=await read(tabs);expect(baseline.map((t:any)=>t.visible)).toEqual([false,false,false,false,false]);
  fs.writeFileSync(path.join(output,baseline[0].marker?'main-observed.json':'editor-observed.json'),JSON.stringify(baseline,null,2));
  for(const [i,row] of baseline.entries()){expect(row.left).toBe('1px');expect(row.right).toBe('1px');expect(row.top).toBe('1px');expect(row.bottom).toBe(i===index?'0px':'1px');expect(row.radius).toBeGreaterThanOrEqual(4);}
- const spacing=await tabs.first().evaluate((el:HTMLElement)=>el.classList.contains('editor-tab')?4:3);
+ const spacing=3;
  for(let i=0;i<baseline.length-1;i++)expect(baseline[i+1].x-baseline[i].x-baseline[i].w,'reference intertab spacing').toBe(spacing);
  expect(await tabs.first().evaluate(el=>el.getBoundingClientRect().left-el.parentElement!.getBoundingClientRect().left),'first-tab inset matches intertab spacing').toBe(spacing);
  // The contour remains continuous while either target is hovered or focused.
@@ -71,7 +71,7 @@ test('editor tab contours preserve joined active tabs, dirty close targets and o
  await page.goto('/editor.html');const tabs=page.locator('.editor-tab');await expect(tabs).toHaveCount(5);const results:any[]=[];
  for(const theme of themes){await page.evaluate(t=>document.documentElement.dataset.theme=t,theme);for(const index of [0,2,4]){
   await tabs.nth(index).locator('[role=tab]').click();await page.locator('.text-editor:not([hidden]) textarea').fill('Generated edited sample');
-  const rows=await verify(page,tabs,index);expect(rows[index].h).toBe(40);for(const row of rows)expect(row.y).toBe(8);results.push({theme,index,rows});fs.writeFileSync(path.join(output,'editor-measurements.json'),JSON.stringify(results,null,2));
+  const rows=await verify(page,tabs,index);expect(rows[index].h).toBe(37);for(const row of rows)expect(row.y).toBe(5);results.push({theme,index,rows});fs.writeFileSync(path.join(output,'editor-measurements.json'),JSON.stringify(results,null,2));
   await expect(tabs.nth(index).locator('.editor-tab-dirty')).toBeVisible();await tabs.nth(index).locator('[data-editor-tab-close]').hover();await expect(tabs.nth(index).locator('.editor-tab-cross')).toBeVisible();await page.mouse.move(1100,850);
   if(index===4&&['forest','light','dark'].includes(theme))await page.screenshot({path:path.join(output,`editor-${theme}.png`)});
  }}

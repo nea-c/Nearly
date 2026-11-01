@@ -62,8 +62,10 @@ export async function mountTextEditorWindow(root: HTMLElement) {
   let cancelConfirmation: (() => void) | undefined;
   const closingTabs = new Set<string>();
   let refreshTail = Promise.resolve();
-  const activate = (token: string) => {
+  let selectionRevision = 0;
+  const activate = (token: string, selectedByUser = false) => {
     if (confirming || !documents.has(token)) return;
+    if (selectedByUser) selectionRevision++;
     active = token;
     for (const [key, tab] of documents) {
       tab.panel.hidden = key !== token;
@@ -225,7 +227,7 @@ export async function mountTextEditorWindow(root: HTMLElement) {
     mark.textContent = "●";
     mark.setAttribute("aria-hidden", "true");
     button.append(label);
-    button.onclick = () => activate(doc.token);
+    button.onclick = () => activate(doc.token, true);
     const cross = document.createElement("button");
     cross.className = "editor-tab-close";
     cross.dataset.editorTabClose = "";
@@ -241,6 +243,14 @@ export async function mountTextEditorWindow(root: HTMLElement) {
       e.stopPropagation();
       if (!closing) void closeTab(doc.token);
     };
+    // Native focus may leave a partially visible label alone when only a few
+    // pixels overflow. Reveal the whole tab, including its close target.
+    const revealTab = () => {
+      if (item === tabs.firstElementChild) tabs.scrollLeft = 0;
+      else item.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+    button.addEventListener('focus', revealTab);
+    cross.addEventListener('focus', revealTab);
     item.append(button, cross);
     tabs.append(item);
     const panel = document.createElement("section");
@@ -252,6 +262,10 @@ export async function mountTextEditorWindow(root: HTMLElement) {
     format.textContent = doc.encoding + " · " + doc.newline;
     const input = document.createElement("textarea");
     input.value = doc.text;
+    // Assigning a nonempty value places the native caret at its end. Set only
+    // a newly opened document to the beginning before its first focus; existing
+    // tabs retain their own selection and viewport when activated again.
+    input.setSelectionRange(0, 0);
     input.spellcheck = false;
     input.wrap = "off";
     input.maxLength = 1048576;
@@ -354,11 +368,14 @@ export async function mountTextEditorWindow(root: HTMLElement) {
     tab.update();
   };
   const refresh = (focus?: string) => {
+    const requestedSelection = selectionRevision;
     refreshTail = refreshTail.then(async () => {
       try {
         const list = await invoke("list_text_documents");
         for (const doc of list) add(doc);
-        if (focus && documents.has(focus)) activate(focus);
+        // A delayed read must not undo a newer explicit tab selection. Queued
+        // open events still activate in order when the user has not switched.
+        if (focus && requestedSelection === selectionRevision && documents.has(focus)) activate(focus);
         else if (!active && documents.size)
           activate(documents.keys().next().value!);
       } catch (e) {
@@ -386,7 +403,7 @@ export async function mountTextEditorWindow(root: HTMLElement) {
     const token = keys[next];
     if (token) {
       e.preventDefault();
-      activate(token);
+      activate(token, true);
       documents.get(token)?.button.focus();
     }
   };

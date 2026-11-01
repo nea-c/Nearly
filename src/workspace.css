@@ -105,7 +105,7 @@ tr:focus-visible {
   max-width: 240px;
   background: #dce5f1;
   border: 1px solid transparent;
-  border-radius: 7px 7px 0 0;
+  border-radius: var(--workspace-tab-radius, 8px) var(--workspace-tab-radius, 8px) 0 0;
   height: 36px;
   flex-shrink: 0;
 }
@@ -1569,8 +1569,8 @@ main {
 .connection-empty h1 { margin-bottom: 18px; color: #52657d; }
 .connection-status { color: #52657d; }
 .tabs { flex: 0 1 max(0px, calc(183px * var(--tab-count) - 3px)); max-width: none; width: max(0px, calc(183px * var(--tab-count) - 3px)); padding-left: 0; overflow-y: hidden; }
-.tab { flex: 1 1 180px; min-width: 108px; max-width: 180px; }
-.tab button[role="tab"] { padding-inline: 7px 2px; gap: 5px; }
+.tab { flex: 1 1 var(--workspace-tab-width, 180px); min-width: var(--workspace-tab-min-width, 108px); max-width: var(--workspace-tab-width, 180px); }
+.tab button[role="tab"] { padding: var(--workspace-tab-label-padding, 7px 2px 7px 7px); gap: 5px; }
 .tab button[role="tab"] > span:last-child { max-width: none; }
 .tab .dot { flex: none; }
 .tab [data-close] { flex: 0 0 28px; width: 28px; margin-right: 2px; }
@@ -2265,7 +2265,7 @@ main > .notice { flex: none; margin: 0; border-radius: 0; max-height: 100px; ove
 :root[data-compact-explorer="true"] .retained-sync-actions button { padding-block: 2px; }
 /* Fixed bookmark rows share the explorer's theme and retain one physical item per ID. */
 /* Leave 26px inside the fixed row for 24.5px buttons, matching the pair strip. */
-.side-bookmark-bar {display:flex;align-items:center;gap:4px;flex:none;height:31px;min-height:31px;box-sizing:border-box;min-width:0;padding:2px 6px;border-bottom:1px solid var(--border-main,#d2dce9);background:var(--surface-panel,#f7f9fc);font-size:11px;}
+.side-bookmark-bar {display:flex;align-items:center;gap:4px;flex:none;height:39px;min-height:39px;box-sizing:border-box;min-width:0;padding:6px 6px;border-bottom:1px solid var(--border-main,#d2dce9);background:var(--surface-panel,#f7f9fc);font-size:11px;}
 .side-bookmark-bar button {flex:none;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:3px 7px;font-size:11px;}
 :is(.side-bookmark-bar,.bookmark-bar) [data-bookmark-overflow] {width:26px;height:24px;padding:0;display:grid;place-items:center;}
 :is(.side-bookmark-bar,.bookmark-bar,.bookmark-tree-menu) [hidden] {display:none!important;}

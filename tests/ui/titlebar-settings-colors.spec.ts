@@ -4,7 +4,9 @@ const controls=['#settings-toggle','#window-minimize','#window-maximize'];
 async function appearance(page,selector:string,focus=false) {
   return page.locator(selector).evaluate((element,focus)=>{
     const css=getComputedStyle(element);
-    return {color:css.color,background:css.backgroundColor,...(focus?{
+    const disc=getComputedStyle(element,'::before');
+    const painted=disc.content!=='none'&&disc.content!=='normal'&&disc.opacity==='1'?disc.backgroundColor:css.backgroundColor;
+    return {color:css.color,background:painted,...(focus?{
       outlineColor:css.outlineColor,outlineStyle:css.outlineStyle,outlineWidth:css.outlineWidth,
     }:{})};
   },focus);
