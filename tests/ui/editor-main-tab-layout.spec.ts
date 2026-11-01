@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';import fs from 'node:fs';import path from 'node:path';
+import {controlledPaintDiagnostic} from './paint-diagnostic.js';
 const out=path.resolve('../editor-main-tab-layout/qa');fs.mkdirSync(out,{recursive:true});
 const themes=['light','dark','midnight','forest','mint'];
 test('editor tab design follows the main geometry and paint across themes, selection, hover and focus',async({page,context})=>{
@@ -7,7 +8,7 @@ test('editor tab design follows the main geometry and paint across themes, selec
  await page.goto('/');await expect(page.locator('#add-tab')).toBeVisible();for(let i=0;i<4;i++)await page.locator('#add-tab').click();
  const editor=await context.newPage();await editor.addInitScript(()=>{(window as any).__TAURI__={core:{invoke:async(cmd:string)=>{if(cmd==='register_window')return {label:'text-editor',ownedWorkspaceIds:[]};if(cmd==='load_settings')return {theme:'forest',language:'en'};if(cmd==='list_text_documents')return ['first','second','middle','fourth','last'].map(token=>({token,path:'/generated/'+token+'.js',side:'remote',connectionLabel:'Generated server',text:Array.from({length:32},(_,i)=>'const generatedLine'+i+' = '+i+';').join('\n'),encoding:'UTF-8',newline:'LF'}));}},event:{listen:async()=>()=>{}}};});
  await editor.goto('/editor.html');await expect(editor.locator('.editor-tab')).toHaveCount(5);
- const records:any[]=[],paint:any[]=[];
+ const records:any[]=[],paint:any[]=[];let plannedDiagnosed=false,failureDiagnosed=false;
  async function paintedDifference(main:any,edit:any){
   const elements=[main,edit],owners=[page,editor],boxes=await Promise.all(elements.map(el=>el.boundingBox()));
   // Keep real button backgrounds, borders and focus paint. Only semantic
@@ -38,7 +39,10 @@ test('editor tab design follows the main geometry and paint across themes, selec
     if(state==='focus'){await page.keyboard.press('Tab');await editor.keyboard.press('Tab');await main.locator('[role=tab]').focus();await edit.locator('[role=tab]').focus();}
     const m=await main.evaluate(measure),e=await edit.evaluate(measure);records.push({theme,selected,state,index,main:m,editor:e});fs.writeFileSync(path.join(out,'measurements.json'),JSON.stringify(records,null,2));
     expect.soft(e).toEqual(m);
-    if(selected===0||state==='normal'){const result=await paintedDifference(main,edit);paint.push({theme,selected,state,index,...result});fs.writeFileSync(path.join(out,'paint-differences.json'),JSON.stringify(paint,null,2));expect.soft(result.different,theme+'/'+selected+'/'+state+' actual contour/background/focus paint '+JSON.stringify(result)).toBe(0);}
+    if(selected===0||state==='normal'){const result=await paintedDifference(main,edit);paint.push({theme,selected,state,index,...result});fs.writeFileSync(path.join(out,'paint-differences.json'),JSON.stringify(paint,null,2));
+     const planned=!plannedDiagnosed&&theme==='forest'&&selected===2&&state==='normal',failed=!failureDiagnosed&&result.different>0;
+     if(planned||failed){if(planned)plannedDiagnosed=true;if(failed)failureDiagnosed=true;try{const diagnostic={theme,selected,state,index,...await controlledPaintDiagnostic(page,editor,main,edit)};const json=JSON.stringify(diagnostic);if(json.length>65536)throw Error('Diagnostic exceeds bounded log size');console.log('PAINT_CONTEXT_DIAGNOSTIC '+json);fs.writeFileSync(path.join(out,`controlled-paint-diagnostic-${theme}-${selected}-${state}.json`),json);}catch(error){console.log('PAINT_CONTEXT_DIAGNOSTIC_ERROR '+String(error));}}
+     expect.soft(result.different,theme+'/'+selected+'/'+state+' actual contour/background/focus paint '+JSON.stringify(result)).toBe(0);}
    }
   }
   await page.evaluate(()=>{(document.activeElement as HTMLElement)?.blur();});await editor.evaluate(()=>{(document.activeElement as HTMLElement)?.blur();});await page.mouse.move(1100,800);await editor.mouse.move(1100,800);await page.screenshot({path:path.join(out,`main-${theme}.png`)});await editor.screenshot({path:path.join(out,`editor-${theme}.png`)});
