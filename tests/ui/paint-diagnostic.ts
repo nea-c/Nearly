@@ -95,6 +95,30 @@ export async function visibilityMaskPaintDiagnostic(mainPage:Page,editorPage:Pag
   for(let i=0;i<targets.length;i++){const restored=await targets[i].evaluate(el=>Array.from(el.querySelectorAll<HTMLElement>('button > span'),span=>({style:span.getAttribute('style'),qa:span.getAttribute('data-qa-visibility')})));if(JSON.stringify(restored)!==JSON.stringify(saved[i]))throw Error('Visibility diagnostic did not restore exact original attributes '+JSON.stringify({target:i,expected:saved[i],actual:restored}));}
  }
 }
+// Inspect existing screenshots without another repaint or a DOM mutation.
+export async function capturedHistoryBorder(page:Page,pngs:string[],boxes:{x:number;y:number;width:number;height:number}[]){
+ const pair=await page.evaluate(async({pngs,boxes})=>Promise.all(pngs.map(async(png,i)=>{
+  const image=new Image();image.src='data:image/png;base64,'+png;await image.decode();
+  const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;const c=canvas.getContext('2d')!;c.drawImage(image,0,0);
+  const r=boxes[i],pixels=c.getImageData(r.x+r.width-9,r.y,9,9),corner=document.createElement('canvas');corner.width=9;corner.height=9;corner.getContext('2d')!.putImageData(pixels,0,0);
+  return {rgba:Array.from(pixels.data),point:Array.from(pixels.data.slice((5*9+8)*4,(5*9+9)*4)),png:corner.toDataURL('image/png').split(',')[1]};
+ })),{pngs,boxes});
+ return {main:pair[0],editor:pair[1],comparison:nineDelta(pair[0],pair[1])};
+}
+export async function outerHostHistoryDiagnostic(mainPage:Page,editorPage:Page,main:Locator,editor:Locator){
+ const before=await observeUnmaskedBorder(mainPage,editorPage,main,editor);
+ const originalChildren=await editor.evaluate(el=>{(window as any).__historyOriginalHost=el;(window as any).__historyOriginalChildren=Array.from(el.childNodes);return el.childNodes.length;});
+ try{
+  await editor.evaluate(el=>{const fresh=el.cloneNode(false) as HTMLElement;fresh.dataset.historyPaintHost='';while(el.firstChild)fresh.append(el.firstChild);el.replaceWith(fresh);});
+  const fresh=await observeUnmaskedBorder(mainPage,editorPage,main,editor);
+  await editorPage.evaluate(()=>{const fresh=document.querySelector<HTMLElement>('[data-history-paint-host]')!,original=(window as any).__historyOriginalHost;while(fresh.firstChild)original.append(fresh.firstChild);fresh.replaceWith(original);});
+  const restored=await observeUnmaskedBorder(mainPage,editorPage,main,editor);
+  return {before,fresh,restored,originalChildren};
+ }finally{
+  await editorPage.evaluate(()=>{const fresh=document.querySelector<HTMLElement>('[data-history-paint-host]'),original=(window as any).__historyOriginalHost;if(fresh){while(fresh.firstChild)original.append(fresh.firstChild);fresh.replaceWith(original);}if(!original||!Array.from(original.childNodes).every((el,i)=>el===(window as any).__historyOriginalChildren[i])||original.childNodes.length!==(window as any).__historyOriginalChildren.length)throw Error('History outer-host probe did not preserve children');delete (window as any).__historyOriginalHost;delete (window as any).__historyOriginalChildren;});
+  if(await editorPage.locator('[data-history-paint-host]').count())throw Error('History outer-host probe left a node behind');
+ }
+}
 export async function controlledPaintDiagnostic(mainPage:Page,editorPage:Page,main:Locator,editor:Locator){
  const targets=[main,editor],pages=[mainPage,editorPage];
  const configs=await Promise.all(targets.map(configuration));
