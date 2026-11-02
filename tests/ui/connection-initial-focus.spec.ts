@@ -1,4 +1,57 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+async function generatedConnection(page: Page) {
+  await page.addInitScript(() => {
+    (window as any).__TAURI__ = {core:{invoke:async(cmd) => {
+      if(cmd === "request_text_editor_origin_close") return true;
+      if(cmd === "load_settings") return {version:1,theme:"light",language:"en",profiles:[{id:"generated",name:"Generated SFTP",host:"generated.invalid",port:22,user:"fixture",mode:"sftp",auth:"key",keyFile:"generated.ppk",hostKey:"SHA256:fixture"}],history:{}};
+      if(cmd === "default_folder") return "C:\\fixture";
+    }}};
+  });
+  await page.goto("/");
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+}
+
+for(const method of ["plus", "enter", "space", "shortcut"] as const) {
+  test(`new connection tab initially focuses its passphrase via ${method}`, async({page}) => {
+    await generatedConnection(page);
+    const passphrase=page.locator("#connect-form [name=passphrase]");
+    await expect(passphrase).toHaveAttribute("type","password");
+    await expect(page.locator("#connect-form [name=keyFile]")).toHaveCount(0);
+    if(method === "plus") await page.locator("#add-tab").click();
+    else if(method === "enter" || method === "space") {await page.locator("#add-tab").focus();await page.keyboard.press(method === "enter" ? "Enter" : "Space");}
+    else {await page.locator("#settings-toggle").focus();await page.keyboard.press("Control+t");}
+    await expect(page.locator("[data-tab]")).toHaveCount(2);
+    await expect(passphrase).toBeFocused();
+  });
+}
+
+test("rapid new tabs focus only the latest, existing tabs and close preserve toolbar focus", async({page})=>{
+  await generatedConnection(page);
+  await page.evaluate(()=>{for(let i=0;i<3;i++)document.getElementById("add-tab")!.click();});
+  await expect(page.locator("[data-tab]")).toHaveCount(4);
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+  await page.locator("#settings-toggle").focus();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(page.locator("#settings-toggle")).toBeFocused();
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await expect(page.locator("#settings-toggle")).toBeFocused();
+  await page.keyboard.press("Control+w");
+  await expect(page.locator("[data-tab]")).toHaveCount(3);
+  await expect(page.locator("#settings-toggle")).toBeFocused();
+});
+
+test("a user focus change after creation survives settings redraw and return",async({page})=>{
+  await generatedConnection(page);
+  await page.evaluate(()=>{document.getElementById("add-tab")!.click();document.getElementById("settings-toggle")!.focus();});
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await expect(page.locator("#settings-toggle")).toBeFocused();
+  await page.locator("#settings-toggle").click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#settings-root")).toBeEmpty();
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await expect(page.locator("#connect-form [name=passphrase]")).not.toBeFocused();
+});
+
 test("initial SFTP connection screen focuses the key passphrase input", async ({
   page,
 }) => {
@@ -120,4 +173,36 @@ test("a user focus change before scheduled initial focus cancels it", async ({
       new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
   );
   await expect(page.locator("#other-field")).toBeFocused();
+});
+
+test("bootstrap replacement focuses the latest form once per owner",async({page})=>{
+  await fixture(page);
+  await page.evaluate(()=>{
+    const owner={};const f=(window as any).focusFixture;
+    const old=document.querySelector<HTMLFormElement>("#fixture-form")!;
+    f.show(old,{onceFor:owner});
+    const next=old.cloneNode(true) as HTMLFormElement;old.replaceWith(next);
+    f.show(next,{onceFor:owner});(window as any).initialOwner=owner;
+  });
+  await expect(page.locator("#fixture-form [name=passphrase]")).toBeFocused();
+  await page.evaluate(()=>{
+    const outside=document.createElement("input");outside.id="outside-field";document.querySelector("#focus-fixture")!.append(outside);outside.focus();
+    const old=document.querySelector<HTMLFormElement>("#fixture-form")!;const next=old.cloneNode(true) as HTMLFormElement;old.replaceWith(next);
+    (window as any).focusFixture.show(next,{onceFor:(window as any).initialOwner});
+  });
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await expect(page.locator("#outside-field")).toBeFocused();
+});
+
+test("cancelled initial attempt is not replayed by a delayed replacement",async({page})=>{
+  await fixture(page);
+  await page.evaluate(()=>{
+    const owner={};(window as any).initialOwner=owner;
+    const outside=document.createElement("input");outside.id="outside-field";document.querySelector("#focus-fixture")!.append(outside);
+    (window as any).focusFixture.show(document.querySelector("#fixture-form"),{onceFor:owner});outside.focus();
+  });
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await page.evaluate(()=>{const old=document.querySelector<HTMLFormElement>("#fixture-form")!;const next=old.cloneNode(true) as HTMLFormElement;old.replaceWith(next);(window as any).focusFixture.show(next,{onceFor:(window as any).initialOwner});});
+  await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+  await expect(page.locator("#outside-field")).toBeFocused();
 });

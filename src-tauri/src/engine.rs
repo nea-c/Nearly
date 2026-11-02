@@ -1376,6 +1376,10 @@ impl Engine {
 }
 
 #[cfg(test)]
+#[path="sync_start_badge_tests.rs"]
+mod sync_start_badge_tests;
+
+#[cfg(test)]
 mod window_taskbar_tests {
     use super::*;
     use crate::taskbar_status::TaskbarState as T;

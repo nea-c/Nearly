@@ -1290,10 +1290,7 @@ async fn start_sync(
     delete_removed: Option<bool>,
     recursive: Option<bool>,
 ) -> Result<(), String> {
-    { let mut ownership = state.ownership.lock().map_err(|_| "Ownership lock failed")?;
-      ownership.job_owner(window.label(), &id)?;
-      if let Some(workspace) = session_id.as_deref() { ownership.bind_job(window.label(), &id, workspace)?; }
-    }
+    bind_sync_start(&state, window.label(), &id, session_id.as_deref())?;
     let engine = state.engine.clone();
     let resolved = match resolve_credentials(
         &state.sessions,
@@ -1303,30 +1300,27 @@ async fn start_sync(
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
-            engine.record_start_failure(&id);
-            engine.discard_prepared_start(&id);
-            return Err(error);
+            return fail_prepared_sync_start(&state, &id, error);
         }
     };
     if resolved.lease.is_none() {
         if let Err(error) = guard_connection_pin(&app, &state, &resolved.profile) {
-            engine.record_start_failure(&id);
-            engine.discard_prepared_start(&id);
-            return Err(error);
+            return fail_prepared_sync_start(&state, &id, error);
         }
     }
     if let Some(lease) = resolved.lease.as_ref() {
-        let token = engine.prepared_start_token(&id)?;
+        let token = match engine.prepared_start_token(&id) {
+            Ok(token) => token,
+            Err(error) => return fail_prepared_sync_start(&state, &id, error),
+        };
         if let Err(error) = lease.link_stop(&token) {
-            engine.record_start_failure(&id);
-            engine.discard_prepared_start(&id);
-            return Err(error);
+            return fail_prepared_sync_start(&state, &id, error);
         }
     }
     let failure_engine = engine.clone();
     let failure_id = id.clone();
     state.ownership.lock().map_err(|_|"Ownership lock failed")?.describe_job(&id,serde_json::json!({"id":id,"profile":resolved.profile,"local":local,"remote":remote,"status":"running","pending":0,"sent":0,"speed":0,"latency":0,"logs":[],"exclusionRules":exclusion_rules.clone().unwrap_or_default(),"deleteRemoved":delete_removed.unwrap_or(false),"recursive":recursive.unwrap_or(true)}));
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let ResolvedCredentials {
             profile,
             secret,
@@ -1349,8 +1343,49 @@ async fn start_sync(
     .await
     .map_err(|_| {
         failure_engine.record_start_failure(&failure_id);
-        "Start worker failed"
-    })?
+        "Start worker failed".to_string()
+    }).and_then(|result| result);
+    complete_sync_start(&state, &failure_id, result)
+}
+fn fail_prepared_sync_start(state: &AppState, id: &str, error: String) -> Result<(), String> {
+    state.engine.record_start_failure(id);
+    state.engine.discard_prepared_start(id);
+    complete_sync_start(state,id,Err(error))
+}
+fn bind_sync_start(state: &AppState, label: &str, id: &str, workspace: Option<&str>) -> Result<(), String> {
+    let mut ownership=state.ownership.lock().map_err(|_|"Ownership lock failed")?;
+    ownership.job_owner(label,id)?;
+    if let Some(workspace)=workspace {
+        if let Err(error)=ownership.bind_job(label,id,workspace) {
+            // A rejected late bind must not leave an unclaimed preparation
+            // presenting as ongoing work. Claimed/running work stays visible.
+            state.engine.discard_prepared_start(id);
+            if !state.engine.window_busy(&[id.into()],&[])? {
+                ownership.finish_failed_start(id);
+                // Rejected binding cancels an unclaimed provisional request;
+                // unlike an actual start failure, it has no error to retain.
+                ownership.finish_job(id);
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+fn complete_sync_start(state: &AppState, id: &str, result: Result<(), String>) -> Result<(), String> {
+    if let Err(error)=&result {
+        // Same ownership→engine lock order as preparation and presentation.
+        // Never retire a descriptor while native work may still exist.
+        let mut ownership=state.ownership.lock().map_err(|_|format!("{error}; ownership cleanup failed"))?;
+        let busy=state.engine.window_busy(&[id.into()],&[]).map_err(|failure|format!("{error}; start state could not be reconciled: {failure}"))?;
+        if !busy {
+            if state.engine.taskbar_state_for(&[id.into()]).map_err(|failure|format!("{error}; failure state could not be reconciled: {failure}"))? == crate::taskbar_status::TaskbarState::Error {
+                ownership.finish_failed_start(id);
+            } else {
+                ownership.finish_job(id);
+            }
+        }
+    }
+    result
 }
 #[tauri::command]
 fn default_folder(app: tauri::AppHandle) -> Result<String, String> {

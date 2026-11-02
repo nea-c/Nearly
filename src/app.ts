@@ -1311,7 +1311,6 @@ function addWorkspace() {
     revealSelectedTab();
     active = w.id;
     restoreWorkspace();
-    render();
     openConnection(w);
   } catch (e) {
     message(e);
@@ -2606,7 +2605,6 @@ function render() {
         }${notice ? html`<div class="notice" role="alert">${esc(localizedNotice(notice))}<button id="dismiss" aria-label="通知を閉じる">×</button></div>` : ""}
       </main>
       ${statusbar(t)}`;
-  if(p)connectionFocus.show();
   if (!p) {
     let view = connectionViews.get(w.id);
     if (!view) {
@@ -2623,7 +2621,6 @@ function render() {
       renderConnection(view, state);
     }
     $("#connection-slot")!.replaceWith(view);
-    connectionFocus.show(view.querySelector<HTMLFormElement>('#connect-form')??undefined);
   }
   bindTabStrip({reorder:commitTabOrder,externalStart:windowRegistration?(id,grab,title)=>{void beginNativeTabDrag(id,grab,title);}:undefined,busy:()=>!initialized||!settingsAvailable||movingWorkspaces.size>0||!!dialog||selectionDrag||splitterDragging||closingWorkspaces.size>0});
   publishTabStrip();
@@ -2715,6 +2712,12 @@ function render() {
         document.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
     } finally { restoringTreeFocus = false; }
   }
+  // Render restoration is not a new user interaction. Schedule only after it,
+  // and only once per workspace so cached tabs/late redraws cannot steal focus.
+  connectionFocus.show(
+    !p ? connectionViews.get(w.id)?.querySelector<HTMLFormElement>('#connect-form') ?? undefined : undefined,
+    { onceFor: w },
+  );
 }
 const startingRetained = new Set<string>();
 const retainedFailures = new Map<string,string>();
@@ -4497,7 +4500,7 @@ function renderConnection(root: HTMLElement, d: ConnectionDialog) {
       `[data-connection-select="${CSS.escape(chosenId)}"]`,
     )
     ?.focus();
-  connectionFocus.show(form);
+  if (root.isConnected) connectionFocus.show(form);
 }
 
 
