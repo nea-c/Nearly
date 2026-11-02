@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]
-pub struct Job { pub id:String, pub workspace_id:String, pub job:Option<Value>, #[serde(skip)] stopped:bool }
+pub struct Job { pub id:String, pub workspace_id:String, pub job:Option<Value>, #[serde(skip)] stopped:bool, #[serde(skip)] attempt:u64, #[serde(skip)] settled:bool }
+struct PreparedJob { owner:String, attempt:u64 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct Transfer { pub token:String, pub workspace_id:String, pub source_label:String, pub target_label:String, pub phase:String, pub payload:Value, pub target_kind:String, pub target_index:Option<usize>, pub before_id:Option<String> }
@@ -15,7 +16,8 @@ pub struct Bootstrap { pub label:String, pub owned_workspace_ids:Vec<String>, pu
 #[derive(Default)]
 pub struct Registry {
     windows:HashSet<String>, closing:HashSet<String>, owners:HashMap<String,String>,
-    jobs:HashMap<String,Job>, provisional:HashMap<String,String>,
+    jobs:HashMap<String,Job>, provisional:HashMap<String,PreparedJob>,
+    next_attempt:u64,
     pub operations:HashMap<String,String>, pub probes:HashMap<String,String>,
     pub active_operations:HashSet<String>,
     pub cancelled_preparations:HashMap<String,String>,
@@ -79,13 +81,41 @@ impl Registry {
     pub fn mutable(&self,label:&str,id:&str)->Result<(),String>{self.owner(label,id)?;if self.pending(label){Err("Workspace transfer is pending".into())}else{Ok(())}}
     pub fn owned(&self,label:&str)->Vec<String>{self.owners.iter().filter(|(_,o)|o.as_str()==label).map(|(id,_)|id.clone()).collect()}
     pub fn has_stopped_sync(&self,label:&str)->bool{self.jobs.values().any(|j|j.stopped&&self.owners.get(&j.workspace_id).is_some_and(|owner|owner==label))}
-    pub fn job_ids(&self,label:&str)->Vec<String>{self.jobs.values().filter(|j|self.owners.get(&j.workspace_id).is_some_and(|o|o==label)).map(|j|j.id.clone()).chain(self.provisional.iter().filter(|(_,o)|o.as_str()==label).map(|(id,_)|id.clone())).collect()}
-    pub fn prepare_job(&mut self,label:&str,id:&str,workspace:Option<&str>)->Result<(),String>{self.registered(label)?;if self.pending(label){return Err("Window transfer is pending".into());}identifier(id)?;if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=w||j.job.is_some());}if self.jobs.len()+self.provisional.len()>=256&&!self.jobs.contains_key(id)&&!self.provisional.contains_key(id){return Err("Job descriptor limit reached".into());}if self.jobs.contains_key(id)||self.provisional.contains_key(id){self.job_owner(label,id)?;return Ok(());}if let Some(w)=workspace{self.mutable(label,w)?;self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:w.into(),job:None,stopped:false});}else{self.provisional.insert(id.into(),label.into());}Ok(())}
-    pub fn finish_job(&mut self,id:&str){if let Some(j)=self.jobs.get_mut(id){j.stopped|=j.job.is_some();j.job=None;}self.provisional.remove(id);}
-    pub fn describe_job(&mut self,id:&str,job:Value){if let Some(j)=self.jobs.get_mut(id){j.stopped=false;j.job=Some(job);}}
-    pub fn bind_job(&mut self,label:&str,id:&str,workspace:&str)->Result<(),String>{self.mutable(label,workspace)?;self.job_owner(label,id)?;self.jobs.retain(|old,j|old==id||j.workspace_id!=workspace||j.job.is_some());self.provisional.remove(id);self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:workspace.into(),job:None,stopped:false});Ok(())}
+    pub fn job_ids(&self,label:&str)->Vec<String>{self.jobs.values().filter(|j|self.owners.get(&j.workspace_id).is_some_and(|o|o==label)).map(|j|j.id.clone()).chain(self.provisional.iter().filter(|(_,job)|job.owner==label).map(|(id,_)|id.clone())).collect()}
+    pub fn prepare_job(&mut self,label:&str,id:&str,workspace:Option<&str>)->Result<(),String>{
+        self.registered(label)?;if self.pending(label){return Err("Window transfer is pending".into());}identifier(id)?;
+        if let Some(w)=workspace{self.mutable(label,w)?;}
+        // A repeated old request must not prune a newer pending descriptor.
+        if self.jobs.contains_key(id)||self.provisional.contains_key(id){self.job_owner(label,id)?;return Ok(());}
+        // An undescribed job can still be a pending native start. Only a
+        // confirmed completion may be pruned by a replacement preparation.
+        if let Some(w)=workspace{self.jobs.retain(|_,j|j.workspace_id!=w||!j.settled);}
+        if self.jobs.len()+self.provisional.len()>=256{return Err("Job descriptor limit reached".into());}
+        // Record chronology at preparation, including legacy unbound requests.
+        let attempt=self.next_attempt.checked_add(1).ok_or("Sync start generation exhausted")?;self.next_attempt=attempt;
+        if let Some(w)=workspace{
+            self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:w.into(),job:None,stopped:false,attempt,settled:false});
+        }else{self.provisional.insert(id.into(),PreparedJob{owner:label.into(),attempt});}Ok(())
+    }
+    pub fn finish_job(&mut self,id:&str){if let Some(j)=self.jobs.get_mut(id){j.stopped|=j.job.is_some();j.job=None;j.settled=true;}self.provisional.remove(id);}
+    pub fn finish_failed_start(&mut self,id:&str){
+        // A legacy unbound failure has no workspace replacement identity.
+        // Keep its owning window's genuine error instead of silently hiding it.
+        if !self.jobs.contains_key(id){return;}
+        self.finish_job(id);
+        let superseded=self.jobs.get(id).is_some_and(|old|self.jobs.values().any(|new|new.workspace_id==old.workspace_id&&new.attempt>old.attempt));
+        if superseded{self.jobs.remove(id);}
+    }
+    pub fn describe_job(&mut self,id:&str,job:Value){if let Some(j)=self.jobs.get_mut(id){j.stopped=false;j.settled=false;j.job=Some(job);}}
+    pub fn bind_job(&mut self,label:&str,id:&str,workspace:&str)->Result<(),String>{
+        self.mutable(label,workspace)?;self.job_owner(label,id)?;
+        let attempt=if let Some(job)=self.jobs.get(id){job.attempt}else{self.provisional.get(id).ok_or("Unknown prepared start")?.attempt};
+        if self.jobs.values().any(|j|j.workspace_id==workspace&&j.attempt>attempt){return Err("Sync start attempt was superseded".into());}
+        self.jobs.retain(|old,j|old==id||j.workspace_id!=workspace||!j.settled);self.provisional.remove(id);
+        self.jobs.insert(id.into(),Job{id:id.into(),workspace_id:workspace.into(),job:None,stopped:false,attempt,settled:false});Ok(())
+    }
     pub fn job_mutable(&self,label:&str,id:&str)->Result<(),String>{self.job_owner(label,id)?;if let Some(job)=self.jobs.get(id){self.mutable(label,&job.workspace_id)}else if self.pending(label){Err("Window transfer is pending".into())}else{Ok(())}}
-    pub fn job_owner(&self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;if let Some(j)=self.jobs.get(id){self.owner(label,&j.workspace_id)}else if self.provisional.get(id).is_some_and(|o|o==label){Ok(())}else{Err("Job belongs to another window".into())}}
+    pub fn job_owner(&self,label:&str,id:&str)->Result<(),String>{self.registered(label)?;if let Some(j)=self.jobs.get(id){self.owner(label,&j.workspace_id)}else if self.provisional.get(id).is_some_and(|job|job.owner==label){Ok(())}else{Err("Job belongs to another window".into())}}
     pub fn scoped(map:&mut HashMap<String,String>,label:&str,id:&str,create:bool)->Result<(),String>{identifier(id)?;match map.get(id){Some(o)if o==label=>Ok(()),Some(_)=>Err("Request belongs to another window".into()),None if create=>{map.insert(id.into(),label.into());Ok(())},_=>Err("Unknown request".into())}}
     pub fn begin(&mut self,label:&str,id:&str,payload:Value)->Result<Transfer,String>{
         self.mutable(label,id)?;validate_payload(&payload,id)?;
@@ -117,7 +147,7 @@ impl Registry {
     pub fn unseal(&mut self,label:&str){self.closing.remove(label);}
     pub fn release(&mut self,label:&str,id:&str)->Result<(),String>{self.mutable(label,id)?;self.jobs.retain(|_,j|j.workspace_id!=id);self.owners.remove(id);if self.watches.get(label).is_some_and(|w|w==id){self.watches.remove(label);}Ok(())}
     pub fn workspace_job_ids(&self,id:&str)->Vec<String>{self.jobs.values().filter(|j|j.workspace_id==id).map(|j|j.id.clone()).collect()}
-    pub fn closed(&mut self,label:&str){let owned=self.owned(label);self.windows.remove(label);self.closing.remove(label);self.jobs.retain(|_,j|!owned.contains(&j.workspace_id));self.provisional.retain(|_,o|o!=label);self.probes.retain(|_,o|o!=label);self.operations.retain(|_,o|o!=label);self.owners.retain(|_,o|o!=label);self.watches.remove(label);}
+    pub fn closed(&mut self,label:&str){let owned=self.owned(label);self.windows.remove(label);self.closing.remove(label);self.jobs.retain(|_,j|!owned.contains(&j.workspace_id));self.provisional.retain(|_,job|job.owner!=label);self.probes.retain(|_,o|o!=label);self.operations.retain(|_,o|o!=label);self.owners.retain(|_,o|o!=label);self.watches.remove(label);}
 }
 // Explicit structural allowlists reject credentials and arbitrary nested payloads.
 fn object<'a>(v:&'a Value,keys:&[&str])->Result<&'a serde_json::Map<String,Value>,String>{let m=v.as_object().ok_or("Transfer object required")?;if m.keys().any(|k|!keys.contains(&k.as_str())){return Err("Unknown transfer field".into());}Ok(m)}
