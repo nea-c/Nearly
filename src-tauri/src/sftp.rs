@@ -1581,11 +1581,21 @@ async fn upload_async(
         .map_err(|_| "Clock unavailable")?
         .as_nanos();
     let stage = format!("{parent}/.syncfiles-{id}-{stamp}-{unique}.part");
-        // directory_guard immediately below subsumes the no-create traversal:
-        // fresh root/ancestor type+symlink checks, permissions and canonical path.
-        // Creation still needs its own checked MKDIR/verification sequence.
-        if create_parent { checked_directory(&s.raw,parent,true).await?; }
-        let stage_parent = directory_guard(&s.raw,parent).await?;
+        // A present parent needs only the strict fresh walk. It subsumes the
+        // create-capable existence walk (and also checks permissions/canonical
+        // identity). Only explicit absence enters the original guarded MKDIR
+        // sequence; errors/types/symlinks never authorize creation. No result
+        // survives this upload, and commit still rechecks the parent afresh.
+        let stage_parent = if create_parent {
+            match inspect_directory(&s.raw,parent).await? {
+                DirectoryInspection::Present(stamp)=>stamp,
+                DirectoryInspection::Missing(_)=>{
+                    crate::file_ops::check(stop)?;
+                    checked_directory(&s.raw,parent,true).await?;
+                    directory_guard(&s.raw,parent).await?
+                },
+            }
+        }else{directory_guard(&s.raw,parent).await?};
         let target_attrs=match s.raw.lstat(target.clone()).await {
             Ok(a)=>{if !a.attrs.file_type().is_file()||a.attrs.is_symlink(){return Err("Remote target is not a regular file".into());}Some(a.attrs)},
             Err(SftpError::Status(status)) if status.status_code==StatusCode::NoSuchFile=>None,
