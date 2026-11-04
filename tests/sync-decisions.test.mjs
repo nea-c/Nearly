@@ -6,8 +6,12 @@ test('decision summary shares only bounded numeric metadata and anonymous IDs',(
  const text=syncDecisionSummary(input),v=JSON.parse(text);assert.equal(v.examples.length,12);assert.equal(v.counts.mtime_mismatch,4000);assert.equal(v.examples[0].remoteMinusLocalSeconds,1);assert(!text.includes('secret'));assert(!text.includes('credential'));assert(!text.includes('private'));assert(!text.includes('path'));assert(text.length<6000);
 });
 test('malformed reports and path-like IDs cannot leak into summary',()=>{
- assert.equal(syncDecisionSummary(undefined),'');assert.equal(syncDecisionSummary({version:3}), '');
+ assert.equal(syncDecisionSummary(undefined),'');assert.equal(syncDecisionSummary({version:4}), '');
  const v=JSON.parse(syncDecisionSummary({version:1,examples:[{id:'C:/private',reason:'mtime_mismatch'},{id:'f-0123456789abcdef',reason:'private-path'}]}));assert.deepEqual(v.examples,[]);
+});
+test('compatible v3 reports fixed tolerance and checklist policy without leaking supplied strings',()=>{
+ const text=syncDecisionSummary({version:3,precision:'secret',comparisonPolicy:'private',counts:{remote_newer_retained:2},examples:[]});
+ assert(text);const v=JSON.parse(text);assert.equal(v.version,3);assert.match(v.precision,/2-second tolerance/);assert.match(v.comparisonPolicy,/directory checklist/);assert(!text.includes('secret'));assert(!text.includes('private'));
 });
 
 test('policy v2 reports retained remote and conflicts with fixed precision and policy',()=>{

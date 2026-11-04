@@ -48,6 +48,7 @@ impl Serialize for Diagnostics {
     }
 }
 impl Diagnostics {
+    pub(crate) fn compatible_policy(&self) {if let Ok(mut r)=self.0.lock(){r.version=3;r.precision="UTC Unix seconds (SFTP v3), 2-second tolerance";r.comparison_policy="directory checklist; time priority with size tie-break; remote-newer retained";}}
     pub(crate) fn record(&self,path:&Path,reason:Reason,metadata:Metadata){
         // Diagnostics are best-effort and cannot turn a successful sync into a failure.
         let Ok(mut report)=self.0.lock()else{return;};let key=reason.key();
@@ -58,17 +59,21 @@ impl Diagnostics {
         let id=format!("f-{:016x}",hash.finish());report.examples.push(Example{id,reason:key,metadata});
     }
     pub(crate) fn compared(&self,path:&Path,metadata:Metadata){
+        let compatible=self.0.lock().map(|r|r.version==3).unwrap_or(false);
+        if compatible&&metadata.remote_size.is_none()&&metadata.remote_utc_seconds.is_none(){self.record(path,Reason::MissingRemote,metadata);return;}
         let mut mismatch=false;
         if metadata.local_size.is_none()||metadata.remote_size.is_none()||metadata.local_utc_seconds.is_none()||metadata.remote_utc_seconds.is_none(){
             self.record(path,Reason::MissingAttributes,metadata);mismatch=true;
         }
         if metadata.local_size.zip(metadata.remote_size).is_some_and(|(l,r)|l!=r){self.record(path,Reason::Size,metadata);mismatch=true;}
-        if metadata.local_utc_seconds.zip(metadata.remote_utc_seconds).is_some_and(|(l,r)|l!=r){self.record(path,Reason::Mtime,metadata);mismatch=true;}
+        if metadata.local_utc_seconds.zip(metadata.remote_utc_seconds).is_some_and(|(l,r)|if compatible{l.abs_diff(r)>2}else{l!=r}){self.record(path,Reason::Mtime,metadata);mismatch=true;}
         if !mismatch{self.record(path,Reason::Unchanged,metadata);}
     }
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]fn compatible_comparison_counts_missing_and_tolerated_unchanged_once(){let d=Diagnostics::default();d.compatible_policy();let p=Path::new("generated");for time in [98,99,100,101,102]{d.compared(p,Metadata::new(4,Some(100),Some(4),Some(time)));}d.compared(p,Metadata::new(4,Some(100),None,None));let v=serde_json::to_value(d).unwrap();assert_eq!(v["counts"]["metadata_unchanged"],5);assert_eq!(v["counts"]["remote_missing"],1);assert!(v["counts"]["mtime_mismatch"].is_null());assert!(v["counts"]["metadata_unavailable"].is_null());}
+    #[test]fn compatible_policy_reports_actual_tolerance_and_keeps_numbers_anonymous(){let d=Diagnostics::default();d.compatible_policy();d.record(Path::new("private/password.txt"),Reason::RetainedRemote,Metadata::new(469,Some(100),Some(469),Some(140)));let text=serde_json::to_string(&d).unwrap();let v:serde_json::Value=serde_json::from_str(&text).unwrap();assert_eq!(v["version"],3);assert!(v["precision"].as_str().unwrap().contains("2-second tolerance"));assert!(v["comparisonPolicy"].as_str().unwrap().contains("directory checklist"));assert!(!text.contains("private"));assert!(!text.contains("password"));}
     #[test] fn exact_reasons_precision_and_both_mismatches(){
         let d=Diagnostics::default();let p=Path::new("secret.txt");
         for m in [Metadata::new(4,Some(100),Some(4),Some(100)),Metadata::new(5,Some(100),Some(4),Some(100)),Metadata::new(4,Some(100),Some(4),Some(101)),Metadata::new(4,Some(100),None,None),Metadata::new(5,Some(100),Some(4),Some(99))]{d.compared(p,m);}

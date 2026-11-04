@@ -49,6 +49,10 @@ fn reparse(metadata: &std::fs::Metadata) -> bool {
 /// Emitted candidates are provisional: callers must not authorize deletion until
 /// this traversal AND the remote inventory succeed and root identity is rechecked.
 /// The callback retains ownership of the bounded pending queue and directory map.
+pub fn walk_scoped<F>(root:&Path,scope:&Path,stop:&AtomicBool,rules:&crate::exclusion::Rules,recursive:bool,mut emit:F)->Result<(),ScanError>where F:FnMut(PathBuf,bool)->Result<(),String>{
+ if scope.components().any(|p|!matches!(p,std::path::Component::Normal(_))){return Err(ScanError::at(scope,"Invalid local scan scope"))}
+ let(mut candidates,mut directories)=(0,0);walk_directory(&root.join(scope),root,stop,rules,recursive,recursive,&mut candidates,&mut directories,&mut emit)
+}
 pub fn walk<F>(
     root: &Path,
     stop: &AtomicBool,
@@ -184,6 +188,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]fn scoped_watch_scan_preserves_root_relative_rules_and_paths(){let root=fixture("watch-scope");std::fs::create_dir_all(root.join("nested/private")).unwrap();std::fs::write(root.join("nested/file"),b"file").unwrap();std::fs::write(root.join("nested/private/secret"),b"excluded").unwrap();let mut found=Vec::new();walk_scoped(&root,Path::new("nested"),&AtomicBool::new(false),&crate::exclusion::Rules::compile("/nested/private/").unwrap(),true,|p,d|{found.push((p,d));Ok(())}).unwrap();assert_eq!(found,vec![(PathBuf::from("nested/file"),false)]);}
 
     fn fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

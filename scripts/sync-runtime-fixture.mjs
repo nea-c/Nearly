@@ -12,7 +12,14 @@ let activeWrites=0,maxWrites=0,maxWritingFiles=0;const writingFiles=new Map();
 let failedStage=null,heldTarget=null;
 let rollingHeld=null;const rollingStages=new Set();
 const fixture=await createFixture(output,{
- observeRequest(operation){if(mode==='compare-snapshot-concurrent-close-last'&&operation==='CLOSE')concurrentCloses++;},
+ beforeSetStat(_op,filename){
+  if(mode==='compatible-time-failure')return 3;
+  // A direct small-file commit has no rename callback. Observe its ordered
+  // timestamp phase as well, or the fairness test cannot see successful peers.
+  const target='/'+path.relative(fixture.remote,filename).replaceAll('\\','/');
+  if(mode==='burst'&&target==='/upload/job/nested/b.txt'){commits.push({target,edits,phase:'direct-timestamp'});fs.writeFileSync(path.join(output,'commits.json'),JSON.stringify(commits));}
+ },
+ observeRequest(operation,_id,_connection,p){if(mode==='compatible-list-junction'&&operation==='OPENDIR'&&p==='/upload/job/nested')fs.writeFileSync(path.join(output,'escape-query'),'unexpected');if(mode==='compare-snapshot-concurrent-close-last'&&operation==='CLOSE')concurrentCloses++;},
  advertisedOpenHandles:mode==='compare-parallel-advertised-one'||mode==='compare-parallel-limits-unavailable'||mode==='compare-snapshot-concurrent-one'?1:mode==='compare-snapshot-concurrent-two'?2:undefined,
  rejectLimits:mode==='compare-parallel-limits-unavailable',
  beforeOpen(target){
@@ -21,6 +28,10 @@ const fixture=await createFixture(output,{
  },
  beforeRmdir(){if(mode==='compare-parallel-mirror'&&fixture.openFileHandles!==0){fs.writeFileSync(path.join(output,'delete-with-open-handles'),'unexpected');return 3;}},
  async beforeReadDir(target){
+  if(mode==='compatible-list-junction'&&path.basename(target??'')==='job'&&!fs.existsSync(path.join(output,'junction-ready'))){
+   const dir=path.join(fixture.remote,'upload/job/nested'),outside=path.join(fixture.remote,'other/escape');
+   fs.renameSync(dir,dir+'-saved');fs.mkdirSync(outside,{recursive:true});fs.writeFileSync(path.join(outside,'sentinel.txt'),'generated outside-selected-root sentinel');fs.symlinkSync(outside,dir,'junction');fs.writeFileSync(path.join(output,'junction-ready'),'generated');
+  }
   if(mode.startsWith('compare-snapshot-concurrent')){
    const name=path.basename(target??'');const n=(concurrentReads.get(name)??0)+1;concurrentReads.set(name,n);
    if(name==='dir3'&&mode.endsWith('-unavailable'))return 3;
@@ -34,6 +45,8 @@ const fixture=await createFixture(output,{
   if(mode==='compare-snapshot-partial'&&listingReads>1)return 3;
  },
  mapReadDir(target,names){
+  if(mode==='compatible-list-parent-type'&&path.basename(target??'')==='job')for(const e of names)if(e.filename==='nested')e.attrs.mode=0o120777;
+  if(mode==='compatible-list-entry-type'&&path.basename(target??'')==='nested')for(const e of names)if(e.filename==='file0.txt')e.attrs.mode=0o40755;
   if(mode==='compare-snapshot-concurrent-budget')for(let i=0;i<1600;i++)names.push({filename:'generated-budget-'+i,longname:'generated-budget-'+i,attrs:{mode:0o100644,size:1,mtime:1700000000}});
   if(mode==='compare-snapshot-attrs-unknown')for(const entry of names){delete entry.attrs.mode;delete entry.attrs.size;}
   if(mode==='compare-snapshot-entry-type')for(const entry of names)if(entry.filename==='file0.txt')entry.attrs.mode=0o120777;
@@ -41,6 +54,13 @@ const fixture=await createFixture(output,{
   return names;
  },
  async beforeWrite(target){
+  if((mode==='lookahead-hold'||mode==='lookahead-fail')&&target.endsWith('/a.txt')){
+   fs.writeFileSync(path.join(output,'lookahead-current-held'),'generated');
+   const started=Date.now();while(!fs.existsSync(path.join(output,'release-lookahead'))){if(Date.now()-started>30000)return 4;await new Promise(r=>setTimeout(r,5));}
+   if(mode==='lookahead-fail')return 3;
+  }
+
+  if(mode==='compatible-serial-fail')return 3;
   if(mode==='compare-parallel-rolling'){
    rollingStages.add(target);
    if(!rollingHeld){rollingHeld=target;fs.writeFileSync(path.join(output,'rolling-held'),'');}
@@ -164,7 +184,7 @@ const fixture=await createFixture(output,{
 // Keep filesystem failure evidence before sending an SFTP error; status is unchanged.
 const recordErrors=fixture.fileSystemErrors.push.bind(fixture.fileSystemErrors);
 fixture.fileSystemErrors.push=(...errors)=>{const count=recordErrors(...errors);fs.writeFileSync(path.join(output,'filesystem-errors.json'),JSON.stringify(fixture.fileSystemErrors));return count;};
-if(mode.startsWith('compare'))setInterval(()=>{
+if(mode.startsWith('compare')||mode.startsWith('compatible')||mode.startsWith('lookahead'))setInterval(()=>{
  if(mode==='compare-snapshot-policy-reconnect'&&fs.existsSync(path.join(output,'request-disconnect'))&&!fs.existsSync(path.join(output,'disconnected'))){
   // Drop the old transport, then permit a new SSH handshake. Other modes that
   // model a persistent outage intentionally keep disconnect()'s unavailable flag.
