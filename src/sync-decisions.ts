@@ -4,7 +4,7 @@ const reasons=['size_mismatch','mtime_mismatch','metadata_unavailable','remote_m
 export function syncDecisionSummary(input:unknown):string {
   if(!input||typeof input!=='object')return '';
   const value=input as Record<string,unknown>;
-  if(value.version!==1&&value.version!==2)return '';
+  if(value.version!==1&&value.version!==2&&value.version!==3)return '';
   const counts=value.counts&&typeof value.counts==='object'?value.counts as Record<string,unknown>:{};
   const numeric=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)?n:null;
   const safeCounts=Object.fromEntries(reasons.filter(r=>numeric(counts[r])!==null).map(r=>[r,counts[r]]));
@@ -14,5 +14,5 @@ export function syncDecisionSummary(input:unknown):string {
     if(typeof e.id!=='string'||!/^f-[0-9a-f]{16}$/.test(e.id)||!reasons.includes(e.reason as typeof reasons[number]))return [];
     return [{id:e.id,reason:e.reason,...Object.fromEntries(['localSize','remoteSize','localUtcSeconds','remoteUtcSeconds','remoteMinusLocalSeconds'].map(k=>[k,numeric(e[k])]))}];
   });
-  return JSON.stringify({version:value.version,precision:value.version===1?'UTC Unix seconds (SFTP v3), exact equality':'UTC Unix seconds (SFTP v3), no tolerance',...(value.version===2?{comparisonPolicy:'initial local-newer; watch content changes with remote baseline'}:{}),counts:safeCounts,examples},null,2);
+  return JSON.stringify({version:value.version,precision:value.version===3?'UTC Unix seconds (SFTP v3), 2-second tolerance':value.version===1?'UTC Unix seconds (SFTP v3), exact equality':'UTC Unix seconds (SFTP v3), no tolerance',...(value.version===3?{comparisonPolicy:'directory checklist; time priority with size tie-break; remote-newer retained'}:value.version===2?{comparisonPolicy:'initial local-newer; watch content changes with remote baseline'}:{}),counts:safeCounts,examples},null,2);
 }

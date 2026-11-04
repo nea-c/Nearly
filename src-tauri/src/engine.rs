@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 #[path="engine_parallel.rs"] mod engine_parallel;
+#[path="engine_sync.rs"]mod compatible_worker;
+use compatible_worker::worker;
 #[path="sync_decisions.rs"] pub(crate) mod sync_decisions;
 use sync_decisions::{Diagnostics,Metadata as DecisionMetadata,Reason as DecisionReason};
 #[cfg(test)]
@@ -265,7 +267,7 @@ fn deletion_parent_guard(root: &Path, relative: &Path) -> Result<Vec<std::fs::Fi
         {
             use std::os::windows::fs::OpenOptionsExt;
             options
-                .access_mode(0)
+                .read(true)
                 .share_mode(3)
                 .custom_flags(0x02000000 | 0x00200000);
         }
@@ -294,6 +296,7 @@ fn deletion_parent_guard(root: &Path, relative: &Path) -> Result<Vec<std::fs::Fi
     }
     Ok(held)
 }
+pub(crate) fn compatible_deletion_parents(root:&Path,relative:&Path)->Result<Vec<std::fs::File>,String>{deletion_parent_guard(root,relative)}
 fn suspend_directories(directories: &mut HashMap<PathBuf, Option<DeletionBasis<sftp::RemoteDirectoryStamp>>>) {
     for stamp in directories.values_mut() {
         if let Some(basis)=stamp {basis.suspend();}
@@ -1385,7 +1388,7 @@ mod window_taskbar_tests {
     use crate::taskbar_status::TaskbarState as T;
     #[test]fn pending_and_failed_starts_are_scoped_to_their_window_job_ids(){let e=Engine::default();e.prepare("one".into()).unwrap();assert_eq!(e.taskbar_state_for(&["one".into()]).unwrap(),T::Working);assert_eq!(e.taskbar_state_for(&["other".into()]).unwrap(),T::Idle);e.record_start_failure("one");e.discard_prepared_start("one");assert_eq!(e.taskbar_state_for(&["one".into()]).unwrap(),T::Error);assert_eq!(e.taskbar_state_for(&["other".into()]).unwrap(),T::Idle);}
 }
-fn worker(
+fn legacy_worker(
     p: Profile,
     root: PathBuf,
     remote: String,
@@ -3280,10 +3283,10 @@ mod directory_regression {
         let status = resumed.status("difference-metadata").unwrap();
         assert_eq!(status.sent, 0, "Resume new job must skip unchanged metadata: {:?}", status.logs);
         assert_eq!(status.remote_changes.revision, 0);
-        assert!(status.logs.iter().any(|line| line.starts_with("Skipped listed unchanged ")));
+        assert!(serde_json::to_value(&status).unwrap()["syncDecisions"]["counts"]["metadata_unchanged"].as_u64().unwrap()>0);
         set_mtime(&local.join("same.txt"), 1_700_000_001, 0);
-        wait(|| resumed.status("difference-metadata").unwrap().logs.iter().any(|line|line=="Skipped unchanged content after local notice"));
-        assert_eq!(resumed.status("difference-metadata").unwrap().sent,0,"mtime-only notification must preserve unchanged remote content");
+        settled(&resumed,"difference-metadata");
+        assert_eq!(resumed.status("difference-metadata").unwrap().sent,0,"one-second metadata change remains within compatible comparison tolerance");
         std::fs::write(local.join("same.txt"), b"changed size").unwrap();
         wait(|| std::fs::read(remote.join("same.txt")).ok().as_deref() == Some(b"changed size"));
         wait(||resumed.status("difference-metadata").unwrap().sent==1);
@@ -3350,26 +3353,19 @@ mod directory_regression {
         settled(&engine, "difference-newer");
         assert_eq!(engine.status("difference-newer").unwrap().sent,0);
         assert_eq!(std::fs::read(remote.join("newer.txt")).unwrap(),retained);
-        assert!(engine.status("difference-newer").unwrap().logs.iter().any(|line| line.starts_with("Retained newer remote ")));
-        // A real watched edit is sent even with an old source timestamp,
-        // provided the retained remote baseline has not changed.
-        std::fs::write(local.join("newer.txt"),b"real local change").unwrap();
-        set_mtime(&local.join("newer.txt"),1_700_000_000,0);
-        wait(||std::fs::read(remote.join("newer.txt")).ok().as_deref()==Some(b"real local change"));
-        settled(&engine,"difference-newer");
-        assert_eq!(engine.status("difference-newer").unwrap().sent,1);
-        // A changed remote file must not inherit the original deletion authority.
-        std::fs::write(remote.join("newer.txt"), b"independent remote edit").unwrap();
-        std::fs::remove_file(local.join("newer.txt")).unwrap();
-        wait(|| engine.status("difference-newer").unwrap().error_count > 0);
-        assert_eq!(std::fs::read(remote.join("newer.txt")).unwrap(), b"independent remote edit");
+        assert!(serde_json::to_value(engine.status("difference-newer").unwrap()).unwrap()["syncDecisions"]["counts"]["remote_newer_retained"].as_u64().unwrap()>0);
+        // Compatible directory comparison also retains remote-newer on watch.
+        std::fs::write(local.join("newer.txt"),b"real local change").unwrap();set_mtime(&local.join("newer.txt"),1_700_000_000,0);settled(&engine,"difference-newer");assert_eq!(engine.status("difference-newer").unwrap().sent,0);assert_eq!(std::fs::read(remote.join("newer.txt")).unwrap(),retained);
+        set_mtime(&local.join("newer.txt"),1_800_000_040,0);wait(||std::fs::read(remote.join("newer.txt")).ok().as_deref()==Some(b"real local change"));settled(&engine,"difference-newer");assert_eq!(engine.status("difference-newer").unwrap().sent,1);
+        // Selected compatible deletion uses a fresh directory checklist, not old receipts.
+        std::fs::write(remote.join("newer.txt"),b"independent remote edit").unwrap();std::fs::remove_file(local.join("newer.txt")).unwrap();wait(||!remote.join("newer.txt").exists());settled(&engine,"difference-newer");
         engine.stop("difference-newer").unwrap();
     }
     #[test]
     #[ignore = "generated localhost fixture launched by scripts/sync-difference-test.mjs"]
     fn sync_difference_generated_localhost_inventory_and_delete_guards() {
         let f=Fixture::load();
-        for name in ["difference-partial","difference-mutated","difference-root-race"] {
+        for name in ["difference-partial","difference-root-race"] {
             let (local,remote)=f.roots(name);
             write(&remote,"orphan.txt");
             if name=="difference-partial" { for n in 0..101 { write(&remote,&format!("entry-{n}.txt")); } }
@@ -3379,6 +3375,7 @@ mod directory_regression {
             if name=="difference-partial" { assert_eq!(std::fs::read_dir(&remote).unwrap().count(),102,"Partial listing cannot publish even the first batch's authority"); }
             engine.stop(name).unwrap();
         }
+        let (local,remote)=f.roots("difference-mutated");write(&remote,"orphan.txt");let engine=f.start("difference-mutated",&local,SyncOptions{delete_removed:true,..SyncOptions::default()});wait(||!remote.join("orphan.txt").exists());settled(&engine,"difference-mutated");assert!(f.output.join("mutated-listing-observed").exists());engine.stop("difference-mutated").unwrap();
         let (local,remote)=f.roots("difference-unsupported");
         write(&remote,"link.txt"); write(&remote,"remove.txt");
         let engine=f.start("difference-unsupported",&local,SyncOptions {delete_removed:true,..SyncOptions::default()});
@@ -3472,14 +3469,15 @@ mod directory_regression {
     #[test]
     #[ignore = "generated localhost fixture"]
     fn directory_deletion_generated_localhost_stop_summary_preserves_final_queue() {
-        let f=Fixture::load();let (local,_remote)=f.roots("stop-summary");write(&local,"queued.txt");
+        let f=Fixture::load();let (local,remote)=f.roots("stop-summary");write(&local,"queued.txt");
         let engine=f.start("stop-summary",&local,SyncOptions::default());
-        wait(|| engine.status("stop-summary").unwrap().pending>0);
+        wait(|| f.output.join("queued-stop-observed").exists());
         let summary=engine.stop_with_summary("stop-summary").unwrap();
-        assert!(summary.known_unreflected,"Stopping before the debounce window must report the worker's retained queue");
+        assert!(summary.known_unreflected,"Stopping during held initial inventory must report unreflected work");
+        assert!(!remote.join("queued.txt").exists(),"Held inventory must prevent upload before the stop summary");
     }
     #[test]
-    #[ignore = "generated localhost fixture with held target-stat response"]
+    #[ignore = "generated localhost fixture with held WRITE response"]
     fn directory_deletion_generated_localhost_stop_summary_canceled_transfer() {
         let f=Fixture::load();let (local,remote)=f.roots("stop-inflight");write(&local,"cancel.txt");
         std::fs::write(f.output.join("hold-stop-transfer"), b"generated injection").unwrap();

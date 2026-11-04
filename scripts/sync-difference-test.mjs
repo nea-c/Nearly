@@ -24,12 +24,26 @@ const fixture = await createFixture(output, {
       if (fs.existsSync(local)) fs.renameSync(local,local+'-original');
       fs.mkdirSync(local,{recursive:true});
     }
+  },
+  // Compatible sync does not issue the old per-target STAT. Inject at the
+  // actual OPEN/WRITE boundary so failure/cancel assertions still exercise I/O.
+  beforeOpen(p) {
+    if (p.endsWith('/trigger.txt') && !disconnected && fs.existsSync(path.join(output,'inject-disconnect'))) {
+      disconnected=true; throw Error('generated upload OPEN failure');
+    }
+  },
+  beforeWrite(p) {
     if (p.endsWith('/cancel.txt') && fs.existsSync(path.join(output,'hold-stop-transfer'))) {
-      fs.writeFileSync(path.join(output,'stop-transfer-observed'),'generated');
-      return new Promise(resolve => setTimeout(() => resolve(4), 3000));
+      fs.writeFileSync(path.join(output,'stop-transfer-observed'),'generated held WRITE');
+      return new Promise(resolve=>setTimeout(()=>resolve(4),3000));
     }
   },
   beforeReadDir(p) {
+    if (p && path.basename(p)==='stop-summary') {
+      fs.writeFileSync(path.join(output,'queued-stop-observed'),'generated held initial inventory');
+      return new Promise(resolve=>setTimeout(()=>resolve(4),3000));
+    }
+    if(p&&path.basename(p)==='difference-root-race'){const local=path.join(output,'difference-root-race');if(!fs.existsSync(local+'-original')){fs.renameSync(local,local+'-original');fs.mkdirSync(local);}}
     if (p && path.basename(p)==='difference-stop-inventory') {
       fs.writeFileSync(path.join(output,'inventory-stop-observed'),'generated');
       return new Promise(resolve=>setTimeout(()=>resolve(4),3000));
@@ -41,6 +55,7 @@ const fixture = await createFixture(output, {
     }
   },
   mapReadDir(p,names) {
+    if(path.basename(p)==='difference-mutated'&&names.some(n=>n.filename==='orphan.txt')){fs.writeFileSync(path.join(p,'orphan.txt'),'generated remote mutation after checklist metadata');fs.writeFileSync(path.join(output,'mutated-listing-observed'),'generated');}
     if (path.basename(p)==='difference-unsupported') {
       for (const name of names) if (name.filename === 'link.txt') name.attrs.mode = 0o120777;
       names.push({filename:'CON.txt',longname:'',attrs:{mode:0o100644,size:7,atime:1700000000,mtime:1700000000}});

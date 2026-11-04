@@ -43,27 +43,15 @@ fn initial_comparison_lists_only_requested_parent_once_without_mutation_authorit
  assert!(crate::sftp::comparison_snapshot(&mut connection,"/upload/job",&["../escape".into()],1,&stop).is_err());
 }
 #[test]
-fn comparison_pass_is_not_reused_after_restart_or_remote_file_change_and_absence(){
- let f=Fixture::start("compare-snapshot-restart");stable_comparison_candidates(&f);let e=Engine::default();
- f.start_job(&e,"listing",f.root.join("local"),"/upload/job",false);caught(&e,"listing",0);assert_eq!(e.status("listing").unwrap().sent,0);e.stop("listing").unwrap();
- fs::write(f.remote.join("upload/job/nested/file0.txt"),b"external different metadata").unwrap();fs::remove_file(f.remote.join("upload/job/nested/file1.txt")).unwrap();
- f.start_job(&e,"listing",f.root.join("local"),"/upload/job",false);let conflict=f.wait_failed(&e,"listing");assert_eq!(conflict["failure"]["operation"],"conflict");assert_eq!(conflict["sent"],0);assert_eq!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap(),b"external different metadata");e.stop("listing").unwrap();
- // Explicitly resolve toward a newer local source; a fresh pass must also
- // detect the independently missing remote peer rather than reuse old hints.
- let newer=fs::metadata(f.remote.join("upload/job/nested/file0.txt")).unwrap().modified().unwrap()+Duration::from_secs(40);
- fs::File::options().write(true).open(f.root.join("local/nested/file0.txt")).unwrap().set_times(fs::FileTimes::new().set_modified(newer)).unwrap();
- f.start_job(&e,"listing",f.root.join("local"),"/upload/job",false);caught(&e,"listing",2);assert_eq!(e.status("listing").unwrap().sent,2);for i in 0..8{assert_eq!(fs::read(f.remote.join(format!("upload/job/nested/file{i}.txt"))).unwrap(),b"stable");}e.stop("listing").unwrap();
- // A new same-name file/directory type cannot inherit the previous pass's hint.
- fs::remove_file(f.remote.join("upload/job/nested/file2.txt")).unwrap();fs::create_dir(f.remote.join("upload/job/nested/file2.txt")).unwrap();
- f.start_job(&e,"listing",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"listing");assert_eq!(s["sent"],0);assert!(f.remote.join("upload/job/nested/file2.txt").is_dir());e.stop("listing").unwrap();
+fn checklist_is_fresh_after_restart_and_retains_newer_remote(){
+ let f=Fixture::start("compare-snapshot-restart");stable_comparison_candidates(&f);let e=Engine::default();let root=f.root.join("local");f.start_job(&e,"listing",root.clone(),"/upload/job",false);caught(&e,"listing",0);assert_eq!(e.status("listing").unwrap().sent,0);e.stop("listing").unwrap();
+ let remote=f.remote.join("upload/job/nested");fs::write(remote.join("file0.txt"),b"external different metadata").unwrap();fs::remove_file(remote.join("file1.txt")).unwrap();f.start_job(&e,"listing",root.clone(),"/upload/job",false);caught(&e,"listing",1);assert_eq!(e.status("listing").unwrap().sent,1);assert_eq!(fs::read(remote.join("file0.txt")).unwrap(),b"external different metadata");assert_eq!(fs::read(remote.join("file1.txt")).unwrap(),b"stable");e.stop("listing").unwrap();
+ let newer=fs::metadata(remote.join("file0.txt")).unwrap().modified().unwrap()+Duration::from_secs(40);fs::File::options().write(true).open(root.join("nested/file0.txt")).unwrap().set_times(fs::FileTimes::new().set_modified(newer)).unwrap();f.start_job(&e,"listing",root.clone(),"/upload/job",false);caught(&e,"listing",1);assert_eq!(e.status("listing").unwrap().sent,1);for i in 0..8{assert_eq!(fs::read(remote.join(format!("file{i}.txt"))).unwrap(),b"stable");}e.stop("listing").unwrap();
+ fs::remove_file(remote.join("file2.txt")).unwrap();fs::create_dir(remote.join("file2.txt")).unwrap();f.start_job(&e,"listing",root,"/upload/job",false);let s=f.wait_failed(&e,"listing");assert_eq!(s["sent"],0);assert!(remote.join("file2.txt").is_dir());e.stop("listing").unwrap();
 }
 #[test]
-fn incomplete_listing_and_changed_parent_or_entry_type_publish_no_skip_or_write(){
- for mode in ["compare-snapshot-partial","compare-snapshot-parent","compare-snapshot-entry-type"]{
-  let f=Fixture::start(mode);stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"bad-list",f.root.join("local"),"/upload/job",false);
-  let s=f.wait_failed(&e,"bad-list");assert_eq!(s["sent"],0);assert!(!s["logs"].as_array().unwrap().iter().any(|s|s.as_str().unwrap().starts_with("Skipped unchanged")));
-  let m=f.metrics();for op in ["WRITE","REMOVE","RMDIR","EXTENDED"]{assert!(m["counts"][op].is_null(),"{mode}: {op}");}e.stop("bad-list").unwrap();
- }
+fn incomplete_checklist_or_listed_link_and_type_conflict_publish_no_write(){
+ for mode in ["compare-snapshot-partial","compatible-list-parent-type","compatible-list-entry-type"]{let f=Fixture::start(mode);stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"bad-list",f.root.join("local"),"/upload/job",true);let s=f.wait_failed(&e,"bad-list");assert_eq!(s["sent"],0);let m=f.metrics();for op in ["WRITE","REMOVE","RMDIR","EXTENDED"]{assert!(m["counts"][op].is_null(),"{mode}:{op}");}assert!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap()==b"stable");e.stop("bad-list").unwrap();}
 }
 #[test]
 fn comparison_listing_cancel_does_not_publish_cached_skips_or_mutate(){
@@ -73,25 +61,20 @@ fn comparison_listing_cancel_does_not_publish_cached_skips_or_mutate(){
  let m=f.metrics();for op in ["WRITE","REMOVE","RMDIR","EXTENDED"]{assert!(m["counts"][op].is_null());}
 }
 #[test]
-fn ambiguous_listing_discards_the_entire_pass_and_uses_fresh_comparison(){
- let f=Fixture::start("compare-snapshot-duplicate");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"duplicate",f.root.join("local"),"/upload/job",false);caught(&e,"duplicate",0);
- let m=f.metrics();assert!(m["counts"]["LSTAT"].as_u64().unwrap()>=64,"fallback must actually recompare files");assert!(m["counts"]["WRITE"].is_null());e.stop("duplicate").unwrap();
+fn ambiguous_checklist_refuses_mutation_instead_of_inventing_absence(){
+ let f=Fixture::start("compare-snapshot-duplicate");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"duplicate",f.root.join("local"),"/upload/job",true);let s=f.wait_failed(&e,"duplicate");assert_eq!(s["sent"],0);assert!(s["logs"].as_array().unwrap().iter().any(|s|s.as_str().unwrap().contains("ambiguous")));let m=f.metrics();for op in ["OPEN","WRITE","REMOVE","RMDIR"]{assert!(m["counts"][op].is_null());}e.stop("duplicate").unwrap();
 }
 #[test]
-fn external_target_type_change_after_comparison_is_checked_before_staging(){
- let f=Fixture::start("compare-snapshot-target-race");changed_worker_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"target-race",f.root.join("local"),"/upload/job",false);
- let s=f.wait_failed(&e,"target-race");assert_eq!(s["failure"]["operation"],"conflict");assert_eq!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap(),b"stable");e.stop("target-race").unwrap();
+fn listed_target_type_conflict_never_opens_or_truncates_target(){
+ let f=Fixture::start("compatible-list-entry-type");changed_worker_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"type",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"type");assert_eq!(s["sent"],0);assert_eq!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap(),b"stable");let m=f.metrics();assert!(m["counts"]["OPEN"].is_null());assert!(m["counts"]["WRITE"].is_null());e.stop("type").unwrap();
 }
 #[test]
-fn actual_junction_ancestor_is_refused_without_listing_or_querying_its_descendants(){
- let f=Fixture::start("compare-snapshot-junction");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"junction",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"junction");assert_eq!(s["sent"],0);
- assert!(f.root.join("server/junction-ready").exists());assert!(!f.root.join("server/escape-query").exists());assert_eq!(fs::read(f.remote.join("other/escape/sentinel.txt")).unwrap(),b"generated outside-selected-root sentinel");let m=f.metrics();assert!(m["counts"]["OPENDIR"].is_null());assert!(m["counts"]["WRITE"].is_null());e.stop("junction").unwrap();
+fn actual_listed_junction_is_refused_without_following_its_descendants(){
+ let f=Fixture::start("compatible-list-junction");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"junction",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"junction");assert_eq!(s["sent"],0);assert!(f.root.join("server/junction-ready").exists());assert_eq!(fs::read(f.remote.join("other/escape/sentinel.txt")).unwrap(),b"generated outside-selected-root sentinel");let m=f.metrics();assert_eq!(m["counts"]["OPENDIR"],1,"only selected root was opened; linked child is never followed");assert!(!f.root.join("server/escape-query").exists());assert!(m["counts"]["WRITE"].is_null());e.stop("junction").unwrap();
 }
 #[test]
-fn optional_listing_denial_falls_back_to_original_file_access_without_inventing_absence(){
- let f=Fixture::start("compare-snapshot-unavailable");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"no-list",f.root.join("local"),"/upload/job",false);caught(&e,"no-list",0);
- assert!(e.status("no-list").unwrap().logs.iter().any(|l|l.contains("using fresh per-file comparison")));assert!(f.metrics()["counts"]["WRITE"].is_null());e.stop("no-list").unwrap();
- fs::write(f.root.join("local/nested/file0.txt"),b"new local content with listing denied").unwrap();f.start_job(&e,"no-list",f.root.join("local"),"/upload/job",false);caught(&e,"no-list",1);assert_eq!(e.status("no-list").unwrap().sent,1);assert_eq!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap(),b"new local content with listing denied");e.stop("no-list").unwrap();
+fn mandatory_checklist_denial_stops_unchanged_and_changed_sources_without_mutation(){
+ let f=Fixture::start("compare-snapshot-unavailable");stable_comparison_candidates(&f);let e=Engine::default();for changed in [false,true]{if changed{fs::write(f.root.join("local/nested/file0.txt"),b"new local content").unwrap();}f.start_job(&e,"denied",f.root.join("local"),"/upload/job",true);let s=f.wait_failed(&e,"denied");assert_eq!(s["sent"],0);assert!(s["logs"].as_array().unwrap().iter().any(|s|s.as_str().unwrap().contains("listing incomplete")));assert_eq!(fs::read(f.remote.join("upload/job/nested/file0.txt")).unwrap(),b"stable");e.stop("denied").unwrap();}let m=f.metrics();for op in ["OPEN","WRITE","REMOVE","RMDIR"]{assert!(m["counts"][op].is_null());}
 }
 #[test]
 fn optional_snapshot_depth_bound_falls_back_without_rejecting_64_directory_source_paths(){
@@ -102,7 +85,7 @@ fn optional_snapshot_depth_bound_falls_back_without_rejecting_64_directory_sourc
 #[test]
 fn omitted_readdir_attributes_require_fresh_file_checks_and_cannot_hide_a_directory(){
  let f=Fixture::start("compare-snapshot-attrs-unknown");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"unknown-attrs",f.root.join("local"),"/upload/job",false);caught(&e,"unknown-attrs",0);
- let m=f.metrics();assert!(m["counts"]["LSTAT"].as_u64().unwrap()>=64);assert!(m["counts"]["WRITE"].is_null());e.stop("unknown-attrs").unwrap();
+ let m=f.metrics();assert!(m["counts"]["LSTAT"].as_u64().unwrap()>=8,"unknown entries require fresh metadata");assert!(m["counts"]["WRITE"].is_null());e.stop("unknown-attrs").unwrap();
  fs::remove_file(f.remote.join("upload/job/nested/file0.txt")).unwrap();fs::create_dir(f.remote.join("upload/job/nested/file0.txt")).unwrap();f.start_job(&e,"unknown-attrs",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"unknown-attrs");assert_eq!(s["sent"],0);assert!(f.remote.join("upload/job/nested/file0.txt").is_dir());e.stop("unknown-attrs").unwrap();
 }
 

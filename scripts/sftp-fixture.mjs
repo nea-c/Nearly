@@ -308,8 +308,12 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
           stream.on("WRITE", async (id, h, offset, data) => {
             writeRequests++;
             const entry=handles.get(h.toString("hex"));
+            if(!entry||entry.closing){stream.status(id,FAILURE);return;}
+            let settle;const pending=new Promise(resolve=>{settle=resolve;});
+            (entry.pendingWrites??=new Set()).add(pending);
+            try {
             const target=entry?.p ? '/'+path.relative(remote,entry.p).split(path.sep).join('/') : '';
-            const injected=await beforeWrite?.(target,offset,data);
+            const injected=beforeWrite ? await beforeWrite(target,offset,data) : undefined;
             if(stream.destroyed||handles.get(h.toString("hex"))!==entry)return;
             if (typeof injected==='number') {stream.status(id,injected);return;}
             try {
@@ -332,6 +336,8 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             } catch (e) {
               status(id, e);
             }
+            } catch(e){if(!stream.destroyed)status(id,e);}
+            finally{entry.pendingWrites.delete(pending);settle();}
           });
           stream.on("READ", async (id, h, offset, length) => {
             const entry=handles.get(h.toString("hex"));
@@ -344,8 +350,11 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               else stream.status(id, EOF);
             } catch (e) { status(id, e); }
           });
-          stream.on("FSTAT", (id, h) => {
+          stream.on("FSTAT", async (id, h) => {
             try {
+              const entry=handles.get(h.toString("hex"));
+              if(entry?.pendingWrites?.size)await Promise.all([...entry.pendingWrites]);
+              if(stream.destroyed)return;
               stream.attrs(
                 id,
                 attrs(fs.fstatSync(handles.get(h.toString("hex")).fd)),
@@ -354,9 +363,14 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               stream.status(id, FAILURE);
             }
           });
-          stream.on("CLOSE", (id, h) => {
+          stream.on("CLOSE", async (id, h) => {
             try {
               const e = handles.get(h.toString("hex"));
+              if(e)e.closing=true;
+              // SFTPv3 section6.1: earlier same-file effects precede CLOSE.
+              // Reply timers may still deliver WRITE acknowledgements later.
+              if(e?.pendingWrites?.size)await Promise.all([...e.pendingWrites]);
+              if(stream.destroyed)return;
               if (e?.fd !== undefined) {fs.closeSync(e.fd);openFileHandles--;}
               if (e?.list !== undefined) openDirectoryHandles--;
               handles.delete(h.toString("hex"));
@@ -395,6 +409,9 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             try {
               const entry = op === "FSETSTAT" ? handles.get(target.toString("hex")) : undefined;
               const filename = entry?.p ?? local(target);
+              const pending=[...handles.values()].filter(e=>e.p===filename).flatMap(e=>[...(e.pendingWrites??[])]);
+              if(pending.length)await Promise.all(pending);
+              if(stream.destroyed)return;
               const override = beforeSetStat ? await beforeSetStat(op, filename, a) : undefined;
               if (override !== undefined) { stream.status(id, override); return; }
               if (!Number.isInteger(a.atime) || !Number.isInteger(a.mtime)) throw Error("paired timestamps required");

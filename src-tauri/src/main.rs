@@ -7,6 +7,8 @@ mod browse_transport;
 mod connection_tree;
 mod drives;
 mod engine;
+
+mod parent_lookahead;
 mod initial_scan;
 #[cfg(test)]
 mod sync_runtime_tests;

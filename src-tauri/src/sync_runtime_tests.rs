@@ -2,6 +2,8 @@
 use crate::{engine::{Engine,SyncOptions},sftp::Profile};
 use std::{fs,io::{BufRead,BufReader},path::{Path,PathBuf},process::{Child,Command,Stdio},thread,time::{Duration,Instant}};
 struct Fixture { child:Child, root:PathBuf, remote:PathBuf, profile:Profile, secret:String }
+#[path="sync_compatible_integration_tests.rs"]mod sync_compatible_integration_tests;
+#[cfg(windows)]#[path="sync_engine_lookahead_tests.rs"]mod sync_engine_lookahead_tests;
 #[path="sync_snapshot_tests.rs"] mod sync_snapshot_tests;
 #[path="sync_parallel_tests.rs"] mod sync_parallel_tests;
 #[path="sync_classification_tests.rs"] mod sync_classification_tests;
@@ -59,23 +61,17 @@ fn positive_batch_comparison_keeps_source_change_and_fresh_parent_guards(){
 }
 
 #[test]
-fn positive_batch_comparison_never_authorizes_commit_after_parent_becomes_symlink(){
- let f=Fixture::start("compare-upload-unsafe");changed_worker_comparison_candidates(&f);
- let e=Engine::default();f.start_job(&e,"positive-unsafe",f.root.join("local"),"/upload/job",false);
- let status=f.wait_failed(&e,"positive-unsafe");assert!(status["errorCount"].as_u64().unwrap()>0);
- for i in 0..8{assert_eq!(fs::read(f.remote.join(format!("upload/job/nested/file{i}.txt"))).unwrap(),b"stable");}
- assert!(f.metrics()["counts"]["EXTENDED"].is_null(),"no final rename after fresh parent guard refuses");
- e.stop("positive-unsafe").unwrap();
+fn large_staged_commit_revalidates_parent_after_writing(){
+ let f=Fixture::start("compare-upload-unsafe");changed_worker_comparison_candidates(&f);for i in 0..8{fs::write(f.root.join(format!("local/nested/file{i}.txt")),vec![65;131072]).unwrap();}
+ let e=Engine::default();f.start_job(&e,"unsafe",f.root.join("local"),"/upload/job",false);let s=f.wait_failed(&e,"unsafe");assert_eq!(s["sent"],0);
+ for i in 0..8{assert_eq!(fs::read(f.remote.join(format!("upload/job/nested/file{i}.txt"))).unwrap(),b"stable");}let m=f.metrics();assert!(m["counts"]["WRITE"].as_u64().unwrap()>0);assert!(m["counts"]["EXTENDED"].is_null());e.stop("unsafe").unwrap();
 }
 
 #[test]
 fn listing_unchanged_intentionally_does_not_lookup_later_denied_child(){
- let f=Fixture::start("compare-error-listed");stable_comparison_candidates(&f);
- let e=Engine::default();f.start_job(&e,"listed",f.root.join("local"),"/upload/job",true);
- let deadline=Instant::now()+Duration::from_secs(15);
- loop{let s=e.status("listed").unwrap();assert_eq!(s.error_count,0);if s.pending==0&&s.logs.iter().filter(|line|line.contains("Skipped listed unchanged")).count()==8{break;}assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
- assert!(!f.root.join("server/denied-child-lookup").exists());
- assert!(f.metrics()["counts"]["WRITE"].is_null());e.stop("listed").unwrap();
+ let f=Fixture::start("compare-error-listed");stable_comparison_candidates(&f);let e=Engine::default();f.start_job(&e,"listed",f.root.join("local"),"/upload/job",true);
+ let deadline=Instant::now()+Duration::from_secs(15);loop{let s=serde_json::to_value(e.status("listed").unwrap()).unwrap();assert!(s["failure"].is_null());if s["syncPhase"]=="caught_up"{assert_eq!(s["sent"],0);break;}assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
+ assert!(!f.root.join("server/denied-child-lookup").exists());assert!(f.metrics()["counts"]["WRITE"].is_null());e.stop("listed").unwrap();
 }
 
 #[test]
@@ -101,16 +97,9 @@ fn independent_comparison_pipeline_preserves_results_and_request_count_on_one_se
  }
 }
 #[test]
-fn comparison_batch_error_prevents_any_upload_and_reports_the_failing_file(){
- for mirror in [false,true]{
- let f=Fixture::start(if mirror{"compare-error-mirror"}else{"compare-error"});let root=f.root.join("local");changed_worker_comparison_candidates(&f);if mirror{fs::create_dir(root.join("owned")).unwrap();}
- let e=Engine::default();f.start_job(&e,"batch-error",root.clone(),"/upload/job",mirror);
- let failed=f.wait_failed(&e,"batch-error");let path=PathBuf::from(failed["failure"]["relativePath"].as_str().unwrap());assert_eq!(path.parent(),Some(Path::new("nested")));assert!(path.file_name().unwrap().to_string_lossy().starts_with("file"));
- assert!(!f.remote.join("upload/job/a.txt").exists());
- let metrics=f.metrics();assert!(metrics["counts"]["WRITE"].is_null());assert_eq!(metrics["authenticated"],1);assert_eq!(metrics["maxInflight"],4);assert!(failed["pending"].as_u64().unwrap()>0);
- if mirror{assert!(f.remote.join("upload/job/owned").is_dir());fs::remove_dir(root.join("owned")).unwrap();}fs::write(root.join("later.txt"),b"after failure").unwrap();thread::sleep(Duration::from_millis(700));assert!(!f.remote.join("upload/job/later.txt").exists());if mirror{assert!(f.remote.join("upload/job/owned").is_dir());}
- let after=f.metrics_for("after");for op in ["WRITE","REMOVE","RMDIR","RENAME","EXTENDED"]{assert_eq!(metrics["counts"][op],after["counts"][op],"{op} advanced after failure stopComplete");}e.stop("batch-error").unwrap();
- }
+fn checklist_write_error_prevents_followup_uploads_and_deletion(){
+ for mirror in [false,true]{let f=Fixture::start("compatible-serial-fail");changed_worker_comparison_candidates(&f);fs::create_dir_all(f.remote.join("upload/job/later")).unwrap();fs::write(f.remote.join("upload/job/later/delete.txt"),b"must survive failure or stop").unwrap();let root=f.root.join("local");let e=Engine::default();f.start_job(&e,"failed",root.clone(),"/upload/job",mirror);let s=f.wait_failed(&e,"failed");assert_eq!(s["sent"],0);assert!(s["pending"].as_u64().unwrap()>0);assert_eq!(s["failure"]["operation"],"upload");assert_eq!(PathBuf::from(s["failure"]["relativePath"].as_str().unwrap()),PathBuf::from("nested/file0.txt"));
+ assert!(f.remote.join("upload/job/later/delete.txt").exists());let m=f.metrics();assert_eq!(m["counts"]["OPEN"],1);assert!(m["counts"]["WRITE"].as_u64().unwrap()>0);fs::write(root.join("after-error"),b"do not dispatch").unwrap();thread::sleep(Duration::from_millis(600));let a=f.metrics_for("after");for op in ["OPEN","WRITE","REMOVE","RMDIR","RENAME","EXTENDED"]{assert_eq!(m["counts"][op],a["counts"][op]);}assert!(!f.remote.join("upload/job/after-error").exists());e.stop("failed").unwrap();}
 }
 #[test]
 fn comparison_batch_cancel_discards_all_results_promptly(){
@@ -128,11 +117,9 @@ fn comparison_batch_cancel_discards_all_results_promptly(){
  assert!(f.metrics()["counts"]["WRITE"].is_null());
 }
 #[test]
-fn worker_cancel_during_comparison_batch_never_dispatches_followup_mutations(){
- let f=Fixture::start("compare-worker-cancel");let root=f.root.join("local");changed_worker_comparison_candidates(&f);fs::create_dir(root.join("owned")).unwrap();
- let e=Engine::default();f.start_job(&e,"batch-cancel",root.clone(),"/upload/job",true);
- let start=Instant::now();while !f.root.join("server/compare-observed").exists(){if start.elapsed()>=Duration::from_secs(20){panic!("batch marker missing: status={}, metrics={}",serde_json::to_value(e.status("batch-cancel").unwrap()).unwrap(),f.metrics());}thread::sleep(Duration::from_millis(5));}
- e.stop("batch-cancel").unwrap();let before=f.metrics();assert!(!f.remote.join("upload/job/a.txt").exists());assert!(f.remote.join("upload/job/owned").is_dir());fs::remove_dir(root.join("owned")).unwrap();fs::write(root.join("later.txt"),b"after stop").unwrap();thread::sleep(Duration::from_millis(700));assert!(!f.remote.join("upload/job/later.txt").exists());assert!(f.remote.join("upload/job/owned").is_dir());let after=f.metrics_for("after");for op in ["WRITE","REMOVE","RMDIR","RENAME","EXTENDED"]{assert_eq!(before["counts"][op],after["counts"][op],"{op} advanced after manual stop");}
+fn worker_cancel_during_checklist_never_dispatches_followup_mutations(){
+ let f=Fixture::start("compare-snapshot-cancel");changed_worker_comparison_candidates(&f);fs::create_dir_all(f.remote.join("upload/job/later")).unwrap();fs::write(f.remote.join("upload/job/later/delete.txt"),b"must survive failure or stop").unwrap();let root=f.root.join("local");let e=Engine::default();f.start_job(&e,"cancel",root.clone(),"/upload/job",true);let deadline=Instant::now()+Duration::from_secs(10);while !f.root.join("server/listing-held").exists(){assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
+ e.stop("cancel").unwrap();let before=f.metrics();for op in ["OPEN","WRITE","REMOVE","RMDIR"]{assert!(before["counts"][op].is_null());}assert!(f.remote.join("upload/job/later/delete.txt").exists());fs::write(root.join("later"),b"after stop").unwrap();thread::sleep(Duration::from_millis(600));assert!(!f.remote.join("upload/job/later").is_file());let after=f.metrics_for("after");for op in ["OPEN","WRITE","REMOVE","RMDIR"]{assert_eq!(before["counts"][op],after["counts"][op]);}
 }
 #[test]
 fn out_of_order_sftp_replies_remain_associated_with_each_file(){
@@ -194,12 +181,8 @@ fn simultaneous_source_change_and_disconnect_is_a_real_error(){
  let failed=f.wait_failed(&e,"network");assert_eq!(failed["errorCount"],1);assert!(!f.remote.join("upload/job/a.txt").exists());assert!(!e.status("network").unwrap().logs.iter().any(|s|s.contains("waiting to resend")));e.stop("network").unwrap();
 }
 #[test]
-fn post_commit_metadata_error_is_reported_committed_and_refreshes_target(){
- let f=Fixture::start("committed");let e=Engine::default();f.start_job(&e,"committed",f.root.join("local"),"/upload/job",true);
- let failed=f.wait_failed(&e,"committed");assert_eq!(failed["failure"]["commitState"],"committed");
- assert_eq!(fs::read(f.remote.join("upload/job/a.txt")).unwrap(),vec![65;1024*1024]);
- assert_eq!(failed["sent"],1);assert!(!failed["remoteChanges"]["records"].as_array().unwrap().is_empty());
- assert!(!f.remote.join("upload/job/nested/b.txt").exists());assert!(f.remote.join("upload/job/later/delete.txt").exists());e.stop("committed").unwrap();
+fn staged_timestamp_error_keeps_old_final_and_prevents_success_or_deletion(){
+ let f=Fixture::start("compatible-time-failure");fs::write(f.remote.join("upload/job/a.txt"),b"old final").unwrap();let e=Engine::default();f.start_job(&e,"time",f.root.join("local"),"/upload/job",true);let s=f.wait_failed(&e,"time");assert_eq!(s["sent"],0);assert_eq!(s["failure"]["commitState"],"not_committed");assert_eq!(fs::read(f.remote.join("upload/job/a.txt")).unwrap(),b"old final");assert!(f.remote.join("upload/job/later/delete.txt").exists());assert!(!f.remote.join("upload/job/nested/b.txt").exists());assert!(s["logs"].as_array().unwrap().iter().any(|s|s.as_str().unwrap().contains("unique partial remains")));e.stop("time").unwrap();
 }
 #[test]
 fn lost_final_rename_result_is_unknown_never_claimed_unsent(){

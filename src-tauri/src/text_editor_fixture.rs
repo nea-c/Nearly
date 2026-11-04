@@ -47,7 +47,7 @@ fn sync_boundaries(out:&Path,remote:&Path,profile:crate::sftp::Profile,secret:&s
  start("resumed-other-tab").unwrap();
  if local_side{caught("resumed-other-tab");assert_eq!(fs::read(remote.join("docs/file.txt")).unwrap(),edited);assert_eq!(fs::read(&file).unwrap(),edited);}
  else{
-  let end=Instant::now()+Duration::from_secs(20);loop{let status=engine.status("resumed-other-tab").unwrap();if let Some(failure)=status.failure{assert_eq!(failure.operation,"conflict");assert_eq!(status.sent,0);break;}assert!(Instant::now()<end,"resumed sync must preserve the newer editor save");std::thread::sleep(Duration::from_millis(5));}
+  caught("resumed-other-tab");let status=engine.status("resumed-other-tab").unwrap();assert_eq!(status.sent,0);assert_eq!(status.error_count,0);assert!(status.failure.is_none());assert!(serde_json::to_value(&status).unwrap()["syncDecisions"]["counts"]["remote_newer_retained"].as_u64().unwrap_or(0)>0,"fresh comparison must retain the newer editor save instead of replaying stale local bytes");
   assert_eq!(fs::read(remote.join("docs/file.txt")).unwrap(),edited);assert_eq!(fs::read(&file).unwrap(),original);
  }
  engine.stop("resumed-other-tab").unwrap();assert!(broker.get("editor-window",&view.token).is_err());

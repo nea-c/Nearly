@@ -20,6 +20,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::AsyncReadExt;
+#[path="sftp_sync.rs"]pub(crate) mod compatible;
 #[path="comparison_snapshot.rs"] mod comparison_snapshot;
 #[path="sync_policy.rs"] mod sync_policy;
 pub(crate) use sync_policy::Policy as SyncPolicy;
