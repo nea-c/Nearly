@@ -15,7 +15,7 @@ pub(crate) enum Event{Plan(usize),Begin(&'static str),Uploaded(u64),Created,Dele
 pub(crate) type RetryHints=std::collections::HashMap<std::path::PathBuf,Option<(u64,u32)>>;
 pub(crate) enum Outcome{Complete,Rescan{relative:std::path::PathBuf,expected:Option<(u64,u32)>}}
 #[path="sftp_sync_cycle.rs"]mod cycle_impl;
-pub(crate) use cycle_impl::{cycle,cycle_with_validation,source as open_source_checked};
+pub(crate) use cycle_impl::{cycle,cycle_with_validation,source as open_source_checked,source_held as open_held_source_checked};
 /// The callback adapter retains its original per-action veto before comparison.
 /// Only a validator that explicitly combines that action check with source open
 /// may opt in; this does not cache any result for a later observation.
@@ -23,6 +23,7 @@ pub(crate) trait LocalValidation {
  fn check(&self,path:&Path,directory:bool)->Result<(),String>;
  fn shares_upload_check(&self)->bool{false}
  fn can_prepare_next(&self)->bool{false}
+ fn uses_held_source(&self)->bool{false}
  fn open_with_parents(&self,root:&Path,path:&Path,parents:Option<crate::parent_lookahead::Parents>)->Result<std::fs::File,String>{drop(parents);self.open_source(root,path)}
  fn open_source(&self,root:&Path,path:&Path)->Result<std::fs::File,String>{
   self.check(path,false)?;

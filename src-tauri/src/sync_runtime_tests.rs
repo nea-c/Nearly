@@ -12,6 +12,7 @@ impl Fixture {
  fn start(mode:&str)->Self {
   let root=std::env::temp_dir().join(format!("nearly-sync-runtime-{}-{}-{}",std::process::id(),mode,getrandom::u64().unwrap()));
   fs::create_dir(&root).unwrap();
+  fs::write(root.join("generated-held-source-prototype.marker"),b"GENERATED_LOCALHOST_ONLY").unwrap();
   fs::create_dir_all(root.join("local/nested")).unwrap();
   fs::write(root.join("local/a.txt"),vec![65;1024*1024]).unwrap();
   fs::write(root.join("local/nested/b.txt"),b"later upload").unwrap();
@@ -19,6 +20,7 @@ impl Fixture {
    .arg(root.join("server")).arg(mode).arg(root.join("local"))
    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
   let mut line=String::new();BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+  if line.trim().is_empty(){let before=child.try_wait();let _=child.kill();let after=child.wait();panic!("generated fixture startup EOF; before={before:?}, joined={after:?}");}
   let info:serde_json::Value=serde_json::from_str(&line).expect("fixture startup JSON");
   let profile=Profile{id:"synthetic".into(),name:"synthetic".into(),host:"127.0.0.1".into(),port:info["port"].as_u64().unwrap() as u16,user:"fixture".into(),auth:"key".into(),mode:"sftp".into(),key_file:info["keyFile"].as_str().unwrap().into(),host_key:info["hostKey"].as_str().unwrap().into()};
   Self{child,root,remote:PathBuf::from(info["remote"].as_str().unwrap()),profile,secret:info["passphrase"].as_str().unwrap().into()}
@@ -152,8 +154,9 @@ fn repeated_source_saves_converge_and_another_file_progresses(){
 }
 
 #[test]
-fn atomic_replace_and_post_commit_save_both_resend_without_hiding_remote_errors(){
- for mode in ["atomic","postchange","postsame"] {
+fn source_replacement_policy_and_post_commit_saves_preserve_correctness(){
+ // Windows replacement refusal/retry is exercised by held_source_tests.
+ for mode in if cfg!(windows){vec!["postchange","postsame"]}else{vec!["atomic","postchange","postsame"]} {
   let f=Fixture::start(mode);let e=Engine::default();f.start_job(&e,mode,f.root.join("local"),"/upload/job",true);
   let start=Instant::now();loop{
    if mode=="atomic"&&f.root.join("server/replace-request").exists()&&!f.root.join("server/replace-done").exists(){fs::rename(f.root.join("local/a.txt.next"),f.root.join("local/a.txt")).expect("native atomic replacement with upload handles open");fs::write(f.root.join("server/replace-done"),b"").unwrap();}
@@ -191,3 +194,7 @@ fn lost_final_rename_result_is_unknown_never_claimed_unsent(){
  assert_eq!(fs::read(f.remote.join("upload/job/a.txt")).unwrap(),vec![65;1024*1024]);
  assert_eq!(failed["sent"],0);assert!(!f.remote.join("upload/job/nested/b.txt").exists());assert!(f.remote.join("upload/job/later/delete.txt").exists());e.stop("uncertain").unwrap();
 }
+
+#[cfg(windows)]#[path="held_source_tests.rs"]mod held_source_tests;
+
+#[cfg(windows)]#[path="held_post_tests.rs"]mod held_post_tests;

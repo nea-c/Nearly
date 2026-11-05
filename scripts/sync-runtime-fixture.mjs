@@ -11,8 +11,10 @@ const concurrentReads=new Map();let concurrentCloses=0;
 let activeWrites=0,maxWrites=0,maxWritingFiles=0;const writingFiles=new Map();
 let failedStage=null,heldTarget=null;
 let rollingHeld=null;const rollingStages=new Set();
+let heldInputClaimed=false;
 const fixture=await createFixture(output,{
  beforeSetStat(_op,filename){
+  if(mode==='compatible-held-postset'&&!modified){modified=true;const source=path.join(local,'a.txt');fs.writeFileSync(source,Buffer.alloc(1024*1024,66));const time=new Date(Date.now()+7000);fs.utimesSync(source,time,time);fs.writeFileSync(path.join(output,'late-postset-edit'),'generated');}
   if(mode==='compatible-time-failure')return 3;
   // A direct small-file commit has no rename callback. Observe its ordered
   // timestamp phase as well, or the fairness test cannot see successful peers.
@@ -54,6 +56,8 @@ const fixture=await createFixture(output,{
   return names;
  },
  async beforeWrite(target){
+  if(mode.startsWith('compare-held')&&!heldInputClaimed){heldInputClaimed=true;fs.writeFileSync(path.join(output,'held-input-write'),'generated');const start=Date.now();while(!fs.existsSync(path.join(output,'release-held-input'))){if(Date.now()-start>30000)return 4;await new Promise(r=>setTimeout(r,5));}if(mode==='compare-held-fail')return 3;}
+
   if((mode==='lookahead-hold'||mode==='lookahead-fail')&&target.endsWith('/a.txt')){
    fs.writeFileSync(path.join(output,'lookahead-current-held'),'generated');
    const started=Date.now();while(!fs.existsSync(path.join(output,'release-lookahead'))){if(Date.now()-started>30000)return 4;await new Promise(r=>setTimeout(r,5));}

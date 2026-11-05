@@ -46,6 +46,7 @@ mod settings_location;
 mod settings_clients;
 mod sftp;
 mod source_change;
+mod source_hold;
 mod listing_hint;
 mod listing_absence;
 mod unified_settings;
