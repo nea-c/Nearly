@@ -21,7 +21,7 @@ export function createConnectionFocus() {
       const epoch = interaction;
       const input = form.querySelector<HTMLInputElement>("[name=passphrase]");
       requestAnimationFrame(() => {
-        if (shown !== form) {
+        if (shown !== form || (owner && shownOwner !== owner)) {
           if (owner && shownOwner !== owner) initialOwners.add(owner);
           return;
         }
