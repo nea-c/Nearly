@@ -21,6 +21,15 @@ for(const theme of ['light','dark'])for(const language of ['ja','en'] as const)t
  const footer=page.locator('.status-summary .status-icon'),active=()=>page.locator('[role=tab][aria-selected=true] .status-icon');
  let labelPosition:number|undefined,nameOffset:number|undefined;
  const check=async(state:string)=>{await expect(footer).toHaveAttribute('data-state',state);await expect(active()).toHaveAttribute('data-state',state);for(const e of [footer,active()])await expect.poll(async()=>{const b=await e.boundingBox();return b&&{width:b.width,height:b.height};}).toEqual({width:14,height:14});
+  for (const icon of [footer, active()]) {
+    const geometry = await icon.locator('svg').evaluate((svg: SVGSVGElement) => {
+      const shape = svg.firstElementChild as SVGGraphicsElement;
+      const matrix = svg.getCTM()!.inverse().multiply(shape.getCTM()!);
+      return {matrix:[matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].map(value => Math.round(value * 1e6) / 1e6), outerTransform:svg.getAttribute('transform')};
+    });
+    expect(geometry.matrix).toEqual(state === 'sync' ? [-1, 0, 0, 1, 16, 0] : [1, 0, 0, 1, 0, 0]);
+    expect(geometry.outerTransform).toBeNull();
+  }
  const x=await page.locator('#sync-state').evaluate(e=>e.getBoundingClientRect().x);labelPosition??=x;expect(x).toBe(labelPosition);
  const offset=await page.locator('[role=tab][aria-selected=true]').evaluate(e=>e.querySelector('span:not(.dot)')!.getBoundingClientRect().x-e.getBoundingClientRect().x);nameOffset??=offset;expect(offset).toBe(nameOffset);
  };
@@ -33,6 +42,8 @@ for(const theme of ['light','dark'])for(const language of ['ja','en'] as const)t
  await page.locator('#add-tab').click();await check('disconnected');await expect(page.locator('.tab .status-icon[data-state=sync]')).toHaveCount(1);
  await page.locator('#connect-form .primary').click();await check('connected');await expect(page.locator('.tab .status-icon[data-state=sync]')).toHaveCount(1);
  await page.locator('[role=tab]').first().click();await check('sync');
+ await page.locator('[role=tab][aria-selected=true]').screenshot({path:info.outputPath(`sync-tab-${theme}-${language}.png`)});
+ await page.locator('.status-summary').screenshot({path:info.outputPath(`sync-footer-${theme}-${language}.png`)});
  await page.screenshot({path:info.outputPath(`status-${theme}-${language}.png`)});
  await page.evaluate(()=>Object.assign((window as any).indicatorFixture.status,{status:'stopping',syncPhase:'stopping'}));await check('stopping');
  await page.evaluate(()=>Object.assign((window as any).indicatorFixture.status,{status:'failed',syncPhase:'error',errorCount:1}));await check('error');
