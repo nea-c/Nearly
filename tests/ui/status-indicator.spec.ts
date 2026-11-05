@@ -22,13 +22,13 @@ for(const theme of ['light','dark'])for(const language of ['ja','en'] as const)t
  let labelPosition:number|undefined,nameOffset:number|undefined;
  const check=async(state:string)=>{await expect(footer).toHaveAttribute('data-state',state);await expect(active()).toHaveAttribute('data-state',state);for(const e of [footer,active()])await expect.poll(async()=>{const b=await e.boundingBox();return b&&{width:b.width,height:b.height};}).toEqual({width:14,height:14});
   for (const icon of [footer, active()]) {
-    const geometry = await icon.locator('svg').evaluate((svg: SVGSVGElement) => {
+    // Status polling can replace an SVG between locator resolution and this
+    // read. Detached SVGs report identity CTMs in Chromium; inspect a live view.
+    await expect.poll(() => icon.locator('svg').evaluate((svg: SVGSVGElement) => {
       const shape = svg.firstElementChild as SVGGraphicsElement;
       const matrix = svg.getCTM()!.inverse().multiply(shape.getCTM()!);
-      return {matrix:[matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].map(value => Math.round(value * 1e6) / 1e6), outerTransform:svg.getAttribute('transform')};
-    });
-    expect(geometry.matrix).toEqual(state === 'sync' ? [-1, 0, 0, 1, 16, 0] : [1, 0, 0, 1, 0, 0]);
-    expect(geometry.outerTransform).toBeNull();
+      return {connected:svg.isConnected,state:svg.closest<HTMLElement>('.status-icon')?.dataset.state,matrix:[matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].map(value => Math.round(value * 1e6) / 1e6),outerTransform:svg.getAttribute('transform')};
+    })).toEqual({connected:true,state,matrix:state === 'sync' ? [-1, 0, 0, 1, 16, 0] : [1, 0, 0, 1, 0, 0],outerTransform:null});
   }
  const x=await page.locator('#sync-state').evaluate(e=>e.getBoundingClientRect().x);labelPosition??=x;expect(x).toBe(labelPosition);
  const offset=await page.locator('[role=tab][aria-selected=true]').evaluate(e=>e.querySelector('span:not(.dot)')!.getBoundingClientRect().x-e.getBoundingClientRect().x);nameOffset??=offset;expect(offset).toBe(nameOffset);
