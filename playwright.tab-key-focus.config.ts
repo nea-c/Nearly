@@ -1,0 +1,2 @@
+import { defineConfig } from '@playwright/test';
+export default defineConfig({testDir:'./tests/ui',outputDir:'test-results/tab-key-focus',timeout:30000,use:{baseURL:'http://127.0.0.1:15420',channel:'msedge',viewport:{width:1280,height:920}},webServer:{command:'node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 15420 --strictPort',url:'http://127.0.0.1:15420',reuseExistingServer:false,env:{NEARLY_ENABLE_MOCK:'1'}},reporter:'list'});

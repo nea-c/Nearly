@@ -3,6 +3,8 @@ import {closeTextEditor,closeTextEditorForWorkspace,openTextEditor} from './text
 import {textFileName} from './text-file-name.js';
 import {createConnectionFocus} from './connection-focus.js';
 const connectionFocus=createConnectionFocus();
+let connectionFocusWorkspace: object | undefined;
+let connectionFocusActivation = {};
 import { entryOpenTarget } from './entry-open.js';
 import {workspaceIndicator,statusIcon} from './status-indicator.js';
 import { deletionRescanLabels } from "./sync-rescan.js";
@@ -2712,11 +2714,15 @@ function render() {
         document.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
     } finally { restoringTreeFocus = false; }
   }
-  // Render restoration is not a new user interaction. Schedule only after it,
-  // and only once per workspace so cached tabs/late redraws cannot steal focus.
+  // Each tab activation gets one attempt. Redraws of the same workspace keep
+  // that attempt consumed so background updates cannot steal editing focus.
+  if (connectionFocusWorkspace !== w) {
+    connectionFocusWorkspace = w;
+    connectionFocusActivation = {};
+  }
   connectionFocus.show(
     !p ? connectionViews.get(w.id)?.querySelector<HTMLFormElement>('#connect-form') ?? undefined : undefined,
-    { onceFor: w },
+    { onceFor: connectionFocusActivation },
   );
 }
 const startingRetained = new Set<string>();
@@ -4163,7 +4169,10 @@ try {
     // Post-bootstrap acknowledgement is distinct from update probation's
     // pre-admission health proof. Only opt-in native QA uses this extra signal.
     if(installerQa&&native&&windowRegistration?.label==="main")await invoke("ack_update_restart_ready",{bootstrap:true});
-    openConnection(workspace());
+    // The initial connection view is already mounted. Native registration may
+    // finish after its focus attempt or after the user has started typing.
+    // Keep that view and its draft instead of replacing it during bootstrap.
+    render();
     for (const w of store.workspaces) if (w.connection) {
       void Promise.all([refresh("local", {}, w), refresh("remote", {}, w)]).catch(message);
     }

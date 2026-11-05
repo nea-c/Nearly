@@ -1,15 +1,38 @@
 import { test, expect, type Page } from "@playwright/test";
-async function generatedConnection(page: Page) {
-  await page.addInitScript(() => {
+async function generatedConnection(page: Page, registrationDelay = 0) {
+  await page.addInitScript((registrationDelay) => {
     (window as any).__TAURI__ = {core:{invoke:async(cmd) => {
       if(cmd === "request_text_editor_origin_close") return true;
+      if(cmd === "register_window" && registrationDelay) return {label:"main",freshProcess:true,ownedWorkspaceIds:[],workspaces:[]};
+      if(cmd === "register_workspace") {
+        await new Promise(resolve => setTimeout(resolve, registrationDelay));
+        (window as any).registrationFinished = true;
+      }
       if(cmd === "load_settings") return {version:1,theme:"light",language:"en",profiles:[{id:"generated",name:"Generated SFTP",host:"generated.invalid",port:22,user:"fixture",mode:"sftp",auth:"key",keyFile:"generated.ppk",hostKey:"SHA256:fixture"}],history:{}};
       if(cmd === "default_folder") return "C:\\fixture";
+      if(cmd === "connect_session") return {path:"/",entries:[]};
+      if(cmd === "list_local" || cmd === "list_remote" || cmd === "list_drives") return [];
     }}};
-  });
+  }, registrationDelay);
   await page.goto("/");
   await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
 }
+
+test("startup keeps passphrase focus after native workspace registration", async ({page}) => {
+  await generatedConnection(page, 200);
+  await expect.poll(() => page.evaluate(() => (window as any).registrationFinished)).toBe(true);
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+});
+
+test("typing and user-selected focus survive delayed startup completion", async ({page}) => {
+  await generatedConnection(page, 1500);
+  const input = page.locator("#connect-form [name=passphrase]");
+  await input.fill("generated dummy draft");
+  await page.locator("#settings-toggle").focus();
+  await expect.poll(() => page.evaluate(() => (window as any).registrationFinished)).toBe(true);
+  await expect(input).toHaveValue("generated dummy draft");
+  await expect(page.locator("#settings-toggle")).toBeFocused();
+});
 
 for(const method of ["plus", "enter", "space", "shortcut"] as const) {
   test(`new connection tab initially focuses its passphrase via ${method}`, async({page}) => {
@@ -25,18 +48,64 @@ for(const method of ["plus", "enter", "space", "shortcut"] as const) {
   });
 }
 
-test("rapid new tabs focus only the latest, existing tabs and close preserve toolbar focus", async({page})=>{
+test("rapid new tabs, existing tabs and close focus the displayed passphrase", async({page})=>{
   await generatedConnection(page);
   await page.evaluate(()=>{for(let i=0;i<3;i++)document.getElementById("add-tab")!.click();});
   await expect(page.locator("[data-tab]")).toHaveCount(4);
   await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
   await page.locator("#settings-toggle").focus();
   await page.keyboard.press("Control+Shift+Tab");
-  await expect(page.locator("#settings-toggle")).toBeFocused();
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
   await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
-  await expect(page.locator("#settings-toggle")).toBeFocused();
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
   await page.keyboard.press("Control+w");
   await expect(page.locator("[data-tab]")).toHaveCount(3);
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+});
+
+for (const method of ["click", "shortcut"] as const) {
+  test(`returning to disconnected tabs repeatedly focuses the passphrase via ${method}`, async ({page}) => {
+    await generatedConnection(page);
+    await page.locator("#connect-form [name=passphrase]").fill("dummy first");
+    await page.locator("#add-tab").click();
+    await page.locator("#connect-form [name=passphrase]").fill("dummy second");
+    for (let i = 0; i < 6; i++) {
+      if (method === "click") await page.locator("[data-tab]").nth(i % 2).click();
+      else { await page.locator("#settings-toggle").focus(); await page.keyboard.press("Control+Tab"); }
+      await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+      await expect(page.locator("#connect-form [name=passphrase]")).toHaveValue(i % 2 ? "dummy second" : "dummy first");
+    }
+  });
+}
+
+test("connected tabs keep toolbar focus when switching back", async ({page}) => {
+  await generatedConnection(page);
+  await page.locator("#connect-form .primary").click();
+  await expect(page.locator("#connect-form")).toHaveCount(0);
+  await page.locator("#add-tab").click();
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+  for (let i = 0; i < 3; i++) {
+    await page.locator("#settings-toggle").focus();
+    await page.keyboard.press("Control+Tab");
+    await expect(page.locator("#connect-form")).toHaveCount(0);
+    await expect(page.locator("#settings-toggle")).toBeFocused();
+    await page.keyboard.press("Control+Tab");
+    await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+  }
+});
+
+test("rapid return to the same cached form focuses only the latest activation", async ({page}) => {
+  await generatedConnection(page);
+  await page.locator("#add-tab").click();
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+  await page.evaluate(() => {
+    const tabs = document.querySelectorAll<HTMLElement>("[data-tab]");
+    for (const index of [0, 1, 0, 1]) tabs[index].click();
+  });
+  await expect(page.locator("#connect-form [name=passphrase]")).toBeFocused();
+  await page.locator("#settings-toggle").focus();
+  await page.locator("[data-tab]").nth(1).evaluate((tab: HTMLElement) => tab.click());
+  await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
   await expect(page.locator("#settings-toggle")).toBeFocused();
 });
 

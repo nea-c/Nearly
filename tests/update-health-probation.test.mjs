@@ -64,5 +64,7 @@ test('actual app orders rendered readiness before native workspace or connection
  const handshake=source.indexOf('await initializeUpdateRestart(');assert(handshake>=0);
  const registration=source.indexOf('await Promise.all(store.workspaces.map(w => registerWorkspace(w.id)))');
  assert(handshake<registration);assert(source.lastIndexOf('render();',handshake)>=0);
- assert(source.indexOf('openConnection(workspace());',handshake)>registration);
+ const admission=source.indexOf('initialized = true;',registration);
+ assert(admission>registration);
+ assert(source.indexOf('render();',admission)>admission);
 });
