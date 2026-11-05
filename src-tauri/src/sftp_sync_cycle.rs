@@ -10,7 +10,9 @@ fn reserved(name:&str)->bool{name.strip_prefix(".nearly-sync-").and_then(|s|s.st
  #[test]fn integration_review_reserves_only_generated_stage_shape(){assert!(reserved(".nearly-sync-0123456789abcdef0123456789abcdef.part"));for n in [".nearly-sync-not-a-stage.part",".nearly-sync-.part",".nearly-sync-0123456789abcdef0123456789abcdeg.part"]{assert!(!reserved(n),"ordinary name {n}");}}
  #[cfg(windows)]#[test]fn integration_review_source_parent_cannot_be_replaced_at_preopen_boundary(){let root=std::env::temp_dir().join(format!("nearly-review-parent-{}",getrandom::u64().unwrap()));std::fs::create_dir_all(root.join("dir")).unwrap();std::fs::write(root.join("dir/item"),b"authorized generated source").unwrap();let root=root.canonicalize().unwrap();let result=source(&root,Path::new("dir/item"),&|_,_|{assert!(std::fs::rename(root.join("dir"),root.join("moved")).is_err(),"checked source parent was replaceable before open");Ok(())});let mut f=result.unwrap();let mut bytes=Vec::new();f.read_to_end(&mut bytes).unwrap();assert_eq!(bytes,b"authorized generated source");drop(f);assert!(root.starts_with(std::env::temp_dir().canonicalize().unwrap()));std::fs::remove_dir_all(root).unwrap();}
 }
-pub(crate) fn source(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<std::fs::File,String>{
+pub(crate) fn source(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<std::fs::File,String>{source_with_sharing(root,rel,validate,7)}
+pub(crate) fn source_held(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<std::fs::File,String>{let f=source_with_sharing(root,rel,validate,3)?;crate::source_hold::opened();Ok(f)}
+fn source_with_sharing(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(),String>,sharing:u32)->Result<std::fs::File,String>{
  if !root.is_absolute()||rel.as_os_str().is_empty()||rel.components().any(|p|!matches!(p,std::path::Component::Normal(_))){return Err("Unsafe local source".into())}
  let _parents=crate::engine::compatible_deletion_parents(root,rel)?;if _parents.len()!=rel.components().count(){return Err("Local source parent disappeared before open".into())}
  #[cfg(windows)]{
@@ -21,7 +23,7 @@ pub(crate) fn source(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(
   // with this open; generic callback callers retain their separate veto.
   validate(Path::new(""),true)?;
   use std::os::windows::fs::OpenOptionsExt;
-  let file=std::fs::OpenOptions::new().read(true).share_mode(7).custom_flags(0x00200000).open(root.join(rel)).map_err(|_|"Local source open failed")?;
+  let file=std::fs::OpenOptions::new().read(true).share_mode(sharing).custom_flags(0x00200000).open(root.join(rel)).map_err(|_|"Local source open failed")?;
   // Validate the opened final object BEFORE returning a readable handle or any
   // remote OPEN. A final reparse/type replacement cannot inherit the parent proof.
   crate::source_change::Snapshot::capture(&file)?;
@@ -61,7 +63,11 @@ fn mkdir(c:&Connection,remote:&str,rel:&Path,stop:&AtomicBool)->Result<bool,Stri
  })
 }
 enum Transfer{Complete(u64),Changed{committed:Option<u64>,expected:Option<(u64,u32)>}}
-fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>,mut input:std::fs::File,next:Option<&Path>,prepared_next:&mut Option<crate::parent_lookahead::Parents>)->Result<Transfer,String>{
+fn observed_change(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result<(),String>,snapshot:&crate::source_change::Snapshot,input:&std::fs::File,bytes:u64,held:bool)->Result<bool,String>{
+ if held{return crate::source_hold::changed(snapshot,input,bytes,validate)}
+ match source(root,rel,validate){Ok(f)=>Ok(snapshot.changed(input,&f,bytes)?.is_some()),Err(_)=>Ok(true)}
+}
+fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>,mut input:std::fs::File,held:bool,next:Option<&Path>,prepared_next:&mut Option<crate::parent_lookahead::Parents>)->Result<Transfer,String>{
  let possible_final_change=std::cell::Cell::new(false);let snapshot=crate::source_change::Snapshot::capture(&input)?;let small=snapshot.length()<102400;let final_path=target(remote,rel)?;
  let mut attrs=FileAttributes::empty();let time=protocol_seconds(snapshot.modified()).ok_or("Local timestamp unsupported by SFTPv3")?;attrs.mtime=Some(time);attrs.atime=Some(time);if !small{attrs.permissions=existing.and_then(|e|e.permissions);}
  if !small&&existing.is_some()&&!c.posix_rename{return Err("Server lacks atomic replacement for large existing file; old target retained".into())}
@@ -81,7 +87,7 @@ fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,s
     *prepared_next=slot;
    }else{direct(&c.raw,h,final_path,bytes,attrs,stop).await?;}
    possible_final_change.set(true);
-   let changed=match source(root,rel,validate){Ok(f)=>snapshot.changed(&input,&f,count)?.is_some(),Err(_)=>true};
+   let changed=observed_change(root,rel,validate,&snapshot,&input,count,held)?;
    if changed{return Ok(Transfer::Changed{committed:Some(count),expected:Some((count,time))})}return Ok(Transfer::Complete(count))
   }
   let mut offset=0;let mut reason=None;let mut source_changed=false;loop{
@@ -91,7 +97,7 @@ fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,s
   }
   // Settle CLOSE even on cancel/error. Only a known closed handle permits cleanup.
   c.raw.close(h).await.map_err(|_|"Staged sync CLOSE outcome is uncertain; unique partial may remain")?;
-  let current=source(root,rel,validate);if reason.is_none(){match current{Ok(ref f)=>if snapshot.changed(&input,f,offset)?.is_some(){source_changed=true;reason=Some("Local staged source changed; no final rename".into())},Err(_)=>{source_changed=true;reason=Some("Local staged source disappeared; no final rename".into())}}}
+  let current=observed_change(root,rel,validate,&snapshot,&input,offset,held);if reason.is_none(){if current?{source_changed=true;reason=Some("Local staged source changed; no final rename".into())}}
   if stop.load(Ordering::SeqCst)&&reason.is_none(){reason=Some("Operation stopped before staged commit".into())}
   if let Some(reason)=reason{c.raw.remove(stage).await.map_err(|_|"Staged sync cleanup outcome is uncertain; unique partial may remain")?;if source_changed&&!stop.load(Ordering::SeqCst){return Ok(Transfer::Changed{committed:None,expected:existing.and_then(|n|n.version)})}return Err(reason)}
   c.raw.setstat(stage.clone(),attrs).await.map_err(|_|"Staged timestamp/permissions failed; old final retained, unique partial remains")?;
@@ -99,12 +105,12 @@ fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,s
   directory_guard(&c.raw,&parent).await?;
   // SETSTAT and parent checks awaited network replies. Re-observe the opened
   // source and current pathname AFTER those waits, immediately before rename.
-  let changed=match source(root,rel,validate){Ok(f)=>snapshot.changed(&input,&f,offset)?.is_some(),Err(_)=>true};
+  let changed=observed_change(root,rel,validate,&snapshot,&input,offset,held)?;
   if changed||stop.load(Ordering::SeqCst){c.raw.remove(stage).await.map_err(|_|"Stopped/changed staging cleanup outcome is uncertain; unique partial may remain")?;if changed&&!stop.load(Ordering::SeqCst){return Ok(Transfer::Changed{committed:None,expected:existing.and_then(|n|n.version)})}return Err("Operation stopped before final rename; stage removed".into())}
   possible_final_change.set(true);
   if c.posix_rename{let mut data=Vec::new();for p in [&stage,&final_path]{data.extend_from_slice(&(p.len()as u32).to_be_bytes());data.extend_from_slice(p.as_bytes());}match c.raw.extended("posix-rename@openssh.com",data).await.map_err(|_|"Final rename outcome is uncertain; restart to reconcile")?{Packet::Status(s)if s.status_code==StatusCode::Ok=>(),_=>return Err("Final rename rejected; outcome is uncertain; reconcile final and unique partial before retry".into())}}
   else{c.raw.rename(stage,final_path).await.map_err(|_|"Final rename outcome is uncertain; unique partial may remain")?;}
-  let changed=match source(root,rel,validate){Ok(f)=>snapshot.changed(&input,&f,offset)?.is_some(),Err(_)=>true};
+  let changed=observed_change(root,rel,validate,&snapshot,&input,offset,held)?;
   if changed{Ok(Transfer::Changed{committed:Some(offset),expected:Some((offset,time))})}else{Ok(Transfer::Complete(offset))}
  }).map_err(|error|if possible_final_change.get(){format!("Final target may have changed; outcome is uncertain: {error}")}else{error})
 }
@@ -137,8 +143,9 @@ pub(crate) fn cycle_with_validation(c:&mut Connection,root:&Path,remote:&str,sco
     ready.peek().filter(|(next,is_dir)|!*is_dir&&!retry.contains_key(next)&&!inventory.entries.contains_key(next))
      .and_then(|(next,_)|std::fs::symlink_metadata(root.join(next)).ok().filter(|m|m.is_file()&&!m.file_type().is_symlink()&&m.len()<102400).map(|_|next.as_path()))
    }else{None};
-   match upload(c,root,&remote,&p,entry,stop,&validate,prepared,next,&mut prepared_next)?{Transfer::Complete(n)=>notify(&p,Event::Uploaded(n)),Transfer::Changed{committed,expected}=>{if let Some(n)=committed{notify(&p,Event::Uploaded(n));}else if expected.is_none()&&entry.is_some(){notify(&p,Event::Deleted(false));}if let Some(d)=&c.diagnostics{d.record(&p,crate::engine::sync_decisions::Reason::SourceChanged,Default::default());}return Ok(Outcome::Rescan{relative:p,expected})}}}else{notify(&p,Event::Skipped);}
+   match upload(c,root,&remote,&p,entry,stop,&validate,prepared,validation.uses_held_source(),next,&mut prepared_next)?{Transfer::Complete(n)=>notify(&p,Event::Uploaded(n)),Transfer::Changed{committed,expected}=>{if let Some(n)=committed{notify(&p,Event::Uploaded(n));}else if expected.is_none()&&entry.is_some(){notify(&p,Event::Deleted(false));}if let Some(d)=&c.diagnostics{d.record(&p,crate::engine::sync_decisions::Reason::SourceChanged,Default::default());}return Ok(Outcome::Rescan{relative:p,expected})}}}else{notify(&p,Event::Skipped);}
  }
+ if validation.uses_held_source()&&!deletions.is_empty(){notify(scope,Event::Begin("scan"));crate::source_hold::before_delete(root,scope,stop,rules,recursive,&validate)?;}
  for p in deletions{let entry=inventory.entries[&p];let dir=entry.kind==Kind::Directory;notify(&p,Event::Begin("delete"));validate(&p,dir)?;if root.join(&p).try_exists().map_err(|_|"Local deletion state inaccessible")?{return Err("Local entry recreated; deletion deferred for rescan".into())}let _parents=crate::engine::compatible_deletion_parents(root,&p)?;crate::file_ops::check(stop)?;let t=target(&remote,&p)?;
   c.run(&AtomicBool::new(false),async{if dir{c.raw.rmdir(t).await.map_err(|_|"Sync RMDIR failed or outcome is uncertain; restart to reconcile")?;}else{c.raw.remove(t).await.map_err(|_|"Sync REMOVE failed or outcome is uncertain; restart to reconcile")?;}Ok(())})?;notify(&p,Event::Deleted(dir));
  }Ok(Outcome::Complete)

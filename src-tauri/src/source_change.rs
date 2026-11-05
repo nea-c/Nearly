@@ -29,6 +29,11 @@ impl Snapshot {
         let identity = { use std::os::unix::fs::MetadataExt; (metadata.dev(), metadata.ino()) };
         Ok(Self { length: metadata.len(), modified: metadata.modified().map_err(|_| "Local source timestamp unavailable")?, identity })
     }
+    pub(crate) fn changed_opened(&self,opened:&File,bytes:u64)->Result<Option<Change>,String>{
+        let after=Self::capture(opened)?;
+        if self.identity!=after.identity{return Ok(Some(Change::Replaced))}
+        if self.length!=after.length||self.modified!=after.modified||self.length!=bytes{return Ok(Some(Change::Content))}Ok(None)
+    }
     pub(crate) fn changed(&self, opened: &File, current: &File, bytes: u64) -> Result<Option<Change>, String> {
         let after = Self::capture(opened)?;
         let path_now = Self::capture(current)?;

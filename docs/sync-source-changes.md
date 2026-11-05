@@ -1,3 +1,19 @@
+# Windows source input lifetime
+
+From r4.0-pre.11, ordinary Windows synchronization enables held source inputs without a feature flag, environment opt-in or generated-fixture marker. The GUI start/resume commands reach the same Engine worker policy. Non-Windows behavior remains unchanged.
+
+The leaf is opened with read/write sharing, without delete sharing, and remains held through transfer acknowledgements and cleanup. Parent preparation handles retain their previous short lifetime. Replacement/deletion of the active leaf can fail with a sharing violation; retry after completion or joined stop. In-place writes are allowed. Existing observation points still compare held identity, length, modification time and transmitted byte count, and perform a fresh root veto. Metadata changes cause rescan/resend.
+
+Already granted read access can outlive later read-permission revocation, so the current large-file transfer may commit where pre.10 preserved its old final. Before planned remote deletion, fresh scoped local readability and root checks must succeed. A legitimately removed watch directory falls back to verifying the surviving root; type/access conflicts refuse deletion. Stop takes priority.
+
+Cancellation waits for response cleanup before releasing the source. Unknown remote write/rename outcomes are not reported as success; no universal partial-cleanup guarantee. Small direct writes and large unique staging remain unchanged. An in-place same-length edit whose exact mtime is restored can evade both policies; held input is not immutable content. No new guarantee is made for special simultaneous reparse-attribute mutations.
+
+See release notes for the synthetic GUI measurements and limits. Actual user servers, large-file throughput, different DPI and installed-EXE behavior require separate verification; publishing does not install the app.
+
+## Earlier implementation evidence
+
+The historical notes below describe prior implementations and the non-held helper path. Current Windows synchronization uses the held-input behavior above, including its documented permission and replacement differences.
+
 # Source changes and bounded startup comparisons
 
 Base: r3.4 `5c5ff67d0bf5fc86dd414c8d391b9a34b9e95366`. This work is separate from updater cleanup.

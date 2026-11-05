@@ -20,7 +20,9 @@ impl Parents{
    Ok(Some(Self{root:root.to_owned(),relative:relative.to_owned(),held}))
   }
  }
- pub(crate) fn open_at_use(self,root:&Path,relative:&Path,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<File,String>{
+ pub(crate) fn open_at_use(self,root:&Path,relative:&Path,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<File,String>{self.open_with_sharing(root,relative,stop,validate,7)}
+ pub(crate) fn open_at_use_held(self,root:&Path,relative:&Path,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>)->Result<File,String>{let f=self.open_with_sharing(root,relative,stop,validate,3)?;crate::source_hold::opened();Ok(f)}
+ fn open_with_sharing(self,root:&Path,relative:&Path,stop:&AtomicBool,validate:&dyn Fn(&Path,bool)->Result<(),String>,sharing:u32)->Result<File,String>{
   crate::file_ops::check(stop)?;
   if self.root!=root||self.relative!=relative||self.held.len()!=relative.components().count(){return Err("Look-ahead source binding mismatch".into())}
   for file in &self.held{
@@ -33,7 +35,7 @@ impl Parents{
   validate(Path::new(""),true)?;
   crate::file_ops::check(stop)?;
   let mut options=std::fs::OpenOptions::new();options.read(true);
-  #[cfg(windows)]{use std::os::windows::fs::OpenOptionsExt;options.share_mode(7).custom_flags(0x00200000);}
+  #[cfg(windows)]{use std::os::windows::fs::OpenOptionsExt;options.share_mode(sharing).custom_flags(0x00200000);}
   let file=options.open(root.join(relative)).map_err(|_|"Local source open failed")?;
   crate::source_change::Snapshot::capture(&file)?;
   #[cfg(test)]USED.fetch_add(1,Ordering::Relaxed);

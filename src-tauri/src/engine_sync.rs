@@ -1,6 +1,6 @@
 //! Directory-dirty compatible synchronization. Start/stop/reservations remain Engine-owned.
 use super::*;
-struct WorkerValidation<'a>{root:&'a Path,identity:(u64,u64),stop:&'a AtomicBool}
+struct WorkerValidation<'a>{root:&'a Path,identity:(u64,u64),stop:&'a AtomicBool,held:bool}
 impl sftp::compatible::LocalValidation for WorkerValidation<'_>{
  fn check(&self,path:&Path,dir:bool)->Result<(),String>{
   if path.as_os_str().is_empty(){if local_root_identity(self.root)?!=self.identity{return Err("Local sync root changed; deletion refused".into())}return Ok(())}
@@ -8,13 +8,14 @@ impl sftp::compatible::LocalValidation for WorkerValidation<'_>{
  }
  fn shares_upload_check(&self)->bool{cfg!(windows)}
  fn can_prepare_next(&self)->bool{cfg!(windows)}
+ fn uses_held_source(&self)->bool{self.held}
  fn open_with_parents(&self,root:&Path,path:&Path,parents:Option<crate::parent_lookahead::Parents>)->Result<std::fs::File,String>{
   crate::file_ops::check(self.stop)?;if root!=self.root{return Err("Local source root mismatch".into())}
-  match parents{Some(token)=>token.open_at_use(root,path,self.stop,&|p,d|self.check(p,d)),None=>self.open_source(root,path)}
+  match parents{Some(token)=>if self.held{token.open_at_use_held(root,path,self.stop,&|p,d|self.check(p,d))}else{token.open_at_use(root,path,self.stop,&|p,d|self.check(p,d))},None=>self.open_source(root,path)}
  }
  fn open_source(&self,root:&Path,path:&Path)->Result<std::fs::File,String>{
   crate::file_ops::check(self.stop)?;if root!=self.root{return Err("Local source root mismatch".into())}
-  sftp::compatible::open_source_checked(root,path,&|p,d|self.check(p,d))
+  if self.held{sftp::compatible::open_held_source_checked(root,path,&|p,d|self.check(p,d))}else{sftp::compatible::open_source_checked(root,path,&|p,d|self.check(p,d))}
  }
 }
 
@@ -32,7 +33,9 @@ pub(super) fn worker(p:Profile,root:PathBuf,remote:String,_id:String,mut connect
  });
  let mut watcher=match watcher{Ok(w)=>w,Err(_)=>{state.lock().unwrap().failure_context("Cannot initialize local watcher",None,"watch","not_committed",0,false);return;}};
  if watcher.watch(&root,if options.recursive{RecursiveMode::Recursive}else{RecursiveMode::NonRecursive}).is_err(){state.lock().unwrap().failure_context("Cannot monitor local sync root",None,"watch","not_committed",0,false);return;}
- let validation=WorkerValidation{root:&root,identity:root_identity,stop:&stop};
+ let held=match crate::source_hold::enabled(&p.host,&root){Ok(v)=>v,Err(e)=>{state.lock().unwrap().failure_context(&e,None,"source-policy","not_committed",0,false);return;}};
+ let validation=WorkerValidation{root:&root,identity:root_identity,stop:&stop,held};
+ if held{state.lock().unwrap().log("Sync input remains open during transfer: replacement/deletion may be refused until completion; post checks observe the held input and root; planned deletion requires fresh scoped verification.");}
  let diagnostics=state.lock().unwrap().decisions.clone();diagnostics.compatible_policy();connection.diagnostics=Some(diagnostics.clone());
  let mut dirty=dirty::Dirty::default();let mut retry=sftp::compatible::RetryHints::new();let mut initial=true;let mut remaining_cycle=0usize;let mut consumed_epoch=0;let mut interrupted=false;
  state.lock().unwrap().log("Compatible sync: time priority, 2-second tolerance with size tie-break. Small files write directly; large files use fresh unique stages. Remote changes after listing may be overwritten/deleted. No foreign partial resume.");
@@ -82,7 +85,7 @@ pub(super) fn worker(p:Profile,root:PathBuf,remote:String,_id:String,mut connect
 #[cfg(all(test,windows))]mod engine_lookahead_tests{
  use super::*;use sftp::compatible::LocalValidation;
  #[test]fn engine_lookahead_worker_explicitly_opts_in(){
-  let stop=AtomicBool::new(false);let v=WorkerValidation{root:Path::new("D:/generated-unused"),identity:(0,0),stop:&stop};
+  let stop=AtomicBool::new(false);let v=WorkerValidation{root:Path::new("D:/generated-unused"),identity:(0,0),stop:&stop,held:false};
   assert!(v.can_prepare_next(),"normal typed Engine validator must opt into bounded next-parent preparation");
  }
  #[test]fn engine_lookahead_default_callback_cannot_opt_in(){
