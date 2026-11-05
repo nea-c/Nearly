@@ -18,6 +18,15 @@ test('all states use the same fixed svg viewport and hide decorative icons from 
  }
 });
 
+test('only the sync arrow path is horizontally mirrored within its existing viewport', () => {
+  for (const kind of ['connected', 'disconnected', 'connecting', 'sync', 'stopping', 'error']) {
+    const markup = statusIcon({kind, label:kind});
+    if (kind === 'sync') assert.match(markup, /<path transform="translate\(16 0\) scale\(-1 1\)"/);
+    else assert.doesNotMatch(markup, /transform=/);
+    assert.doesNotMatch(markup, /<svg[^>]*transform=/);
+  }
+});
+
 test('connecting ring keeps eight even gaps wider than one pixel including its closing seam',()=>{
  const s=statusIcon({kind:'connecting',label:'Connecting'});
  const r=Number(s.match(/ r="([\d.]+)"/)?.[1]);

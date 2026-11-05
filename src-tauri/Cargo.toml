@@ -1,6 +1,6 @@
 [package]
 name = "nearly"
-version = "4.0.0-pre.12"
+version = "4.0.0"
 edition = "2021"
 license = "Apache-2.0"
 

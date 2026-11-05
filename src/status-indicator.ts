@@ -16,7 +16,7 @@ const shapes:Record<Kind,string>={
  connected:'<circle cx="8" cy="8" r="5.875" fill="currentColor" stroke="none"/>',
  disconnected:'<circle cx="8" cy="8" r="5"/>',
  connecting:'<circle cx="8" cy="8" r="5" pathLength="32" stroke-dasharray="1 3"/>',
- sync:'<path d="M12.4 6A4.8 4.8 0 0 0 4 4.9L2.5 6.5M2.5 3v3.5H6M3.6 10A4.8 4.8 0 0 0 12 11.1l1.5-1.6M10 9.5h3.5V13"/>',
+ sync:'<path transform="translate(16 0) scale(-1 1)" d="M12.4 6A4.8 4.8 0 0 0 4 4.9L2.5 6.5M2.5 3v3.5H6M3.6 10A4.8 4.8 0 0 0 12 11.1l1.5-1.6M10 9.5h3.5V13"/>',
  stopping:'<rect x="3.3" y="3.3" width="9.4" height="9.4" rx="1.2"/>',
  error:'<circle cx="8" cy="8" r="5"/><path d="M8 4.7v4M8 11.2h.01"/>',
 };
