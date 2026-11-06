@@ -1,4 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(test)]mod listing_probe;
+#[cfg(test)]mod listing_timing;
+#[cfg(test)]mod listing_engine_tests;
 mod bookmark_tree;
 mod folder_shortcut;
 mod input_policy;

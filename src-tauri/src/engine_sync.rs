@@ -22,6 +22,7 @@ impl sftp::compatible::LocalValidation for WorkerValidation<'_>{
 #[path="engine_sync_queue.rs"]mod dirty;
 pub(super) fn worker(p:Profile,root:PathBuf,remote:String,_id:String,mut connection:sftp::Connection,state:Arc<Mutex<Status>>,stop:Arc<AtomicBool>,_retry:Arc<AtomicBool>,passphrase:zeroize::Zeroizing<String>,expected_identity:String,rules:crate::exclusion::Rules,options:SyncOptions,root_identity:(u64,u64)){
 
+ #[cfg(test)]let _listing_observer=crate::listing_probe::worker(&_id);
  let (tx,rx)=std::sync::mpsc::sync_channel(10000);let epoch=Arc::new(AtomicU64::new(0));let(cb_state,cb_stop,cb_epoch)=(state.clone(),stop.clone(),epoch.clone());
  let watcher=notify::recommended_watcher(move|event:Result<notify::Event,notify::Error>|{
   if matches!(&event,Ok(e)if matches!(e.kind,notify::EventKind::Access(_))){return;}
@@ -75,7 +76,7 @@ pub(super) fn worker(p:Profile,root:PathBuf,remote:String,_id:String,mut connect
    }
    continue; // Re-enter event drain before any caught-up state or next mutation.
   }
-  {let mut s=state.lock().unwrap();let pending=dirty.entries.len();s.pending=pending;s.speed=0;let drained=drained&&epoch.load(Ordering::SeqCst)==observed;s.activity.settle(pending,drained,false,stop.load(Ordering::SeqCst),false);}
+  {let mut s=state.lock().unwrap();let pending=dirty.entries.len();s.pending=pending;s.speed=0;let drained=drained&&epoch.load(Ordering::SeqCst)==observed;s.activity.settle(pending,drained,false,stop.load(Ordering::SeqCst),false);#[cfg(test)]_listing_observer.observe(s.activity.phase(),s.sent);}
   thread::sleep(Duration::from_millis(50));
  }
  let mut s=state.lock().unwrap();if s.failure.is_none(){s.status="stopped".into();s.activity.stopped();}s.speed=0;s.record_stopped_queue(dirty::stop_pending(remaining_cycle,dirty.entries.len(),interrupted||initial||epoch.load(Ordering::SeqCst)!=consumed_epoch));

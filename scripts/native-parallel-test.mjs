@@ -3,7 +3,9 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {Processes,cancellation,fixtureDirectory,assertHarnessResult} from './native-test-process.mjs';
 
-export const standardArgs=['--skip','install_root::native::tests::ordinary_inherited_namespace_is_admitted_by_production_validation','--skip','install_root::native::tests::generated_custom_root_payload_current_identity_and_namespace_guards','--test-threads=1'];
+export const prohibitedReparseTest='update_recovery_windows::tests::cleanup_reparse_candidate_parent_is_refused_without_touching_external_files';
+const prohibitedReparseLeaf=prohibitedReparseTest.split('::').at(-1);
+export const standardArgs=['--skip','install_root::native::tests::ordinary_inherited_namespace_is_admitted_by_production_validation','--skip','install_root::native::tests::generated_custom_root_payload_current_identity_and_namespace_guards','--skip',prohibitedReparseLeaf,'--test-threads=1'];
 export const fixtureCommands=[['sync-difference-test.mjs','sync_difference_generated_localhost'],['sync-difference-test.mjs','directory_deletion_generated_localhost'],['listing-worker-test.mjs'],['listing-existing-pipeline-test.mjs'],['remote-operation-test.mjs'],['new-file-wait-test.mjs'],['text-editor-test.mjs'],['transfer-progress-test.mjs']];
 
 export function resolveBuild(rows,root,target,runtime,environment=process.env) {
@@ -33,6 +35,13 @@ export function resolveBuild(rows,root,target,runtime,environment=process.env) {
 }
 
 export async function executeLanes(context,{root,output,processes=new Processes(),commands=fixtureCommands}={}) {
+  // Listing does not execute tests. Prove the prohibited case is present and
+  // excluded before starting either the native lane or localhost fixtures.
+  const listingOptions={cwd:context.cwd,env:context.env,capture:true};
+  const all=await processes.run(context.mainExecutable,['--list','--format','terse'],{...listingOptions,log:path.join(output,'all-test-list.log')});
+  const allowed=await processes.run(context.mainExecutable,[...standardArgs,'--list','--format','terse'],{...listingOptions,log:path.join(output,'allowed-test-list.log')});
+  if(!all.split(/\r?\n/).includes(prohibitedReparseTest+': test') || allowed.includes(prohibitedReparseLeaf))throw Error('Prohibited reparse test must be present and excluded before native lanes');
+  fs.writeFileSync(path.join(output,'exclusion-proof.json'),JSON.stringify({exact:prohibitedReparseTest,unfilteredPresent:true,filteredAbsent:true,args:standardArgs,listingOnly:true},null,2));
   const manifest=path.join(output,'test-executables.json');
   // Only runtime additions need to cross the child boundary; never persist inherited secrets.
   const runtimeKeys=new Set(['PATH','CARGO_MANIFEST_DIR','CARGO_MANIFEST_PATH','CARGO_PKG_NAME','CARGO_PKG_VERSION','CARGO_PKG_VERSION_MAJOR','CARGO_PKG_VERSION_MINOR','CARGO_PKG_VERSION_PATCH','CARGO_PKG_VERSION_PRE','CARGO_PKG_AUTHORS','CARGO_PKG_DESCRIPTION','CARGO_PKG_HOMEPAGE','CARGO_PKG_REPOSITORY','CARGO_PKG_LICENSE','CARGO_PKG_LICENSE_FILE','CARGO_PKG_RUST_VERSION']);
