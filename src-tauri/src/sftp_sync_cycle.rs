@@ -83,7 +83,9 @@ fn source_with_sharing(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result
 }
 // Bounded independent directory listing on one SFTP connection. No cache.
 pub(super)fn scan_remote(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
- c.run(stop,async{
+ c.run(stop,scan_remote_async(c,remote,scope,rules,recursive,stop))
+}
+async fn scan_remote_async(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
   use futures_util::{stream::FuturesUnordered,StreamExt};
   let full=target(remote,scope)?;
   match inspect_directory(&c.raw,&full).await?{DirectoryInspection::Missing(_)=>return Ok(Inventory::default()),DirectoryInspection::Present(_)=>()}
@@ -105,7 +107,6 @@ pub(super)fn scan_remote(c:&Connection,remote:&str,scope:&Path,rules:&crate::exc
    todo.extend(result?);
   }
   crate::file_ops::check(stop)?;drop(active);Ok(out.into_inner())
- })
 }
 async fn scan_remote_directory(c:&Connection,remote:&str,dir:PathBuf,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool,batches:&std::sync::atomic::AtomicUsize,out:&std::cell::RefCell<Inventory>)->Result<Vec<PathBuf>,String>{
  crate::file_ops::check(stop)?;
@@ -202,17 +203,42 @@ fn upload(c:&Connection,root:&Path,remote:&str,rel:&Path,existing:Option<Node>,s
   if changed{Ok(Transfer::Changed{committed:Some(offset),expected:Some((offset,time))})}else{Ok(Transfer::Complete(offset))}
  }).map_err(|error|if possible_final_change.get(){format!("Final target may have changed; outcome is uncertain: {error}")}else{error})
 }
+fn scan_local_inventory(root:&Path,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<BTreeMap<PathBuf,bool>,String>{
+ #[cfg(test)]let _phase=crate::listing_timing::span("local_listing");
+ #[cfg(test)]remote_inventory_generated_tests::before_local(stop);
+ let mut locals=BTreeMap::new();match std::fs::symlink_metadata(root.join(scope)){
+  Ok(m)if m.is_dir()=>{let mut prefix=PathBuf::new();for part in scope.components(){prefix.push(part);locals.insert(prefix.clone(),true);}crate::initial_scan::walk_scoped(root,scope,stop,rules,recursive,|p,dir|{locals.insert(p,dir);Ok(())}).map_err(|e|e.reason)?;},
+  Err(e)if e.kind()==std::io::ErrorKind::NotFound&&!scope.as_os_str().is_empty()=>(),_=>return Err("Local sync scope unavailable; deletion refused".into()),
+ }
+ Ok(locals)
+}
+fn collect_inventories(c:&Connection,root:&Path,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<(BTreeMap<PathBuf,bool>,Inventory),String>{
+ crate::file_ops::check(stop)?;
+ // One bounded scoped worker, not one thread per path. Neither result is
+ // authority until both succeed and the worker is joined below.
+ let local_cancel=AtomicBool::new(false);
+ std::thread::scope(|threads|{
+  let worker_cancel=&local_cancel;
+  let(tx,rx)=tokio::sync::oneshot::channel();
+  let worker=threads.spawn(move||{let result=scan_local_inventory(root,scope,rules,recursive,worker_cancel);let _=tx.send(result);});
+  let result=c.run(stop,async{
+   let local=async{rx.await.map_err(|_|String::from("Local inventory worker failed; deletion refused"))?};
+   let(remote,local)=futures_util::future::try_join(scan_remote_async(c,remote,scope,rules,recursive,stop),local).await?;Ok((local,remote))
+  });
+  // Connection.run disconnects on any first error/cancel; stop and join local
+  // work before returning. No task or inventory can escape this pass.
+  local_cancel.store(true,Ordering::SeqCst);
+  match worker.join(){Ok(())=>result,Err(_)=>Err("Local inventory worker failed; deletion refused".into())}
+ })
+}
+
 pub(crate) fn cycle(c:&mut Connection,root:&Path,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,delete:bool,stop:&AtomicBool,retry:&RetryHints,validate:&dyn Fn(&Path,bool)->Result<(),String>,notify:&dyn Fn(&Path,Event))->Result<Outcome,String>{
  cycle_with_validation(c,root,remote,scope,rules,recursive,delete,stop,retry,&CallbackValidation(validate),notify)
 }
 pub(crate) fn cycle_with_validation(c:&mut Connection,root:&Path,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,delete:bool,stop:&AtomicBool,retry:&RetryHints,validation:&dyn LocalValidation,notify:&dyn Fn(&Path,Event))->Result<Outcome,String>{
  let validate=|p:&Path,d:bool|validation.check(p,d);
  let remote=normalize(remote)?;validate(Path::new(""),true)?;if scope.components().any(|p|!matches!(p,std::path::Component::Normal(_))){return Err("Invalid sync scope".into())}if !scope.as_os_str().is_empty()&&rules.excludes(scope,true)?{return Ok(Outcome::Complete)}
- let mut locals=BTreeMap::new();match std::fs::symlink_metadata(root.join(scope)){
-  Ok(m)if m.is_dir()=>{let mut prefix=PathBuf::new();for part in scope.components(){prefix.push(part);locals.insert(prefix.clone(),true);}crate::initial_scan::walk_scoped(root,scope,stop,rules,recursive,|p,dir|{locals.insert(p,dir);Ok(())}).map_err(|e|e.reason)?;},
-  Err(e)if e.kind()==std::io::ErrorKind::NotFound&&!scope.as_os_str().is_empty()=>(),_=>return Err("Local sync scope unavailable; deletion refused".into()),
- }
- let inventory=scan_remote(c,&remote,scope,rules,recursive,stop)?;validate(Path::new(""),true)?;if locals.keys().any(|p|p.components().any(|c|reserved(&c.as_os_str().to_string_lossy()))){return Err("Local source uses reserved generated-stage name".into())}let local_paths=locals.keys().cloned().collect::<HashSet<_>>();inventory.validate_locals(&local_paths)?;let deletions=if delete{inventory.deletions(&local_paths)}else{Vec::new()};let total=locals.len()+deletions.len();notify(scope,Event::Plan(total));
+ let(locals,inventory)=collect_inventories(c,root,&remote,scope,rules,recursive,stop)?;validate(Path::new(""),true)?;if locals.keys().any(|p|p.components().any(|c|reserved(&c.as_os_str().to_string_lossy()))){return Err("Local source uses reserved generated-stage name".into())}let local_paths=locals.keys().cloned().collect::<HashSet<_>>();inventory.validate_locals(&local_paths)?;let deletions=if delete{inventory.deletions(&local_paths)}else{Vec::new()};let total=locals.len()+deletions.len();notify(scope,Event::Plan(total));
  // A changing source must not starve stable peers on each rescan. Defer only
  // known retry files; parents and fresh candidates keep their checklist order.
  // This changes scheduling, never the fresh-inventory comparison/authorization.

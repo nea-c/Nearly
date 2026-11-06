@@ -14,6 +14,8 @@ Delete is initially OFF. OFF never removes destination files or directories. Tur
 
 A complete successful local scan and bounded remote listing are required before planning initial deletions. Exclusions apply to both uploads and deletion. With subdirectories disabled, only regular files immediately under the chosen root are compared and considered for deletion. Remote symlinks, unsupported names, and excluded entries are retained. Directories are removed child-first only after a successful empty-directory check; excluded or unsupported children keep their ancestors.
 
+Local scanning and remote listing run concurrently. Both must finish successfully, and the local root must pass validation again, before the engine plans uploads or deletions. If either scan fails or synchronization is stopped, the engine cancels the other scan and waits for the local worker to exit before returning. An outstanding synchronous filesystem call can delay that exit.
+
 Missing or unreadable source roots, failed entry reads, partial remote listings, changed roots, and uncertain metadata do not mean an empty source. Destructive actions recheck readable local absence and the remote file/directory guards. Concurrent remote changes can refuse deletion. SFTP v3 metadata does not provide a cryptographic file identity, so indistinguishable remote changes are a protocol limitation. Failures retain data and require an explicit retry or a new verified session as indicated by the message.
 
 Logs distinguish skipped unchanged files, uploaded files, and verified deletions. Queue counts, detection-to-transfer latency, and transfer speed remain available. Logs and scan/tracking limits remain bounded; normal watcher events do not trigger a full remote-tree scan.
