@@ -50,6 +50,12 @@ impl Drop for DenyRead {fn drop(&mut self){if !self.restored{let _=self.restore(
 
 fn file_state(p:&Path)->serde_json::Value{match fs::read(p){Ok(b)=>{use sha2::{Digest,Sha256};serde_json::json!({"size":b.len(),"sha256":Sha256::digest(&b).iter().map(|x|format!("{x:02x}")).collect::<String>(),"mtime":fs::metadata(p).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()})},Err(e)=>serde_json::json!({"unavailable":e.raw_os_error()})}}
 fn set_time(p:&Path,t:u64){fs::File::options().write(true).open(p).unwrap().set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(t))).unwrap();}
+// The controller must not open the Windows server-side target while a rename can be in flight.
+fn remote_matches_after_caught_up(state:&serde_json::Value,probe:impl FnOnce()->bool)->bool{state["syncPhase"]=="caught_up"&&probe()}
+#[test]fn held_matrix_observer_never_probes_incomplete_transfers(){
+ let n=std::cell::Cell::new(0);for phase in ["preparing","scanning","transferring","stopping","failed","stopped"]{assert!(!remote_matches_after_caught_up(&serde_json::json!({"syncPhase":phase}),||{n.set(n.get()+1);true}));assert_eq!(n.get(),0,"preterminal observer must not open a server-side file during rename");}
+ assert!(remote_matches_after_caught_up(&serde_json::json!({"syncPhase":"caught_up"}),||{n.set(n.get()+1);true}));assert_eq!(n.get(),1);assert!(!remote_matches_after_caught_up(&serde_json::json!({"syncPhase":"caught_up"}),||false));
+}
 #[test]fn held_source_generated_behavior_matrix(){
  use std::io::Write;use serde_json::json;
  let held=true;let output=std::env::var_os("HELD_SOURCE_RESULTS").map(PathBuf::from).unwrap_or_else(||std::env::temp_dir().join(format!("nearly-held-behavior-{}-{}.json",std::process::id(),getrandom::u64().unwrap())));let mut rows:Vec<serde_json::Value>=Vec::new();
@@ -75,7 +81,7 @@ fn set_time(p:&Path,t:u64){fs::File::options().write(true).open(p).unwrap().set_
   }else{
    fs::write(f.root.join("server/release-held-input"),b"release generated ACK").unwrap();
    if ending=="fail"||op.ends_with("acl"){terminal=f.wait_failed(&e,"held-matrix");}
-   else{let deadline=Instant::now()+Duration::from_secs(20);loop{let s=serde_json::to_value(e.status("held-matrix").unwrap()).unwrap();assert!(s["failure"].is_null(),"{op}/{size}/{held}: {s}");let wanted=if op=="unstamped"{Some(&original)}else if expected.is_empty(){None}else{Some(&expected)};let matches=match wanted{Some(b)=>fs::read(&remote).is_ok_and(|r|r==*b),None=>!remote.exists()};if s["syncPhase"]=="caught_up"&&matches{terminal=s;break;}assert!(Instant::now()<deadline,"{op}/{size}/{held} convergence timeout: {s}");thread::sleep(Duration::from_millis(10));}}
+   else{let deadline=Instant::now()+Duration::from_secs(20);loop{let s=serde_json::to_value(e.status("held-matrix").unwrap()).unwrap();assert!(s["failure"].is_null(),"{op}/{size}/{held}: {s}");let wanted=if op=="unstamped"{Some(&original)}else if expected.is_empty(){None}else{Some(&expected)};let matches=remote_matches_after_caught_up(&s,||match wanted{Some(b)=>fs::read(&remote).is_ok_and(|r|r==*b),None=>!remote.exists()});if matches{terminal=s;break;}assert!(Instant::now()<deadline,"{op}/{size}/{held} convergence timeout: {s}");thread::sleep(Duration::from_millis(10));}}
   }
   let policy_counts=[crate::source_hold::OPENS.load(std::sync::atomic::Ordering::Relaxed)-counts_before[0],crate::source_hold::OBSERVATIONS.load(std::sync::atomic::Ordering::Relaxed)-counts_before[1],crate::source_hold::DELETE_BARRIERS.load(std::sync::atomic::Ordering::Relaxed)-counts_before[2]];
   let outcome=json!({"remote":file_state(&remote),"sentinelPreserved":sentinel.exists(),"remainingNames":fs::read_dir(remote.parent().unwrap()).map(|it|it.filter_map(Result::ok).map(|x|x.file_name().to_string_lossy().to_string()).collect::<Vec<_>>()).unwrap_or_default(),"localLeafExists":leaf.exists(),"localParentExists":parent.exists()});
