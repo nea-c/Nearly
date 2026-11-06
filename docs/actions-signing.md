@@ -188,6 +188,12 @@ counts, source bindings, final EXE audit, sign/publish skips and unchanged relea
 assets. Do not infer a guaranteed speedup from the scheduling model or add
 dispatches without authorization.
 
+The normal native lane excludes the prohibited reparse cleanup test
+`update_recovery_windows::tests::cleanup_reparse_candidate_parent_is_refused_without_touching_external_files`.
+Before either lane starts, the runner lists the main harness without executing
+tests, verifies that this exact test exists, and verifies that the filtered list
+excludes it. The resulting `exclusion-proof.json` records the arguments and proof.
+
 ## Optional Rust dependency cache
 
 The secret-free native-test and unsigned-build jobs use separately keyed debug and

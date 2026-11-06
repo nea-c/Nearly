@@ -4,6 +4,28 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+test('native lanes refuse a prohibited reparse test before executing any tests or fixtures', async () => {
+  const {executeLanes} = await import('../scripts/native-parallel-test.mjs');
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), 'native-exclusion-'));
+  const forbidden = 'update_recovery_windows::tests::cleanup_reparse_candidate_parent_is_refused_without_touching_external_files';
+  const calls = [];
+  const processes = {
+    cancelled:false,
+    async run(executable, args) {
+      calls.push(args);
+      return args.includes('--list') ? `${forbidden}: test\nfixture::ordinary: test\n` : 'test result: ok. 1 passed; 0 failed; 0 ignored;';
+    },
+    async stop() {},
+  };
+  try {
+    await assert.rejects(executeLanes({executables:['dummy'],mainExecutable:'dummy',cwd:output,env:{}}, {root:output,output,processes,commands:[]}), /prohibited.*excluded/i);
+    assert(calls.every(args => args.includes('--list')), 'No test execution may precede exclusion proof');
+    assert(!fs.existsSync(path.join(output, 'test-executables.json')));
+  } finally {
+    fs.rmSync(output, {recursive:true,force:true});
+  }
+});
+
 test('single build retains root resource harness and Cargo runtime environment', async () => {
  const {resolveBuild} = await import('../scripts/native-parallel-test.mjs');
  const target=fs.mkdtempSync(path.join(os.tmpdir(),'native-lanes-'));
@@ -37,7 +59,14 @@ before(()=>{
  sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'native-process-tests-'));exe=path.join(sandbox,'harness.exe');
  const source=path.join(sandbox,'harness.rs');
  fs.writeFileSync(source,`use std::{env,fs,thread,time::Duration};
- fn main(){let root=env::var("EVENT_ROOT").unwrap();if env::current_exe().unwrap().file_stem().unwrap()=="cargo"{fs::write(format!("{root}/build-args"),env::args().collect::<Vec<_>>().join(" ")).unwrap();let count=fs::read_to_string(format!("{root}/build-count")).unwrap_or("0".into()).parse::<u32>().unwrap()+1;fs::write(format!("{root}/build-count"),count.to_string()).unwrap();println!("{}",fs::read_to_string(env::var("DUMMY_CARGO_JSON").unwrap()).unwrap());return;}fs::write(format!("{root}/harness-args"),env::args().collect::<Vec<_>>().join(" ")).unwrap();let marker=env::var("MARKER").unwrap_or("normal".into());fs::write(format!("{root}/{marker}-start"),env::current_dir().unwrap().display().to_string()+"\\n"+&env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).unwrap();if env::var("FAIL_NATIVE").is_ok(){std::process::exit(17)};while !std::path::Path::new(&format!("{root}/fixture-start")).exists(){thread::sleep(Duration::from_millis(10));}thread::sleep(Duration::from_millis(100));fs::write(format!("{root}/{marker}-end"),"done").unwrap();println!("test result: ok. 1 passed; 0 failed; 0 ignored;");}`);
+  fn main(){let root=env::var("EVENT_ROOT").unwrap();if env::current_exe().unwrap().file_stem().unwrap()=="cargo"{fs::write(format!("{root}/build-args"),env::args().collect::<Vec<_>>().join(" ")).unwrap();let count=fs::read_to_string(format!("{root}/build-count")).unwrap_or("0".into()).parse::<u32>().unwrap()+1;fs::write(format!("{root}/build-count"),count.to_string()).unwrap();println!("{}",fs::read_to_string(env::var("DUMMY_CARGO_JSON").unwrap()).unwrap());return;}
+  if env::args().any(|arg|arg=="--list"){
+    if !env::args().any(|arg|arg=="cleanup_reparse_candidate_parent_is_refused_without_touching_external_files"){
+      println!("update_recovery_windows::tests::cleanup_reparse_candidate_parent_is_refused_without_touching_external_files: test");
+    }
+    println!("fixture::ordinary: test");return;
+  }
+  fs::write(format!("{root}/harness-args"),env::args().collect::<Vec<_>>().join(" ")).unwrap();let marker=env::var("MARKER").unwrap_or("normal".into());fs::write(format!("{root}/{marker}-start"),env::current_dir().unwrap().display().to_string()+"\\n"+&env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).unwrap();if env::var("FAIL_NATIVE").is_ok(){std::process::exit(17)};while !std::path::Path::new(&format!("{root}/fixture-start")).exists(){thread::sleep(Duration::from_millis(10));}thread::sleep(Duration::from_millis(100));fs::write(format!("{root}/{marker}-end"),"done").unwrap();println!("test result: ok. 1 passed; 0 failed; 0 ignored;");}`);
  const built=spawnSync('rustc',['+1.97.1',source,'-o',exe],{encoding:'utf8',windowsHide:true});assert.equal(built.status,0,built.stderr);
 });
 after(()=>{if(sandbox)fs.rmSync(sandbox,{recursive:true,force:true});});
