@@ -37,7 +37,7 @@ fn source_with_sharing(root:&Path,rel:&Path,validate:&dyn Fn(&Path,bool)->Result
   validate(rel,false)?;std::fs::OpenOptions::new().read(true).open(canonical).map_err(|_|"Local source open failed".into())
  }
 }
-fn scan_remote(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
+#[cfg(test)]fn scan_remote_serial(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
  c.run(stop,async{
   let full=target(remote,scope)?;match inspect_directory(&c.raw,&full).await?{DirectoryInspection::Missing(_)=>return Ok(Inventory::default()),DirectoryInspection::Present(_)=>()}
   let mut out=Inventory::default();
@@ -53,6 +53,94 @@ fn scan_remote(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Ru
   }Ok(out)
  })
 }
+#[cfg(test)]fn scan_remote_close(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
+ c.run(stop,async{
+  let full=target(remote,scope)?;match {#[cfg(all(test,feature="diagnostic-observer"))]let _ancestry=crate::phase_profile::span("remote_ancestry_child");inspect_directory(&c.raw,&full).await?}{DirectoryInspection::Missing(_)=>return Ok(Inventory::default()),DirectoryInspection::Present(_)=>()}
+  let mut out=Inventory::default();
+  if !scope.as_os_str().is_empty(){let a=c.raw.lstat(full.clone()).await.map_err(|_|"Remote scope metadata unavailable")?.attrs;out.insert(scope.to_owned(),Node{kind:Kind::Directory,version:None,permissions:a.permissions})?;}
+  let mut todo=vec![scope.to_owned()];let mut batches=0usize;let mut prefetched:Option<(PathBuf,Vec<u8>)>=None;
+  while let Some(dir)=todo.pop(){
+   if stop.load(Ordering::SeqCst){if let Some((_,handle))=prefetched.take(){c.raw.close(handle).await.map_err(|_|"Stopped remote listing close failed; deletion refused")?;}return Err("Operation stopped".into());}
+   crate::file_ops::check(stop)?;
+   let h=if let Some((bound,handle))=prefetched.take(){if bound!=dir{c.raw.close(handle).await.map_err(|_|"Remote prefetch binding cleanup failed; deletion refused")?;return Err("Remote prefetch binding mismatch; deletion refused".into());}handle}else{c.raw.opendir(target(remote,&dir)?).await.map_err(|_|"Remote listing open failed; deletion refused")?.handle};
+   loop{crate::file_ops::check(stop)?;batches+=1;if batches>20000{return Err("Remote listing response budget exceeded; deletion refused".into())}match c.raw.readdir(h.clone()).await{
+    Ok(names)=>for e in names.files{if e.filename=="."||e.filename==".."{continue;}if e.filename.contains(['/', '\\','\0']){return Err("Invalid remote name; deletion refused".into())}let rel=dir.join(&e.filename);let mut attrs=e.attrs;if attrs.permissions.is_none()||(attrs.file_type().is_file()&&(attrs.size.is_none()||attrs.mtime.is_none())){crate::file_ops::check(stop)?;attrs={#[cfg(all(test,feature="diagnostic-observer"))]let _fallback=crate::phase_profile::span("remote_fallback_lstat_child");c.raw.lstat(target(remote,&rel)?).await.map_err(|_|"Remote listing attributes unavailable; deletion refused")?.attrs};}let isdir=attrs.is_dir()&&!attrs.is_symlink();
+     let blocked=reserved(&e.filename)||crate::file_ops::validate_creation_name(&e.filename,crate::file_ops::Side::Local).is_err()||rules.excludes(&rel,isdir)?||attrs.is_symlink()||(!isdir&&!attrs.file_type().is_file())||(!recursive&&isdir);
+     let kind=if blocked{Kind::Blocked}else if isdir{Kind::Directory}else{Kind::File};let version=if kind==Kind::File{attrs.size.zip(attrs.mtime)}else{None};out.insert(rel.clone(),Node{kind,version,permissions:attrs.permissions})?;if kind==Kind::Directory{todo.push(rel);}
+    },Err(SftpError::Status(s))if s.status_code==StatusCode::Eof=>break,Err(_)=>return Err("Remote listing incomplete; deletion refused".into()),
+   }}
+   if let Some(next)=todo.last(){
+    let (closed,opened)=futures_util::future::join(c.raw.close(h),c.raw.opendir(target(remote,next)?)).await;
+    match (closed,opened){
+     (Ok(_),Ok(opened))=>prefetched=Some((next.clone(),opened.handle)),
+     (Err(_),Ok(opened))=>{c.raw.close(opened.handle).await.map_err(|_|"Remote listing close failed and prefetched handle cleanup failed; deletion refused")?;return Err("Remote listing close failed; deletion refused".into());},
+     (Err(_),Err(_))=>return Err("Remote listing close failed; deletion refused".into()),
+     (Ok(_),Err(_))=>return Err("Remote listing open failed; deletion refused".into()),
+    }
+   }else{c.raw.close(h).await.map_err(|_|"Remote listing close failed; deletion refused")?;}
+  }Ok(out)
+ })
+}
+// Bounded independent directory listing on one SFTP connection. No cache.
+pub(super)fn scan_remote(c:&Connection,remote:&str,scope:&Path,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool)->Result<Inventory,String>{
+ c.run(stop,async{
+  use futures_util::{stream::FuturesUnordered,StreamExt};
+  let full=target(remote,scope)?;
+  match inspect_directory(&c.raw,&full).await?{DirectoryInspection::Missing(_)=>return Ok(Inventory::default()),DirectoryInspection::Present(_)=>()}
+  let mut out=Inventory::default();
+  if !scope.as_os_str().is_empty(){let a=c.raw.lstat(full).await.map_err(|_|"Remote scope metadata unavailable")?.attrs;out.insert(scope.to_owned(),Node{kind:Kind::Directory,version:None,permissions:a.permissions})?;}
+  // One shared bounded inventory, not four independent 16MiB inventories.
+  // RefCell borrows never cross an await; these futures are polled together by
+  // this one run future, while SSH packet routing remains on its own runtime.
+  let out=std::cell::RefCell::new(out);
+  let batches=std::sync::atomic::AtomicUsize::new(0);
+  let mut todo=vec![scope.to_owned()];let mut active=FuturesUnordered::new();
+  loop{
+   crate::file_ops::check(stop)?;
+   while active.len()<c.upload_cap.clamp(1,4){
+    let Some(dir)=todo.pop()else{break};
+    active.push(scan_remote_directory(c,remote,dir,rules,recursive,stop,&batches,&out));
+   }
+   let Some(result)=active.next().await else{break};
+   todo.extend(result?);
+  }
+  crate::file_ops::check(stop)?;drop(active);Ok(out.into_inner())
+ })
+}
+async fn scan_remote_directory(c:&Connection,remote:&str,dir:PathBuf,rules:&crate::exclusion::Rules,recursive:bool,stop:&AtomicBool,batches:&std::sync::atomic::AtomicUsize,out:&std::cell::RefCell<Inventory>)->Result<Vec<PathBuf>,String>{
+ crate::file_ops::check(stop)?;
+ let h=c.raw.opendir(target(remote,&dir)?).await.map_err(|_|"Remote listing open failed; deletion refused")?.handle;
+ let result=async{
+  let mut children=Vec::new();
+  loop{
+   crate::file_ops::check(stop)?;
+   if batches.fetch_add(1,Ordering::Relaxed)>=20000{return Err("Remote listing response budget exceeded; deletion refused".into())}
+   match c.raw.readdir(h.clone()).await{
+    Ok(names)=>for e in names.files{
+     if e.filename=="."||e.filename==".."{continue;}
+     if e.filename.contains(['/', '\\','\0']){return Err("Invalid remote name; deletion refused".into())}
+     let rel=dir.join(&e.filename);let mut attrs=e.attrs;
+     if attrs.permissions.is_none()||(attrs.file_type().is_file()&&(attrs.size.is_none()||attrs.mtime.is_none())){
+      crate::file_ops::check(stop)?;attrs=c.raw.lstat(target(remote,&rel)?).await.map_err(|_|"Remote listing attributes unavailable; deletion refused")?.attrs;
+     }
+     let isdir=attrs.is_dir()&&!attrs.is_symlink();
+     let blocked=reserved(&e.filename)||crate::file_ops::validate_creation_name(&e.filename,crate::file_ops::Side::Local).is_err()||rules.excludes(&rel,isdir)?||attrs.is_symlink()||(!isdir&&!attrs.file_type().is_file())||(!recursive&&isdir);
+     let kind=if blocked{Kind::Blocked}else if isdir{Kind::Directory}else{Kind::File};
+     let version=if kind==Kind::File{attrs.size.zip(attrs.mtime)}else{None};
+     out.borrow_mut().insert(rel.clone(),Node{kind,version,permissions:attrs.permissions})?;
+
+     if kind==Kind::Directory{children.push(rel);}
+    },
+    Err(SftpError::Status(s))if s.status_code==StatusCode::Eof=>break,
+    Err(_)=>return Err("Remote listing incomplete; deletion refused".into()),
+   }
+  }Ok(children)
+ }.await;
+ // Settle each known handle on ordinary errors; a failed run also disconnects.
+ let closed=c.raw.close(h).await.map_err(|_|"Remote listing close failed; deletion refused");
+ match(result,closed){(Ok(out),Ok(_))=>Ok(out),(Err(e),_)=>Err(e),(_,Err(e))=>Err(e.into())}
+}
+
 fn mkdir(c:&Connection,remote:&str,rel:&Path,stop:&AtomicBool)->Result<bool,String>{
  crate::file_ops::check(stop)?;let full=target(remote,rel)?;c.run(&AtomicBool::new(false),async{
   match c.raw.lstat(full.clone()).await{Ok(a)if a.attrs.is_dir()&&!a.attrs.is_symlink()=>return Ok(false),Err(SftpError::Status(s))if s.status_code==StatusCode::NoSuchFile=>(),_=>return Err("Remote directory type conflict".into())}
@@ -150,3 +238,5 @@ pub(crate) fn cycle_with_validation(c:&mut Connection,root:&Path,remote:&str,sco
   c.run(&AtomicBool::new(false),async{if dir{c.raw.rmdir(t).await.map_err(|_|"Sync RMDIR failed or outcome is uncertain; restart to reconcile")?;}else{c.raw.remove(t).await.map_err(|_|"Sync REMOVE failed or outcome is uncertain; restart to reconcile")?;}Ok(())})?;notify(&p,Event::Deleted(dir));
  }Ok(Outcome::Complete)
 }
+
+#[cfg(test)]#[path="remote_inventory_generated_tests.rs"]mod remote_inventory_generated_tests;
