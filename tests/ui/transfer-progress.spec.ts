@@ -36,7 +36,8 @@ test('native upload drop shows batch bytes and never completes before publicatio
   await sample(page,'uploading',100000,170000);
   await expect(gauge).toHaveAttribute('value','100000');
   await sample(page,'finalizing',170000,170000);
-  await expect(gauge).not.toHaveAttribute('value');
+  await expect(gauge).toHaveAttribute('value','170000');
+  await expect(page.locator('.operation-progress-label')).toContainText('Finalizing');
   await expect(page.locator('.operation-feedback')).not.toHaveAttribute('data-complete');
   await page.evaluate(() => (window as any).finishTransfer({status:'partial',completed:1,bytes:100000,transferredBytes:170000,skipped:0,message:'Generated publication rejected'}));
   await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','false');
@@ -59,7 +60,7 @@ test('local pane upload pointer drop tracks its transfer through acknowledged su
   const gauge=page.locator('.operation-feedback progress');
   await expect(gauge).toHaveAttribute('value','32768');
   await sample(page,'uploading',100000,100000);
-  await expect(gauge).not.toHaveAttribute('value');
+  await expect(gauge).toHaveAttribute('value','100000');
   await expect(page.locator('.operation-feedback')).not.toHaveAttribute('data-complete');
   await page.evaluate(() => (window as any).finishTransfer({status:'completed',completed:1,bytes:100000,transferredBytes:100000,skipped:0,message:'Generated acknowledged copy'}));
   await expect(gauge).toHaveAttribute('value','1');
@@ -87,7 +88,7 @@ test('internal remote-to-local download replaces drag notice with aggregate down
   await expect(gauge).not.toHaveAttribute('value');
 });
 
-test('Explorer download keeps final stream delivery indeterminate until Windows confirms copy', async ({page}) => {
+test('Explorer download retains transferred bytes while awaiting Windows confirmation', async ({page}) => {
   await setup(page); await holdTransfers(page);
   const source=(await page.locator('[data-list=remote] [data-name="one.txt"]').boundingBox())!, viewport=page.viewportSize()!;
   await page.mouse.move(source.x+30,source.y+source.height/2); await page.mouse.down();
@@ -98,7 +99,8 @@ test('Explorer download keeps final stream delivery indeterminate until Windows 
   await sample(page,'downloading',32768,170000);
   await expect(gauge).toHaveAttribute('value','32768');
   await sample(page,'finalizing',170000,170000);
-  await expect(gauge).not.toHaveAttribute('value');
+  await expect(gauge).toHaveAttribute('value','170000');
+  await expect(page.locator('.operation-progress-label')).toContainText('Finalizing');
   await expect(page.locator('.operation-feedback')).not.toHaveAttribute('data-complete');
   await page.evaluate(() => (window as any).finishTransfer({status:'completed',completed:2,bytes:170000,transferredBytes:170004,skipped:0,message:'Windows copy acknowledged'}));
   await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','true');

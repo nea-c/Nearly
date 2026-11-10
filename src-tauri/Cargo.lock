@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "nearly"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake2",

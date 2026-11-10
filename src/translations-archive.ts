@@ -1,5 +1,13 @@
 /** Application-owned archive phrases. Names and paths are interpolation values. */
 export const archiveTranslations: Record<string, string> = {
+  "接続先でSSHコマンドを実行できません。ZIP操作にはSSHコマンド実行が必要です。": "SSH command execution is unavailable on this server. ZIP operations require SSH command execution.",
+  "リモートZIP操作はLinuxのみ対応しています。Windowsなどの接続先には対応していません。": "Remote ZIP operations support Linux only. Windows and other server platforms are not supported.",
+  "リモートZIP操作には接続先のPython 3.8以降とzipfile・zlibが必要です。": "Remote ZIP operations require Python 3.8 or later with zipfile and zlib on the server.",
+  "接続先では上書きを防ぐ安全な出力の確定に対応していないため、リモートZIP操作を利用できません。": "Remote ZIP operations are unavailable because this server does not support safe atomic publication without overwriting existing output.",
+  "SFTPとSSHのパスが一致しないため、ZIP操作を開始できません。": "The ZIP operation cannot start because SFTP and SSH paths do not match.",
+  "接続の切断または中止によりZIP処理の結果を確認できません。出力が作成された可能性があります。再実行する前に一覧を更新して保存先を確認してください。": "The ZIP outcome could not be confirmed after disconnection or cancellation. Output may have been created. Refresh the listing and check the destination before retrying.",
+  "実行すると接続先でSSHコマンドを実行します。LinuxとPython 3が必要です。Windowsには現在対応していません。": "Running this operation executes SSH commands on the server. Linux and Python 3 are required. Windows is currently unsupported.",
+  "中止後もサーバー側の後処理を待つ場合があります。結果が不明な場合は再実行前に一覧を更新してください。": "Cancellation may wait for server cleanup. If the outcome is unknown, refresh the listing before retrying.",
   "対象":"Target",
   "実行":"Run",
   ZIPに圧縮: "Compress to ZIP",

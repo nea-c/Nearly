@@ -6,7 +6,7 @@ import {Processes,cancellation,fixtureDirectory,assertHarnessResult} from './nat
 export const prohibitedReparseTest='update_recovery_windows::tests::cleanup_reparse_candidate_parent_is_refused_without_touching_external_files';
 const prohibitedReparseLeaf=prohibitedReparseTest.split('::').at(-1);
 export const standardArgs=['--skip','install_root::native::tests::ordinary_inherited_namespace_is_admitted_by_production_validation','--skip','install_root::native::tests::generated_custom_root_payload_current_identity_and_namespace_guards','--skip',prohibitedReparseLeaf,'--test-threads=1'];
-export const fixtureCommands=[['sync-difference-test.mjs','sync_difference_generated_localhost'],['sync-difference-test.mjs','directory_deletion_generated_localhost'],['listing-worker-test.mjs'],['listing-existing-pipeline-test.mjs'],['remote-operation-test.mjs'],['new-file-wait-test.mjs'],['text-editor-test.mjs'],['transfer-progress-test.mjs']];
+export const fixtureCommands=[['sync-difference-test.mjs','sync_difference_generated_localhost'],['sync-difference-test.mjs','directory_deletion_generated_localhost'],['listing-worker-test.mjs'],['listing-existing-pipeline-test.mjs'],['remote-operation-test.mjs'],['new-file-wait-test.mjs'],['text-editor-test.mjs'],['transfer-progress-test.mjs'],['remote-operation-metadata-test.mjs'],['remote-move-test.mjs'],['remote-copy-pipeline-test.mjs'],['remote-copy-close-test.mjs'],['warm-operation-test.mjs'],['remote-copy-parallel-test.mjs','safety,large-safety,boundary'],['remote-zip-test.mjs']];
 
 export function resolveBuild(rows,root,target,runtime,environment=process.env) {
   const finished=rows.filter(row=>row.reason==='build-finished');

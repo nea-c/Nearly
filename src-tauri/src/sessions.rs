@@ -37,6 +37,7 @@ struct Slot {
     linked: Vec<std::sync::Weak<AtomicBool>>,
 }
 struct Credentials {
+    operations: crate::operation_transport::OperationTransport<(crate::sftp::Connection, String)>,
     browse: crate::browse_transport::BrowseTransport<crate::sftp::Connection>,
     profile: Profile,
     secret: Zeroizing<String>,
@@ -154,6 +155,7 @@ impl Sessions {
                     profile,
                     secret,
                     browse: Default::default(),
+                    operations: Default::default(),
                 })
             }
             Phase::Connecting => return Err("Session connection is already running".into()),
@@ -210,6 +212,7 @@ impl Sessions {
             slot.stop.store(true, Ordering::SeqCst);
             if let Some(credentials) = slot.credentials.take() {
                 credentials.browse.cancel();
+                credentials.operations.cancel();
             }
             for stop in slot.linked.iter().filter_map(|stop| stop.upgrade()) {
                 stop.store(true, Ordering::SeqCst);
@@ -231,6 +234,7 @@ impl Sessions {
             }
             if let Some(credentials) = slot.credentials.take() {
                 credentials.browse.cancel();
+                credentials.operations.cancel();
             }
             slot.users != 0
         });
@@ -246,6 +250,28 @@ impl Sessions {
     }
 }
 impl Lease {
+    pub(crate) fn with_archive(&self,stop:&AtomicBool,operation:impl FnOnce(&mut crate::sftp::Connection,String)->Result<crate::local_zip::ArchiveOutcome,crate::zip_preflight::ArchiveError>)->Result<crate::local_zip::ArchiveOutcome,crate::zip_preflight::ArchiveError>{
+        use crate::zip_preflight::ArchiveError;
+        if self.stop.load(Ordering::SeqCst){return Err(ArchiveError::new("cancelled"));}
+        let credentials=self.credentials.as_ref().expect("Live session lease");
+        credentials.operations.run(stop,||crate::sftp::connect(&credentials.profile,&credentials.secret,stop),|(connection,_)|connection.needs_recycle(),|(connection,identity)|Ok(operation(connection,identity.clone())),Result::is_ok).map_err(|_|ArchiveError::new(if stop.load(Ordering::SeqCst){"cancelled"}else{"remote_exec_unavailable"}))?
+    }
+
+    pub(crate) fn with_operation(
+        &self, stop: &AtomicBool,
+        operation: impl FnOnce(&mut crate::sftp::Connection, String) -> Result<crate::file_ops::Outcome, String>,
+    ) -> Result<crate::file_ops::Outcome, String> {
+        if self.stop.load(Ordering::SeqCst) { return Err("Session disconnected".into()); }
+        let credentials = self.credentials.as_ref().expect("Live session lease");
+        credentials.operations.run(
+            stop,
+            || crate::sftp::connect(&credentials.profile, &credentials.secret, stop),
+            |(connection, _)| connection.needs_recycle(),
+            |(connection, identity)| operation(connection, identity.clone()),
+            |outcome| outcome.items.iter().all(|item| item.completed),
+        )
+    }
+
     /// Keep the originating session generation and its intentional-disconnect
     /// cancellation. Transport failures do not revoke this lease.
     pub fn fork_editor(&self)->Result<Lease,String>{
@@ -358,6 +384,7 @@ impl Drop for Lease {
                         slot.stop.store(true, Ordering::SeqCst);
                         if let Some(credentials) = slot.credentials.take() {
                             credentials.browse.cancel();
+                            credentials.operations.cancel();
                         }
                     }
                     if slot.users == 0

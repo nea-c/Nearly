@@ -3,9 +3,10 @@ import fs from 'node:fs';import path from 'node:path';import assert from 'node:a
 import {createFixture} from './sftp-fixture.mjs';import {fixtureDirectory,runFixtureTest} from './native-test-process.mjs';
 const measurements=[];
 for(const [mode,baseline] of [['copy',true],['copy',false],['delete',true],['delete',false],['collision',false],['cancel',false],['overlap',false],['symlink',false],['changed',false],['write-failed',false],['cancel-during',false],['disconnect',false],['cancel-delete',false],['mixed-copy',false],['mixed-delete',false]]){
- const out=fixtureDirectory('remote-operation-'+mode+'-'+baseline);let f;
- f=await createFixture(out,{async beforeStat(_op,p){if(mode==='cancel-delete'&&p==='/bench/source1'){fs.writeFileSync(path.join(out,'mutation-held'),'generated');const start=Date.now();while(!fs.existsSync(path.join(out,'mutation-release'))){assert.ok(Date.now()-start<20000);await new Promise(r=>setTimeout(r,5));}await new Promise(r=>setTimeout(r,100));return 4;}},mapStat(p,a){return mode==='symlink'&&p==='/bench/source1'?{...a,mode:0o120777}:a;},async beforeWrite(p){if(mode==='write-failed')return 4;if(mode==='changed'&&p==='/bench/copy0')fs.writeFileSync(path.join(f.remote,'bench/source0'),'concurrent generated change');
+ const out=fixtureDirectory('remote-operation-'+mode+'-'+baseline);let f;const closed=new Set();
+ f=await createFixture(out,{beforeClose(p){if(['/bench/copy0','/bench/copy2','/bench/copy3'].includes(p))closed.add(p);},async beforeStat(_op,p){if(mode==='cancel-delete'&&p==='/bench/source1'){fs.writeFileSync(path.join(out,'mutation-held'),'generated');const start=Date.now();while(!fs.existsSync(path.join(out,'mutation-release'))){assert.ok(Date.now()-start<20000);await new Promise(r=>setTimeout(r,5));}await new Promise(r=>setTimeout(r,100));return 4;}},mapStat(p,a){return mode==='symlink'&&p==='/bench/source1'?{...a,mode:0o120777}:a;},async beforeWrite(p){if(mode==='write-failed')return 4;if(mode==='changed'&&p==='/bench/copy0')fs.writeFileSync(path.join(f.remote,'bench/source0'),'concurrent generated change');
   if(['cancel-during','disconnect'].includes(mode)&&p==='/bench/copy1'){
+   const waiting=Date.now();while(closed.size<3){assert.ok(Date.now()-waiting<20000);await new Promise(r=>setTimeout(r,5));}await new Promise(r=>setTimeout(r,30));
    fs.writeFileSync(path.join(out,'mutation-held'),'generated');const start=Date.now();while(!fs.existsSync(path.join(out,'mutation-release'))){assert.ok(Date.now()-start<20000);await new Promise(r=>setTimeout(r,5));}
    if(mode==='disconnect')f.disconnect();else await new Promise(r=>setTimeout(r,100));return 4;
   }
@@ -14,7 +15,7 @@ for(const [mode,baseline] of [['copy',true],['copy',false],['delete',true],['del
  try{const code=await runFixtureTest('remote_selection_fixture',{NEARLY_OPERATION_FIXTURE:manifest},out);assert.equal(code,0,mode);
   const data={...JSON.parse(fs.readFileSync(path.join(out,'timing.json'),'utf8')),connections:f.totalConnections,requests:f.requestCounts};
   if(['copy','delete'].includes(mode))assert.equal(f.totalConnections,baseline?5:1);
-  if(mode==='copy')assert.equal(f.requestCounts.LSTAT,baseline?75:60);
+  if(mode==='copy')assert.equal(f.requestCounts.LSTAT,baseline?15:7);
   if(['cancel','overlap'].includes(mode))assert.equal(f.totalConnections,0);
   measurements.push(data);fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(data,null,2));
  }finally{await f.close();}

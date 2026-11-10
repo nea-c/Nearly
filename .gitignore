@@ -172,3 +172,17 @@ Thumbs.db
 !/scripts/editor-window-ui-test.mjs
 !/scripts/transfer-progress-test.mjs
 !/scripts/transfer-progress-native-ui.mjs
+
+# Generated-only file-operation performance and regression harnesses.
+!/scripts/remote-copy-pipeline-test.mjs
+!/scripts/remote-move-test.mjs
+!/docs/file-operation-performance.md
+!/scripts/remote-operation-metadata-test.mjs
+
+!/scripts/remote-copy-close-test.mjs
+!/scripts/warm-operation-test.mjs
+!/scripts/remote-copy-parallel-test.mjs
+
+!/docs/remote-zip.md
+
+!/scripts/remote-zip-test.mjs

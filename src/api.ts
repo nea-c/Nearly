@@ -18,6 +18,13 @@ export interface ArchiveRequest {
   destination: string;
   side: "local" | "remote";
 }
+export interface RemoteArchiveRequest {
+  id: string;
+  sessionId: string;
+  action: "compress" | "extract";
+  sources: string[];
+  destination: string;
+}
 export interface ArchiveOutcome {
   finalPath: string;
   action: "compress" | "extract";
@@ -113,6 +120,10 @@ interface Commands {
   watch_local_directory: { args: { id: string; path: string; token: number }; result: {token:number;revision:number;error?:string} };
   local_watch_status: { args: { id: string }; result: {token:number;revision:number;error?:string} };
   unwatch_local_directory: { args: { id: string; token: number }; result: boolean };
+  run_remote_archive: {
+    args: { request: RemoteArchiveRequest };
+    result: ArchiveOutcome;
+  };
   run_local_archive: {
     args: { request: ArchiveRequest };
     result: ArchiveOutcome;
@@ -202,7 +213,7 @@ export interface FileOperationRequest {
   passphrase: string;
   confirmDelete: boolean;
 }
-export interface OperationProgress {phase:string;unit:'bytes'|'entries';done:number;total:number|null;entries:number;item:number;itemCount:number;selectionCompleted?:number|null;selectionTotal?:number|null}
+export interface OperationProgress {phase:string;unit:'bytes'|'entries';done:number;total:number|null;entries:number;item:number;itemCount:number;groupCount?:number;selectionCompleted?:number|null;selectionTotal?:number|null}
 declare global {
   interface Window {
     __TAURI__?: {
