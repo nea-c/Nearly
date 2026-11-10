@@ -286,7 +286,6 @@ function showMenu(state: Snapshot, x: number, y: number) {
     <div class="menu-rule"></div>
     <button role="menuitem" data-file-action="duplicate" ${state.items.length !== 1 ? "disabled" : ""}>複製</button>
     <button role="menuitem" data-file-action="move" ${!active || protectedRoot ? "disabled" : ""}>移動</button>
-    ${state.side === "remote" ? html`<button role="menuitem" disabled title="リモートZIPは利用できません。ローカルへダウンロードして操作してください。">ZIPに圧縮</button><div class="menu-explanation">リモートZIPは利用できません。ローカルへダウンロードして操作してください。</div>` : ""}
     ${archive.compress ? html`<button role="menuitem" data-file-action="compress">ZIPに圧縮</button>` : ""}${archive.extract ? html`<button role="menuitem" data-file-action="extract">ZIPを展開</button>` : ""}
     <button
       role="menuitem"
@@ -414,7 +413,7 @@ function showOperation(
     }${!remote && state.host.syncRoots.length ? html`<p class="warning">同期中です。ローカルの変更・コピー・移動はアップロードに反映される場合があります。ローカル削除も、実行中の同期で「ファイルを削除する」が有効ならリモートへ反映されます。</p>` : ""}${remote && !state.host.sessionId ? html`<label>秘密鍵のパスフレーズ（必要な場合のみ）<input name="operation-passphrase" type="password" autocomplete="off" /></label>` : ""}${!allowed ? html`<p class="mock-note">ブラウザプレビュー／リモートのモックでは実ファイル操作を行いません。</p>` : ""}
     ${prompt ? html`<label>${prompt === "duplicate" ? t("複製の名前") : t("移動先の既存フォルダー")}<input name="operation-destination" autocomplete="off" value="${esc(prompt === "duplicate" ? state.items[0].name : state.destination)}" /></label>` : ""}
     ${prompt === "duplicate" ? html`<label>${esc(t("移動先の既存フォルダー"))}<input name="operation-folder" autocomplete="off" spellcheck="false" value="${esc(duplicateParent)}" /></label>` : ""}
-    ${remote && action === "copy" ? html`<p class="subtle">リモートコピーはクライアント経由のSFTP転送です。</p>` : ""}
+    ${remote && action === "copy" ? html`<p class="subtle">対応サーバーではサーバー内でコピーし、それ以外はクライアント経由のSFTP転送を使います。</p>` : ""}
     <div class="operation-results" aria-live="polite"></div>
     <div class="actions">
       <button id="file-operation-cancel">キャンセル</button
@@ -494,14 +493,14 @@ function showOperation(
       field.disabled = true;
     }
     results.textContent=t("処理中です。");
-    const feedback=operationFeedback(label, results, cancel);
+    const feedback=operationFeedback(label, results, cancel, {action: action === 'copy' || action === 'move' || action === 'delete' ? action : undefined});
     overlay.remove();
     const statuses = state.items.map((item) => ({
       item,
       status: "待機中",
       error: "",
     }));
-    const selectionProgress=statuses.length>1&&(action==='copy'||action==='delete');
+    const selectionProgress=statuses.length>1&&(action==='copy'||action==='move'||action==='delete');
     if(selectionProgress)feedback.selectionProgress(0,statuses.length);
     const draw = () => {
       const successes = statuses.filter((s) => s.status === "完了").length,
@@ -515,7 +514,7 @@ function showOperation(
           ${statuses.map((s) => `<li class="${s.status === "失敗" ? "failed" : ""}"><strong>${esc(t(s.status))}</strong><code>${esc(s.item.path)}</code>${s.error ? `<p>${esc(tError(s.error))}</p>` : ""}</li>`).join("")}
         </ul>`;
     };
-    const batched=remote&&statuses.length>1&&(action==='copy'||action==='delete');
+    const batched=remote&&statuses.length>1&&(action==='copy'||action==='move'||action==='delete');
     const moved = new Set<string>();
     let refreshError = "";
     try {
@@ -529,13 +528,13 @@ function showOperation(
         stateRun.current = crypto.randomUUID();
         draw();
         try {
+          feedback.track(stateRun.current, remote ? 'connecting' : 'scanning');
           await invoke("prepare_file_operation", { id: stateRun.current });
           cancel.disabled = false;
           if(stateRun.cancelled || !state.host.operationValid()) {
             await invoke("cancel_file_operation", {id: stateRun.current, abandon:true});
             throw Error(t("接続が変わったか、中止が要求されました。"));
           }
-          if(remote)feedback.track(stateRun.current);
           const outcome = await invoke("run_file_operation", {
             request: {
               id: stateRun.current,
@@ -556,7 +555,12 @@ function showOperation(
           status.status = "完了";
           status.error = outcome.message;
           if(batched){if(!outcome.items||outcome.items.length!==statuses.length)throw Error('Incomplete native batch result; refresh before retrying');for(let i=0;i<statuses.length;i++){const result=outcome.items[i];if(result.source!==statuses[i].item.path)throw Error('Mismatched native batch result');statuses[i].status=result.completed?'完了':result.attempted?'失敗':'未実行';statuses[i].error=result.message;}}
-          if (action === "move") moved.add(status.item.path);
+          if (action === "move") {
+            // Only confirmed commits leave the cut clipboard. Failed, cancelled,
+            // and unattempted roots remain available for inspection and retry.
+            for (const completed of batched ? statuses : [status])
+              if (completed.status === "完了") moved.add(completed.item.path);
+          }
         } catch (error) {
           status.status = "失敗";
           status.error = tError(error);
@@ -865,16 +869,18 @@ function archiveAllowed(state: Snapshot) {
     state.side,
     state.items.map((item) => ({ ...item, size: 0 })),
     native,
+    !!state.host.sessionId && !state.host.panes.remote.loading && state.host.operationValid(),
   );
-  if (!state.items[0] || !archiveParent(state.items[0].path))
+  if (!state.items[0] || !(state.side === "remote" ? state.items.every(item => item.path.startsWith("/") && item.path !== "/") : archiveParent(state.items[0].path)))
     return { compress: false, extract: false };
   return allowed;
 }
 function showArchive(state: Snapshot, action: ArchiveAction) {
-  if (operation || !archiveAllowed(state)[action]) return;
+  if (operation || operationBusy() || !archiveAllowed(state)[action]) return;
   closeMenu();
   const item = state.items[0],
-    parent = archiveParent(item.path)!;
+    parent = state.side === "remote" ? parentPath("remote", item.path) : archiveParent(item.path)!,
+    sessionId = state.host.sessionId;
   const overlay = document.createElement("div");
   overlay.className = "overlay operation-overlay";
   const label = t(action === "compress" ? "ZIPに圧縮" : "ZIPを展開");
@@ -885,7 +891,8 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
     aria-labelledby="archive-title"
   >
     <h2 id="archive-title">${esc(label)}</h2>
-    <p class="operation-endpoint">ローカル</p>
+    <p class="operation-endpoint">${esc(t(state.side === "remote" ? "リモート" : "ローカル"))}</p>
+    ${state.side === "remote" ? html`<p class="warning">実行すると接続先でSSHコマンドを実行します。LinuxとPython 3が必要です。Windowsには現在対応していません。</p><p class="subtle">中止後もサーバー側の後処理を待つ場合があります。結果が不明な場合は再実行前に一覧を更新してください。</p>` : ""}
     <div class="target"><small>対象</small><code>${esc(state.items.map(item=>item.path).join("\n"))}</code></div>
     <div class="target">
       <small>保存先のフォルダー</small><code>${esc(parent)}</code>
@@ -931,6 +938,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
       close();
       return;
     }
+    if (run.cancelled) return;
     run.cancelled = true;
     cancel.disabled = true;
     cancel.textContent = t("中止処理中…");
@@ -960,8 +968,8 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
   field.focus();
   field.select();
   confirm.onclick = async () => {
-    if (run.running) return;
-    if (!state.host.valid()) {
+    if (run.running || operationBusy()) return;
+    if (!state.host.valid() || !archiveAllowed(state)[action] || state.host.sessionId !== sessionId) {
       results.textContent = t(
         "表示や接続が変わりました。閉じてから対象を選び直してください",
       );
@@ -970,7 +978,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
     }
     let target: string;
     try {
-      target = createTargetPath("local", parent, field.value);
+      target = createTargetPath(state.side, parent, field.value);
       if (action === "compress" && !/\.zip$/i.test(field.value))
         throw Error(t("ZIPファイル名の末尾には.zipを付けてください"));
     } catch (e) {
@@ -992,12 +1000,16 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
     try {
       await invoke("prepare_file_operation", { id: run.current });
       cancel.disabled = false;
-      if (run.cancelled || !state.host.operationValid()) {
+      if (run.cancelled || !state.host.valid() || !state.host.operationValid() || state.host.sessionId !== sessionId) {
         await invoke("cancel_file_operation", { id: run.current, abandon:true });
         throw Error(t("接続が変わったか、中止が要求されました。"));
       }
       dispatched = true;
-      const outcome = await invoke("run_local_archive", {
+      if (state.side === "remote") feedback.track(run.current, "connecting");
+      const outcome = state.side === "remote" ? await invoke("run_remote_archive", {
+        request: { id: run.current, sessionId: sessionId!, action,
+          sources: state.items.map(item => item.path), destination: target },
+      }) : await invoke("run_local_archive", {
         request: {
           id: run.current,
           action,
@@ -1016,7 +1028,7 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
       run.current = undefined;
       if (dispatched)
         try {
-          await state.host.changed("local", "", {
+          await state.host.changed(state.side, "", {
             action: action === "compress" ? "createfile" : "mkdir",
             paths: [finalPath],
             parent,
@@ -1030,11 +1042,11 @@ function showArchive(state: Snapshot, action: ArchiveAction) {
         }
       run.running = false;
       if(operation === run) operation=undefined;
-      feedback.finish(created && !run.cancelled && !refreshFailed);
+      feedback.finish(created && !refreshFailed);
       cancel.disabled = false;
       cancel.textContent = t("閉じる");
       cancel.onclick = () => { feedback.remove(); };
-      if (run.cancelled)
+      if (run.cancelled && !created)
         results.textContent +=
           " " +
           t(

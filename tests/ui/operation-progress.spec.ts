@@ -33,7 +33,9 @@ test('operation gauge distinguishes scan, bytes, finalizing and failure; ignores
  await page.evaluate(()=>{(window as any).progressSample={phase:'copying',unit:'bytes',done:32768,total:65536,entries:0};});
  await expect(gauge).toHaveAttribute('value','32768');await expect(gauge).toHaveAttribute('max','65536');
  await page.evaluate(()=>{(window as any).progressSample={phase:'finalizing',unit:'bytes',done:65536,total:65536,entries:1};});
- await expect(gauge).not.toHaveAttribute('value');
+ await expect(gauge).toHaveAttribute('value','65536');
+ await expect(page.locator('.operation-progress-label')).toContainText('Finalizing');
+ await expect(page.locator('.operation-feedback')).not.toHaveAttribute('data-complete');
  await page.evaluate(()=>{(window as any).feedback.finish(false);(window as any).progressSample={phase:'copying',unit:'bytes',done:1,total:2,entries:0};});
  await expect(page.locator('.operation-feedback')).toHaveAttribute('data-success','false');
  await page.waitForTimeout(400);await expect(gauge).not.toHaveAttribute('value');
@@ -63,9 +65,9 @@ test('remote multi-delete dispatches one frozen batch and preserves partial outc
 for(const theme of ['light','dark'])test(`sample progress preview ${theme}`,async({page})=>{
  await page.goto('/');await page.evaluate(async(theme)=>{
   document.documentElement.dataset.theme=theme;const {setLanguage}=await import('/src/i18n.ts');setLanguage('ja');
-  const w=window as any;w.__TAURI__={core:{invoke:async()=>({phase:'copying',unit:'bytes',done:33554432,total:104857600,entries:2,item:3,itemCount:5})}};
-  const {operationFeedback}=await import('/src/operation-feedback.ts');const results=document.createElement('div');results.className='operation-results';results.textContent='/samples/photos → /samples/backup';const cancel=document.createElement('button');cancel.textContent='中止';w.sampleFeedback=operationFeedback('リモートコピー',results,cancel);w.sampleFeedback.track('generated-preview');
+  const w=window as any;w.__TAURI__={core:{invoke:async()=>({phase:'copying',unit:'bytes',done:33554432,total:104857600,entries:2,item:3,itemCount:5,selectionCompleted:2,selectionTotal:5})}};
+  const {operationFeedback}=await import('/src/operation-feedback.ts');const results=document.createElement('div');results.className='operation-results';results.textContent='/samples/photos → /samples/backup';const cancel=document.createElement('button');cancel.textContent='中止';w.sampleFeedback=operationFeedback('リモートコピー',results,cancel,{action:'copy'});w.sampleFeedback.track('generated-preview');
  },theme);
  await expect(page.locator('.operation-feedback progress')).toHaveAttribute('value','33554432');
- await page.locator('.operation-feedback').screenshot({path:`../remote-operation-result/progress-${theme}.png`});
+ await page.locator('.operation-feedback').screenshot({path:`test-results/progress-${theme}.png`});
 });

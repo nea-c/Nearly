@@ -1,6 +1,31 @@
 use crate::sftp::{self, Profile};
 #[cfg(test)]
 mod batch_request_tests {
+    fn move_request(items: serde_json::Value) -> super::Request {
+        serde_json::from_value(serde_json::json!({"id":"batch-move","side":"remote","action":"move","source":"/one","profile":null,"passphrase":"","confirmDelete":false,"items":items})).unwrap()
+    }
+    fn preflight_error(items: serde_json::Value) -> String {
+        super::run(&crate::engine::Engine::default(), move_request(items), &super::AtomicBool::new(false)).err().expect("preflight must fail without connecting")
+    }
+    #[test]
+    fn remote_move_batch_accepts_disjoint_paths_before_requiring_profile() {
+        assert_eq!(preflight_error(serde_json::json!([{"source":"/one","destination":"/target/one"},{"source":"/two","destination":"/target/two"}])), "Remote operation requires a profile");
+    }
+    #[test]
+    fn remote_move_batch_refuses_overlaps_and_missing_targets_before_connecting() {
+        for items in [
+            serde_json::json!([{"source":"/one","destination":"/target"},{"source":"/two","destination":"/target/child"}]),
+            serde_json::json!([{"source":"/one","destination":"/two"},{"source":"/two","destination":"/three"}]),
+            serde_json::json!([{"source":"/one","destination":"/target"},{"source":"/one/child","destination":"/other"}])
+        ] { assert_eq!(preflight_error(items), "Overlapping batch paths are refused"); }
+        assert_eq!(preflight_error(serde_json::json!([{"source":"/one"}])), "Copy/move requires destination");
+        assert_eq!(preflight_error(serde_json::json!([{"source":"/one","destination":"/one/child"}])), "Destination must differ from source and cannot be inside it");
+    }
+    #[test]
+    fn remote_move_batch_cancelled_preflight_never_requires_connection() {
+        let result = super::run(&crate::engine::Engine::default(), move_request(serde_json::json!([{"source":"/one","destination":"/target/one"}])), &super::AtomicBool::new(true));
+        assert!(result.err().unwrap().starts_with("Operation cancelled."));
+    }
     #[test]
     fn remote_multi_selection_is_one_request() {
         let request = serde_json::json!({"id":"batch","side":"remote","action":"delete","source":"/one","destination":null,"profile":null,"passphrase":"","confirmDelete":true,"items":[{"source":"/one","destination":null},{"source":"/two","destination":null}]});
@@ -58,14 +83,30 @@ pub struct Outcome {
 pub struct Selection {pub source:String,pub destination:Option<String>}
 #[derive(Serialize)]
 pub struct ItemOutcome {pub source:String,pub completed:bool,pub message:String,pub attempted:bool}
+#[cfg(test)]
 pub fn run(
     engine: &crate::engine::Engine,
     request: Request,
     stop: &AtomicBool,
 ) -> Result<Outcome, String> {
-    if !request.items.is_empty() {return remote_batch(engine,request,stop);}
+    run_with_session(engine, request, stop, None)
+}
+pub(crate) fn run_with_session(
+    engine: &crate::engine::Engine,
+    mut request: Request,
+    stop: &AtomicBool,
+    lease: Option<&crate::sessions::Lease>,
+) -> Result<Outcome, String> {
+    // A session always supplies its immutable verified identity, never caller credentials.
+    if request.side == Side::Remote {
+        if let Some(lease) = lease {
+            request.profile = Some(lease.profile().clone());
+            request.passphrase = zeroize::Zeroizing::new(lease.secret().to_owned());
+        }
+    }
+    if !request.items.is_empty() {return remote_batch(engine,request,stop,lease);}
     if matches!(request.action, Action::CreateFile | Action::Mkdir) {
-        return create_entry(engine, request, stop);
+        return create_entry(engine, request, stop, lease);
     }
     let secret = request.passphrase;
     if request.action == Action::Delete && !request.confirm_delete {
@@ -101,7 +142,7 @@ pub fn run(
                 vec![],
                 request.action != Action::Copy,
             )?;
-            local(request.action, &source, target.as_deref(), stop)
+            local_tracked(request.action, &source, target.as_deref(), stop, engine.operation_progress(&request.id).as_deref())
         }
         Side::Remote => {
             let source = remote_path(&request.source)?;
@@ -121,7 +162,7 @@ pub fn run(
                 .to_socket_addrs()
                 .map_err(|_| "Cannot resolve remote endpoint")?
                 .collect();
-            let (mut connection, identity) = sftp::connect(&profile, &secret, stop)?;
+            with_connection(lease, &profile, &secret, stop, |connection, identity| {
             let mut paths = vec![source.clone()];
             if let Some(target) = &target {
                 paths.push(target.clone());
@@ -129,23 +170,24 @@ pub fn run(
             engine.reserve_operation(&request.id, vec![], paths, identity, endpoints, false)?;
             let progress=engine.operation_progress(&request.id);
             sftp::file_operation_tracked(
-                &mut connection,
+                connection,
                 request.action,
                 &source,
                 target.as_deref(),
                 stop,
                 progress.as_deref(),
             ).map_err(|error|format!("{error} If a mutation was issued, a partial target or partially deleted tree may remain. Refresh before retrying."))
+            })
         }
     }
 }
-fn remote_batch(engine:&crate::engine::Engine,request:Request,stop:&AtomicBool)->Result<Outcome,String>{
-    if request.side!=Side::Remote || !matches!(request.action,Action::Copy|Action::Delete) || request.items.len()>1000 {return Err("Only remote copy/delete selections of at most 1,000 roots can be batched".into());}
+fn remote_batch(engine:&crate::engine::Engine,request:Request,stop:&AtomicBool,lease:Option<&crate::sessions::Lease>)->Result<Outcome,String>{
+    if request.side!=Side::Remote || !matches!(request.action,Action::Copy|Action::Move|Action::Delete) || request.items.len()>1000 {return Err("Only remote copy/move/delete selections of at most 1,000 roots can be batched".into());}
     if request.action==Action::Delete && !request.confirm_delete{return Err("Explicit delete confirmation is required".into());}
     let mut paths:Vec<String>=Vec::new();let mut selected=Vec::new();
     for item in &request.items {
         let source=remote_path(&item.source)?;
-        let target=if request.action==Action::Delete {if item.destination.is_some(){return Err("Delete must not specify a target".into());}None}else{Some(remote_path(item.destination.as_deref().ok_or("Copy requires destination")?)?)};
+        let target=if request.action==Action::Delete {if item.destination.is_some(){return Err("Delete must not specify a target".into());}None}else{Some(remote_path(item.destination.as_deref().ok_or("Copy/move requires destination")?)?)};
         if let Some(t)=&target{validate_pair(&source,t)?;}
         // Reject overlaps across ALL sources and targets before connecting/mutating.
         for path in std::iter::once(&source).chain(target.iter()) {if paths.iter().any(|p|sftp::overlap(p,path)){return Err("Overlapping batch paths are refused".into());}paths.push(path.clone());}
@@ -155,18 +197,29 @@ fn remote_batch(engine:&crate::engine::Engine,request:Request,stop:&AtomicBool)-
     let profile=request.profile.ok_or("Remote operation requires a profile")?;
     use std::net::ToSocketAddrs;
     let endpoints=(profile.host.as_str(),profile.port).to_socket_addrs().map_err(|_|"Cannot resolve remote endpoint")?.collect();
-    let (mut connection,identity)=sftp::connect(&profile,&request.passphrase,stop)?;
+    with_connection(lease,&profile,&request.passphrase,stop,|connection,identity| {
     engine.reserve_operation(&request.id,vec![],paths,identity,endpoints,false)?;
     let progress=engine.operation_progress(&request.id);if let Some(p)=&progress{p.selection(selected.len());}let mut outcomes=Vec::new();let mut failed=false;let mut completed=0;
+    if request.action==Action::Copy {return Ok(sftp::copy_selection(connection,&selected,stop,progress.as_deref()));}
+    let mut parents=sftp::OperationParents::default();
     for (index,(source,target)) in selected.iter().enumerate(){
         if failed || stop.load(Ordering::SeqCst){outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:false,message:"Not attempted after cancellation or earlier failure; refresh before retrying".into()});continue;}
         if let Some(p)=&progress{p.item(index+1,selected.len());}
-        match sftp::file_operation_tracked(&mut connection,request.action,source,target.as_deref(),stop,progress.as_deref()){
+        match sftp::file_operation_scoped(connection,request.action,source,target.as_deref(),stop,progress.as_deref(),&mut parents){
             Ok(out)=>{if let Some(p)=&progress{p.selection_committed();}completed+=out.completed;outcomes.push(ItemOutcome{source:source.clone(),completed:true,attempted:true,message:out.message});}
             Err(error)=>{failed=true;outcomes.push(ItemOutcome{source:source.clone(),completed:false,attempted:true,message:format!("{error}. Partial/uncertain targets may remain; refresh before retrying")});}
         }
     }
     Ok(Outcome{completed,items:outcomes,message:"Remote selection finished; inspect individual results and refresh".into()})
+    })
+}
+fn with_connection(
+    lease: Option<&crate::sessions::Lease>, profile: &Profile, secret: &str, stop: &AtomicBool,
+    operation: impl FnOnce(&mut sftp::Connection, String) -> Result<Outcome, String>,
+) -> Result<Outcome, String> {
+    if let Some(lease) = lease { return lease.with_operation(stop, operation); }
+    let (mut connection, identity) = sftp::connect(profile, secret, stop)?;
+    operation(&mut connection, identity)
 }
 pub fn validate_creation_name(name: &str, side: Side) -> Result<(), String> {
     if name.is_empty()
@@ -309,6 +362,7 @@ fn create_entry(
     engine: &crate::engine::Engine,
     request: Request,
     stop: &AtomicBool,
+    lease: Option<&crate::sessions::Lease>,
 ) -> Result<Outcome, String> {
     check(stop)?;
     let target = request
@@ -338,7 +392,7 @@ fn create_entry(
                 .to_socket_addrs()
                 .map_err(|_| "Cannot resolve remote endpoint")?
                 .collect();
-            let (mut connection, identity) = sftp::connect(&profile, &request.passphrase, stop)?;
+            with_connection(lease, &profile, &request.passphrase, stop, |connection, identity| {
             engine.reserve_operation(
                 &request.id,
                 vec![],
@@ -347,7 +401,8 @@ fn create_entry(
                 endpoints,
                 false,
             )?;
-            sftp::create_entry(&mut connection, request.action, &parent, &target, stop)
+            sftp::create_entry(connection, request.action, &parent, &target, stop)
+            })
         }
     }
 }
@@ -561,6 +616,11 @@ pub fn local(
     destination: Option<&Path>,
     stop: &AtomicBool,
 ) -> Result<Outcome, String> {
+    local_tracked(action, source, destination, stop, None)
+}
+fn local_tracked(action: Action, source: &Path, destination: Option<&Path>, stop: &AtomicBool,
+    progress: Option<&crate::operation_progress::Progress>) -> Result<Outcome, String> {
+    if let Some(p) = progress { p.phase("scanning"); }
     // Keep existing ancestor directories stable across local operations. Copy
     // additionally locks source and newly-created destination directories.
     let mut parent_locks = Vec::new();
@@ -573,6 +633,23 @@ pub fn local(
             parent_locks.push(lock_directory(ancestor)?);
         }
     }
+    // A same-filesystem rename moves the root entry without reading or following
+    // descendants. Keep parent handles and root validation, but do not walk the
+    // whole tree solely to count it before one atomic no-replace rename.
+    if action == Action::Move {
+        let target = destination.ok_or("Move requires destination")?;
+        local_path(source.to_str().ok_or("Unsupported path")?, true)?;
+        local_path(target.to_str().ok_or("Unsupported path")?, false)?;
+        check(stop)?;
+        if let Some(p) = progress { p.phase("finalizing"); }
+        rename_without_replace(source, target)?;
+        if let Some(p) = progress { p.committed(); }
+        return Ok(Outcome {
+            items: vec![],
+            completed: 1,
+            message: "Moved one selected root; refresh both folders.".into(),
+        });
+    }
     let (tree, _source_locks) = local_tree(source, stop, action == Action::Copy)?;
     check(stop)?;
     match action {
@@ -583,23 +660,23 @@ pub fn local(
             local_path(source.to_str().ok_or("Unsupported path")?, true)?;
             recycle(source, stop)?;
         }
-        Action::Move => {
-            let destination = destination.ok_or("Move requires destination")?;
-            local_path(source.to_str().ok_or("Unsupported path")?, true)?;
-            local_path(destination.to_str().ok_or("Unsupported path")?, false)?;
-            check(stop)?;
-            rename_without_replace(source, destination)?;
-        }
+        Action::Move => unreachable!("move is handled before tree inventory"),
         Action::Copy => {
             let destination = destination.ok_or("Copy requires destination")?;
+            let total = crate::operation_progress::checked_byte_total(
+                tree.iter().filter(|item| !item.dir).map(|item| Some(item.size)),
+            )?;
+            if let Some(p) = progress { p.plan("bytes", total); }
             for item in &tree {
+                if let Some(p) = progress { p.phase("copying"); }
                 check(stop)?;
                 local_path(item.path.to_str().ok_or("Unsupported source path")?, true)?;
-                let target = destination.join(
-                    item.path
-                        .strip_prefix(source)
-                        .map_err(|_| "Source escaped tree")?,
-                );
+                let relative = item.path.strip_prefix(source).map_err(|_| "Source escaped tree")?;
+                // Joining an empty suffix adds a separator on Windows, which
+                // makes a single-file destination look like a directory.
+                let target = if relative.as_os_str().is_empty() {
+                    destination.to_path_buf()
+                } else { destination.join(relative) };
                 local_path(target.to_str().ok_or("Unsupported target path")?, false)?;
                 if item.dir {
                     fs::create_dir(&target)
@@ -611,21 +688,8 @@ pub fn local(
                         .metadata()
                         .map_err(|_| "Copy source metadata unavailable")?;
                     let mut output=fs::OpenOptions::new().write(true).create_new(true).open(&target).map_err(|_|"Copy target creation failed; no existing item overwritten; partial target retained")?;
-                    let mut buf = [0u8; 65536];
-                    let mut bytes = 0;
-                    loop {
-                        check(stop)?;
-                        let n = input
-                            .read(&mut buf)
-                            .map_err(|_| "Copy read failed; partial target retained")?;
-                        if n == 0 {
-                            break;
-                        }
-                        output
-                            .write_all(&buf[..n])
-                            .map_err(|_| "Copy write failed; partial target retained")?;
-                        bytes += n as u64;
-                    }
+                    let bytes = copy_local_contents(&mut input, &mut output, stop, progress)?;
+                    if let Some(p) = progress { p.phase("finalizing"); }
                     output
                         .sync_all()
                         .map_err(|_| "Copy flush failed; partial target retained")?;
@@ -638,9 +702,11 @@ pub fn local(
                         return Err("Source changed during copy; partial target retained; source was not removed".into());
                     }
                 }
+                if let Some(p) = progress { p.committed(); }
             }
         }
     }
+    if let Some(p) = progress { p.phase("finalizing"); }
     Ok(Outcome {
         items:vec![],
         completed: tree.len(),
@@ -648,6 +714,31 @@ pub fn local(
             "Operation completed. Refresh the folders to reconcile any concurrent external changes."
                 .into(),
     })
+}
+// Count only successful writes, including a short write before a later error.
+fn copy_local_contents(input: &mut impl Read, output: &mut impl Write, stop: &AtomicBool,
+    progress: Option<&crate::operation_progress::Progress>) -> Result<u64, String> {
+    let mut buf = [0u8; 65536];
+    let mut bytes = 0;
+    loop {
+        check(stop)?;
+        let n = input.read(&mut buf).map_err(|_| "Copy read failed; partial target retained")?;
+        if n == 0 { return Ok(bytes); }
+        let mut offset = 0;
+        while offset < n {
+            check(stop)?;
+            match output.write(&buf[offset..n]) {
+                Ok(0) => return Err("Copy write failed; partial target retained".into()),
+                Ok(written) => {
+                    offset += written;
+                    bytes += written as u64;
+                    if let Some(p) = progress { p.bytes(written as u64); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("Copy write failed; partial target retained".into()),
+            }
+        }
+    }
 }
 #[cfg(windows)]
 fn rename_without_replace(source: &Path, target: &Path) -> Result<(), String> {
@@ -717,6 +808,84 @@ fn recycle(_: &Path, _: &AtomicBool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_progress_copy_uses_inventory_bytes_and_retains_finalizing_counts() {
+        let root = fixture();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("large"), vec![7; 150_000]).unwrap();
+        fs::write(source.join("empty"), b"").unwrap();
+        let engine = crate::engine::Engine::default();
+        let stop = engine.claim_operation("local-progress").unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id":"local-progress", "side":"local", "action":"copy",
+            "source":source, "destination":root.join("target"), "passphrase":"", "confirmDelete":false
+        })).unwrap();
+        assert_eq!(run(&engine, request, &stop).unwrap().completed, 3);
+        let snap = engine.operation_progress("local-progress").unwrap().snapshot();
+        assert_eq!((snap.done, snap.total, snap.entries), (150_000, Some(150_000), 3));
+        assert_eq!(snap.phase, "finalizing");
+        assert_eq!(fs::read(root.join("target/large")).unwrap(), vec![7; 150_000]);
+        assert_eq!(fs::read(source.join("large")).unwrap(), vec![7; 150_000]);
+        engine.finish_operation("local-progress");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_progress_zero_byte_copy_is_finalizing_not_prematurely_complete() {
+        let root = fixture();
+        fs::write(root.join("source"), b"").unwrap();
+        let progress = crate::operation_progress::Progress::default();
+        local_tracked(Action::Copy, &root.join("source"), Some(&root.join("target")),
+            &AtomicBool::new(false), Some(&progress)).unwrap();
+        let s = progress.snapshot();
+        assert_eq!((s.done, s.total, s.entries, s.phase), (0, Some(0), 1, "finalizing"));
+        assert_eq!(fs::read(root.join("source")).unwrap(), b"");
+        assert_eq!(fs::read(root.join("target")).unwrap(), b"");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_progress_partial_write_failure_and_cancel_count_only_success() {
+        struct Writer<'a> { stop: &'a AtomicBool, cancel: bool, wrote: bool }
+        impl Write for Writer<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.wrote { return Err(std::io::Error::other("synthetic write failure")); }
+                self.wrote = true;
+                if self.cancel { self.stop.store(true, Ordering::SeqCst); }
+                Ok(bytes.len().min(7))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        for cancel in [false, true] {
+            let stop = AtomicBool::new(false);
+            let p = crate::operation_progress::Progress::default();
+            p.plan("bytes", 20);
+            let mut writer = Writer { stop: &stop, cancel, wrote: false };
+            let err = copy_local_contents(&mut &b"12345678901234567890"[..], &mut writer, &stop, Some(&p)).unwrap_err();
+            assert_eq!(err.starts_with("Operation cancelled."), cancel);
+            let s = p.snapshot();
+            assert_eq!((s.done, s.total, s.entries, s.phase), (7, Some(20), 0, "copying"));
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn local_progress_move_has_no_byte_total_and_collision_cancel_do_not_commit() {
+        let root = fixture();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"synthetic").unwrap();
+        let p = crate::operation_progress::Progress::default();
+        local_tracked(Action::Move, &source, Some(&target), &AtomicBool::new(false), Some(&p)).unwrap();
+        assert_eq!((p.snapshot().done,p.snapshot().total,p.snapshot().entries,p.snapshot().phase),(0,None,1,"finalizing"));
+        fs::write(&source, b"keep").unwrap();
+        for cancel in [false, true] {
+            let p = crate::operation_progress::Progress::default();
+            let dest = if cancel { root.join("cancelled") } else { target.clone() };
+            assert!(local_tracked(Action::Move, &source, Some(&dest), &AtomicBool::new(cancel), Some(&p)).is_err());
+            assert_eq!((p.snapshot().done,p.snapshot().total,p.snapshot().entries),(0,None,0));
+            assert_eq!(fs::read(&source).unwrap(), b"keep");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn rejects_unsafe_remote_paths_and_self_copy() {
         for path in ["/a/../b", "/a/./b", "/", "relative", "/a\\b"] {
@@ -1118,6 +1287,31 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn local_move_renames_root_without_descendant_inventory_and_still_refuses_collision() {
+        let root = fixture();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        let mut leaf = source.clone();
+        for _ in 0..65 { leaf = leaf.join("d"); fs::create_dir(&leaf).unwrap(); }
+        fs::write(leaf.join("data"), b"generated content").unwrap();
+        let target = root.join("target");
+        let stop = AtomicBool::new(false);
+        // Copy's traversal bound remains; rename never follows the descendants.
+        assert!(local(Action::Copy, &source, Some(&target), &stop).is_err());
+        assert!(!target.exists());
+        assert_eq!(local(Action::Move, &source, Some(&target), &stop).unwrap().completed, 1);
+        assert!(!source.exists());
+        assert_eq!(fs::read(target.join(leaf.strip_prefix(&source).unwrap()).join("data")).unwrap(), b"generated content");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("sentinel"), b"keep").unwrap();
+        assert!(local(Action::Move, &source, Some(&target), &stop).is_err());
+        assert_eq!(fs::read(source.join("sentinel")).unwrap(), b"keep");
+        stop.store(true, Ordering::SeqCst);
+        assert!(local(Action::Move, &source, Some(&root.join("cancelled")), &stop).is_err());
+        assert!(source.exists());
+        assert!(!root.join("cancelled").exists());
+        fs::remove_dir_all(root).unwrap();
+    }    #[test]
     fn generated_tree_depth_limit_fails_before_target_creation() {
         let root = fixture();
         let source = root.join("source");

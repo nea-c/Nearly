@@ -31,7 +31,10 @@ mod text_codec;
 mod text_editor;
 mod text_remote;
 mod operation_progress;
+mod operation_transport;
+#[cfg(test)] mod warm_operation_tests;
 #[cfg(test)] mod remote_operation_tests;
+#[cfg(test)] mod parallel_copy_tests;
 mod upload;
 mod transfer_choices;
 mod transfer_io;
@@ -42,6 +45,7 @@ mod native_download_drag;
 mod zip_preflight;
 mod local_publish;
 mod local_zip;
+mod remote_zip;
 mod host_pins;
 mod host_verification;
 mod sessions;
@@ -1599,7 +1603,7 @@ async fn run_file_operation(
             engine: cleanup,
             id,
         };
-        file_ops::run(&engine, request, &stop)
+        file_ops::run_with_session(&engine, request, &stop, _lease.as_ref())
     })
     .await
     .map_err(|_| "File operation worker failed; outcome may be partial; refresh before retrying")?;
@@ -1759,6 +1763,29 @@ async fn run_local_archive(window: tauri::WebviewWindow, state:tauri::State<'_,A
         engine.reserve_archive_sources(&request.id,sources.clone(),target.clone(),parent.to_owned()).map_err(|_|ArchiveError::new("sync_overlap"))?;
         local_zip::execute_sources(request.action,&sources,&target,&budget)
     }).await.map_err(|_|ArchiveError::new("io_error"))?
+}
+fn claim_remote_archive_dispatch(state:&AppState,label:&str,request:&remote_zip::Request)->Result<(NativeOperation,Arc<AtomicBool>),zip_preflight::ArchiveError>{
+    use zip_preflight::ArchiveError;
+    let operation=match NativeOperation::claim(state,label,&request.id,Some(&request.session_id)){
+        Ok(operation)=>operation,
+        Err(_)=>{let _=abandon_native_preparation(state,label,&request.id);return Err(ArchiveError::new("busy"));}
+    };
+    if let Err(error)=request.validate(){state.engine.discard_prepared_operation(&request.id);return Err(error);}
+    let stop=match state.engine.claim_archive_operation(&request.id){Ok(stop)=>stop,Err(_)=>{state.engine.discard_prepared_operation(&request.id);return Err(ArchiveError::new("busy"));}};
+    Ok((operation,stop))
+}
+#[tauri::command]
+async fn run_remote_archive(window:tauri::WebviewWindow,app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:remote_zip::Request)->Result<local_zip::ArchiveOutcome,zip_preflight::ArchiveError>{
+    use zip_preflight::ArchiveError;
+    let (operation,stop)=claim_remote_archive_dispatch(&state,window.label(),&request)?;
+    let engine=state.engine.clone();
+    struct Release{engine:Arc<engine::Engine>,id:String}
+    impl Drop for Release{fn drop(&mut self){self.engine.finish_operation(&self.id);}}
+    let release=Release{engine:engine.clone(),id:request.id.clone()};
+    let lease=state.sessions.resolve(&request.session_id).map_err(|_|ArchiveError::new("remote_exec_unavailable"))?;
+    guard_connection_pin(&app,&state,lease.profile()).map_err(|_|ArchiveError::new("remote_exec_unavailable"))?;
+    lease.link_stop(&stop).map_err(|_|ArchiveError::new("cancelled"))?;
+    tauri::async_runtime::spawn_blocking(move||{let _operation=operation;let _release=release;remote_zip::run(&engine,&request,&lease,&stop)}).await.map_err(|_|ArchiveError::new("remote_outcome_unknown"))?
 }
 struct NativeOperation { registry: Arc<Mutex<window_ownership::Registry>>, id:String,finished:Option<Box<dyn FnOnce()+Send>> }
 impl NativeOperation {
@@ -2297,6 +2324,7 @@ fn main() {
             file_transfer_prompt,
             choose_file_transfer,
             run_local_archive,
+            run_remote_archive,
             prepare_file_operation,
             file_operation_progress,
             cancel_file_operation
@@ -2385,3 +2413,13 @@ mod input_policy_config_tests {
 
 #[cfg(test)] mod inventory_physical_fixture;
 #[cfg(test)] mod inventory_aba_fixture;
+
+#[cfg(test)] mod remote_zip_tests;
+
+#[cfg(test)] mod remote_archive_admission_tests {
+    use super::*;
+    fn request()->remote_zip::Request{serde_json::from_value(serde_json::json!({"id":"archive","sessionId":"missing","action":"compress","sources":["/a"],"destination":"/a.zip"})).unwrap()}
+    fn prepare(state:&AppState){let mut r=state.ownership.lock().unwrap();r.bootstrap("main").unwrap();r.bootstrap("other").unwrap();r.claim("main","tab").unwrap();r.operations.insert("archive".into(),"main".into());state.engine.prepare_operation("archive").unwrap();}
+    #[test]fn lost_workspace_reclaims_only_owned_unclaimed_preparation(){let state=AppState::default();prepare(&state);assert!(claim_remote_archive_dispatch(&state,"main",&request()).is_err());assert!(state.engine.operation_progress("archive").is_none());assert!(!state.ownership.lock().unwrap().operations.contains_key("archive"));}
+    #[test]fn foreign_or_active_dispatch_cannot_cancel_another_archive(){let state=AppState::default();prepare(&state);assert!(claim_remote_archive_dispatch(&state,"other",&request()).is_err());assert!(state.engine.operation_progress("archive").is_some());let mut req=request();req.session_id="tab".into();let(guard,stop)=claim_remote_archive_dispatch(&state,"main",&req).unwrap();assert!(claim_remote_archive_dispatch(&state,"main",&req).is_err());assert!(!stop.load(Ordering::SeqCst));drop(guard);state.engine.finish_operation("archive");}
+}

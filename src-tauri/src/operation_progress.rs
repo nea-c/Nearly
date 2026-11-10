@@ -11,6 +11,7 @@ pub struct Snapshot {
     pub entries: usize,
     pub item: usize,
     pub item_count: usize,
+    pub group_count: usize,
     pub selection_completed: Option<usize>,
     pub selection_total: Option<usize>,
 }
@@ -29,14 +30,16 @@ pub fn checked_byte_total(sizes:impl IntoIterator<Item=Option<u64>>)->Result<u64
 }
 pub struct Progress(Mutex<Snapshot>);
 impl Default for Progress {
-    fn default()->Self { Self(Mutex::new(Snapshot{phase:"connecting",unit:"bytes",done:0,total:None,entries:0,item:1,item_count:1,selection_completed:None,selection_total:None})) }
+    fn default()->Self { Self(Mutex::new(Snapshot{phase:"connecting",unit:"bytes",done:0,total:None,entries:0,item:1,item_count:1,group_count:1,selection_completed:None,selection_total:None})) }
 }
 impl Progress {
     pub fn snapshot(&self)->Snapshot {self.0.lock().unwrap_or_else(|e|e.into_inner()).clone()}
     /// Selected top-level roots, independent from each root's recursive inventory.
     pub fn selection(&self,total:usize){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());if s.selection_total.is_none(){s.selection_total=Some(total);s.selection_completed=Some(0);}}
     pub fn selection_committed(&self){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());if let (Some(done),Some(total))=(s.selection_completed,s.selection_total){s.selection_completed=Some(done.saturating_add(1).min(total));}}
-    pub fn item(&self,item:usize,count:usize){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.item=item;s.item_count=count;s.phase="scanning";s.done=0;s.total=None;s.entries=0;}
+    pub fn item(&self,item:usize,count:usize){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.item=item;s.item_count=count;s.group_count=1;s.phase="scanning";s.done=0;s.total=None;s.entries=0;}
+    pub fn group(&self,item:usize,count:usize,width:usize){self.item(item,count);self.0.lock().unwrap_or_else(|e|e.into_inner()).group_count=width;}
+    pub fn archive(&self,entries:usize,bytes:u64){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.phase="copying";s.unit="bytes";s.done=bytes;s.entries=entries;s.total=None;}
     pub fn phase(&self,phase:&'static str){self.0.lock().unwrap_or_else(|e|e.into_inner()).phase=phase;}
     pub fn plan(&self,unit:&'static str,total:u64){let mut s=self.0.lock().unwrap_or_else(|e|e.into_inner());s.unit=unit;s.total=Some(total);s.done=0;s.entries=0;s.phase=if unit=="entries"{"deleting"}else{"copying"};}
     /// Transfer batches retain their byte counter while the current entry changes.
@@ -61,4 +64,27 @@ impl Progress {
  #[test]fn selected_roots_are_not_recursive_entries_and_never_reset_between_items(){let p=Progress::default();p.selection(3);p.item(1,3);p.plan("entries",10);for _ in 0..10{p.committed();}assert_eq!(p.snapshot().selection_completed,Some(0));p.selection_committed();p.item(2,3);p.plan("bytes",u64::MAX);p.bytes(100);assert_eq!((p.snapshot().selection_completed,p.snapshot().selection_total),(Some(1),Some(3)));p.selection(9);assert_eq!(p.snapshot().selection_total,Some(3));p.selection_committed();p.item(3,3);p.plan("bytes",0);p.selection_committed();p.selection_committed();assert_eq!((p.snapshot().selection_completed,p.snapshot().selection_total),(Some(3),Some(3)));}
  #[test]fn partial_error_cancel_and_unknown_do_not_increment_successful_roots(){let p=Progress::default();p.selection(5);p.item(1,5);p.selection_committed();p.item(2,5);p.plan("entries",10);p.committed();p.phase("finalizing");assert_eq!(p.snapshot().selection_completed,Some(1));assert_eq!(p.snapshot().selection_total,Some(5));}
  #[test]fn nonselection_transfers_keep_selection_absent_and_empty_does_not_divide(){let p=Progress::default();p.plan("bytes",0);assert!(p.snapshot().selection_total.is_none());p.selection(0);assert_eq!(p.snapshot().selection_completed,Some(0));}
+}
+
+#[cfg(test)] mod phase_tests {
+    use super::*;
+    #[test] fn next_file_copying_preserves_bytes_after_finalizing() {
+        let p = Progress::default();
+        p.plan("bytes", 30); p.bytes(10); p.phase("finalizing");
+        assert_eq!((p.snapshot().done, p.snapshot().entries), (10, 0));
+        p.committed(); p.phase("copying"); p.bytes(20);
+        assert_eq!((p.snapshot().phase, p.snapshot().done, p.snapshot().total, p.snapshot().entries), ("copying", 30, Some(30), 1));
+        p.phase("finalizing");
+        assert_eq!(p.snapshot().entries, 1);
+    }
+}
+
+#[cfg(test)] mod group_tests {
+    use super::*;
+    #[test] fn parallel_group_counts_its_own_bytes_without_changing_selection_total() {
+        let p=Progress::default();p.selection(5);p.group(1,5,4);p.plan("bytes",512);
+        p.bytes(384);for _ in 0..3{p.committed();p.selection_committed();}
+        let s=p.snapshot();assert_eq!((s.group_count,s.done,s.total,s.selection_completed,s.selection_total),(4,384,Some(512),Some(3),Some(5)));
+        p.item(5,5);p.plan("bytes",128);let s=p.snapshot();assert_eq!((s.group_count,s.done,s.total,s.selection_completed),(1,0,Some(128),Some(3)));
+    }
 }

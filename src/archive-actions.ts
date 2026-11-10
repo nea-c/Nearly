@@ -7,11 +7,12 @@ export function archiveEligibility(
   side: Side,
   selected: readonly Entry[],
   localCapability: boolean,
+  remoteConnected = false,
 ): { compress: boolean; extract: boolean } {
   const entry = selected.length === 1 ? selected[0] : undefined;
   const compress =
-    side === "local" &&
     localCapability === true &&
+    (side === "local" || (side === "remote" && remoteConnected === true)) &&
     selected.length > 0 && selected.length <= 500 &&
     selected.every(item => typeof item.name === "string" && supportedName(item.name));
   return {
@@ -31,6 +32,12 @@ export function archiveDefaultName(
 }
 
 const codeMessages: Readonly<Record<string, string>> = {
+  remote_exec_unavailable: "接続先でSSHコマンドを実行できません。ZIP操作にはSSHコマンド実行が必要です。",
+  remote_platform_unsupported: "リモートZIP操作はLinuxのみ対応しています。Windowsなどの接続先には対応していません。",
+  remote_tool_unavailable: "リモートZIP操作には接続先のPython 3.8以降とzipfile・zlibが必要です。",
+  remote_publish_unavailable: "接続先では上書きを防ぐ安全な出力の確定に対応していないため、リモートZIP操作を利用できません。",
+  remote_path_mismatch: "SFTPとSSHのパスが一致しないため、ZIP操作を開始できません。",
+  remote_outcome_unknown: "接続の切断または中止によりZIP処理の結果を確認できません。出力が作成された可能性があります。再実行する前に一覧を更新して保存先を確認してください。",
   remote_unsupported: "リモートではZIP操作を利用できません。",
   invalid_request: "ZIP操作の指定が不正です。",
   unsupported_platform: "この環境ではZIP操作を利用できません。",

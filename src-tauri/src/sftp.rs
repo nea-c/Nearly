@@ -27,6 +27,9 @@ pub(crate) use sync_policy::Policy as SyncPolicy;
 pub(crate) use sync_policy::unchanged_notice as unchanged_sync_notice;
 pub(crate) use comparison_snapshot::comparison_snapshot;
 #[path="sftp_parallel.rs"] mod sftp_parallel;
+#[path="sftp_copy.rs"] mod sftp_copy;
+#[path="sftp_copy_selection.rs"] mod sftp_copy_selection;
+pub(crate) use sftp_copy_selection::selection as copy_selection;
 pub(crate) use sftp_parallel::{upload_batch,upload_rolling,prepare_upload_parent,BatchCommit,BatchUploadResult};
 #[path="upload_fingerprint.rs"] mod upload_fingerprint;
 pub(crate) use upload_fingerprint::unchanged_uploaded_content;
@@ -298,14 +301,18 @@ impl Drop for AbortSocket {
         let _ = self.0.shutdown(Shutdown::Both);
     }
 }
+#[path="sftp_archive.rs"] mod archive;
 pub struct Connection {
+    archive_ready: bool,
     pub(crate) sync_policy:Option<SyncPolicy>,
     pub(crate) diagnostics: Option<crate::engine::sync_decisions::Diagnostics>,
     pub(crate) raw: RawSftpSession,
     session: client::Handle<VerifyHost>,
     abort: AbortSocket,
     pub(crate) posix_rename: bool,
+    copy_data: AtomicBool,
     pub(crate) upload_cap:usize,
+    copy_cap:usize,
     fingerprints: std::sync::Mutex<upload_fingerprint::Cache>,
 }
 impl Connection {
@@ -614,24 +621,27 @@ pub fn connect(
             let version = raw.init().await.map_err(|_| "SFTP initialization failed")?;
             // Negotiate before any writes. A failed advertised capability is a
             // serial fallback, never a reason to replay an in-flight upload.
-            let upload_cap = if version.extensions.get("limits@openssh.com").is_some_and(|v| v == "1") {
+            let (upload_cap,copy_cap) = if version.extensions.get("limits@openssh.com").is_some_and(|v| v == "1") {
                 match raw.limits().await {
-                    Ok(limits) if limits.max_open_handles > 0 => limits.max_open_handles.min(8) as usize,
-                    Ok(_) => 8,
-                    Err(_) => 1,
+                    Ok(limits) if limits.max_open_handles > 0 => (limits.max_open_handles.min(8) as usize,(limits.max_open_handles / 2).min(4) as usize),
+                    Ok(_) => (8,4),
+                    Err(_) => (1,1),
                 }
-            } else { 8 };
+            } else { (8,4) };
             let posix_rename = version
                 .extensions
                 .get("posix-rename@openssh.com")
                 .is_some_and(|v| v == "1");
             Ok((
                 Connection {
+                    archive_ready: false,
                     raw,
                     session,
                     abort,
                     posix_rename,
+                    copy_data: AtomicBool::new(version.extensions.get("copy-data").is_some_and(|v| v == "1")),
                     upload_cap,
+                    copy_cap,
                     fingerprints: Default::default(),
                     diagnostics: None,
                     sync_policy:None,
@@ -807,7 +817,34 @@ pub fn file_operation(
 ) -> Result<crate::file_ops::Outcome, String> {
     file_operation_tracked(s,action,source,destination,stop,None)
 }
+// Existing ancestors are checked once per copy/move selection, not once per
+// packet or selected file. This is a path-based file-manager operation, not a
+// snapshot or confinement guarantee against external namespace changes.
+// Never retain observations across operations/connections or cache failed paths.
+#[derive(Default)]
+pub(crate) struct OperationParents(std::collections::HashSet<String>);
+impl OperationParents {
+    async fn check(&mut self, raw: &RawSftpSession, path: &str) -> Result<(), String> {
+        let mut current = String::new();
+        for component in std::iter::once("").chain(path.split('/').filter(|s| !s.is_empty())) {
+            if component.is_empty() { current.push('/'); }
+            else { if current != "/" { current.push('/'); } current.push_str(component); }
+            if self.0.contains(&current) { continue; }
+            let a = raw.lstat(current.clone()).await.map_err(|_| remote_error("directory lookup"))?.attrs;
+            if !a.is_dir() || a.is_symlink() { return Err("Remote path contains a symlink or non-directory".into()); }
+            self.0.insert(current.clone());
+        }
+        Ok(())
+    }
+}
+
 pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,source:&str,destination:Option<&str>,stop:&AtomicBool,progress:Option<&crate::operation_progress::Progress>)->Result<crate::file_ops::Outcome,String>{
+    file_operation_scoped(s,action,source,destination,stop,progress,&mut OperationParents::default())
+}
+pub(crate) fn file_operation_scoped(s:&mut Connection,action:crate::file_ops::Action,source:&str,destination:Option<&str>,stop:&AtomicBool,progress:Option<&crate::operation_progress::Progress>,parents:&mut OperationParents)->Result<crate::file_ops::Outcome,String>{
+    file_operation_prepared(s,action,source,destination,stop,progress,parents,None)
+}
+fn file_operation_prepared(s:&mut Connection,action:crate::file_ops::Action,source:&str,destination:Option<&str>,stop:&AtomicBool,progress:Option<&crate::operation_progress::Progress>,parents:&mut OperationParents,root_attrs:Option<FileAttributes>)->Result<crate::file_ops::Outcome,String>{
     use crate::file_ops::{check, Action, Outcome};
     if let Some(p)=progress{p.phase("scanning");}
     fn parent(path: &str) -> &str {
@@ -818,34 +855,41 @@ pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,s
             p
         }
     }
-    async fn absent(raw: &RawSftpSession, path: &str) -> Result<(), String> {
-        checked_directory(raw, parent(path), false).await?;
-        match raw.lstat(path).await {
-            Err(SftpError::Status(s)) if s.status_code == StatusCode::NoSuchFile => Ok(()),
-            Ok(_) => Err("Destination already exists; overwrite is unsupported".into()),
-            Err(_) => Err("Destination lookup failed; no changes attempted".into()),
-        }
-    }
-    async fn attrs(raw: &RawSftpSession, path: &str) -> Result<FileAttributes, String> {
-        checked_directory(raw, parent(path), false).await?;
-        let attrs = raw
-            .lstat(path)
-            .await
-            .map_err(|_| remote_error("source lookup"))?
-            .attrs;
+    async fn leaf_attrs(raw: &RawSftpSession, path: &str) -> Result<FileAttributes, String> {
+        let attrs = raw.lstat(path).await.map_err(|_| remote_error("source lookup"))?.attrs;
         if attrs.is_symlink() || (!attrs.is_dir() && !attrs.file_type().is_file()) {
-            return Err(
-                "Remote tree contains a symlink or unsupported entry; operation refused".into(),
-            );
+            return Err("Remote tree contains a symlink or unsupported entry; operation refused".into());
         }
         Ok(attrs)
     }
-    s.run(stop,async {
-        let mut pending=vec![(source.to_string(),0)]; let mut tree=Vec::new();
-        while let Some((path,depth))=pending.pop() {
+    async fn attrs(raw: &RawSftpSession, path: &str, parents: &mut OperationParents) -> Result<FileAttributes, String> {
+        parents.check(raw, parent(path)).await?;
+        leaf_attrs(raw, path).await
+    }
+    let operation=async {
+        // RENAME changes one directory entry, not its descendants. Validate only
+        // the source root and destination parents; never crawl a moved tree.
+        if action==Action::Move {
+            check(stop)?;
+            attrs(&s.raw,source,parents).await?;
+            let target=destination.ok_or("Move requires destination")?;
+            parents.check(&s.raw,parent(target)).await?;
+            // SFTP v3 RENAME must reject an existing destination. Do not use
+            // posix-rename (which replaces it), pre-delete, or a fallback copy.
+            check(stop)?;
+            if let Some(p)=progress{p.phase("finalizing");}
+            s.raw.rename(source,target).await.map_err(|_|"Remote rename failed or result uncertain; no delete-before-copy fallback was attempted. Refresh before retrying")?;
+            return Ok(Outcome{items:vec![],completed:1,message:"Remote operation completed; refresh both folders.".into()});
+        }
+        let mut pending=vec![(source.to_string(),0,root_attrs)]; let mut tree=Vec::new();
+
+        while let Some((path,depth,listed))=pending.pop() {
             check(stop)?;
             if depth>64 || tree.len()>=10000 {return Err("Operation tree exceeds 10,000 entries or depth 64".into());}
-            let a=attrs(&s.raw,&path).await?;
+            // READDIR already supplies regular-file metadata. Reuse it only for
+            // inventory; fresh leaf/type checks still precede each mutation.
+            if action==Action::Delete {parents.0.clear();}
+            let a=match listed {Some(a)=>a,None=>attrs(&s.raw,&path,parents).await?};
             if a.is_dir() {
                 let handle=s.raw.opendir(path.clone()).await.map_err(|_|remote_error("opendir"))?.handle;
                 loop {
@@ -856,7 +900,8 @@ pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,s
                             if name=="." || name==".." {continue;}
                             if name.is_empty() || name.contains(['/', '\\']) || name.chars().any(|c|c.is_control()) {return Err("Unsafe remote entry name; operation refused before mutation".into());}
                             if pending.len()+tree.len()>=9999 {return Err("Operation tree exceeds 10,000 entries".into());}
-                            pending.push((format!("{path}/{name}"),depth+1));
+                            let listed=if action==Action::Copy && entry.attrs.file_type().is_file() && entry.attrs.size.is_some() && entry.attrs.mtime.is_some(){Some(entry.attrs)}else{None};
+                            pending.push((format!("{path}/{name}"),depth+1,listed));
                         },
                         Err(SftpError::Status(status)) if status.status_code==StatusCode::Eof=>break,
                         Err(_)=>return Err(remote_error("tree listing")),
@@ -866,8 +911,6 @@ pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,s
             }
             tree.push((path,a));
         }
-        // Copy checks each destination immediately before creation below; no duplicate root lookup.
-        if progress.is_none() || action!=Action::Copy {if let Some(target)=destination {absent(&s.raw,target).await?;}}
         if let Some(p)=progress {
             if action==Action::Delete{p.plan("entries",tree.len() as u64);}
             else if action==Action::Copy{let total=tree.iter().filter(|(_,a)|!a.is_dir()).try_fold(0u64,|sum,(_,a)|sum.checked_add(a.size?)).ok_or("Remote copy total size unavailable")?;p.plan("bytes",total);}
@@ -876,16 +919,10 @@ pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,s
         check(stop)?;
         match action {
             Action::CreateFile | Action::Mkdir=>return Err("Creation requires its dedicated validation path".into()),
-            Action::Move=>{
-                attrs(&s.raw,source).await?;
-                let target=destination.ok_or("Move requires destination")?;
-                absent(&s.raw,target).await?;
-                check(stop)?;
-                s.raw.rename(source,target).await.map_err(|_|"Remote rename failed or result uncertain; no delete-before-copy fallback was attempted. Refresh before retrying")?;
-            },
+            Action::Move=>unreachable!("rename handled before tree inventory"),
             Action::Delete=>for (path,original) in tree.iter().rev() {
                 check(stop)?;
-                let current=attrs(&s.raw,path).await?;
+                let current=attrs(&s.raw,path,&mut OperationParents::default()).await?;
                 if current.is_dir()!=original.is_dir() {return Err("Remote source changed; deletion stopped. Earlier items may already be deleted".into());}
                 if current.is_dir() {s.raw.rmdir(path.clone()).await.map_err(|_|"Remote directory deletion failed; some selected descendants may already be deleted")?;}
                 else {s.raw.remove(path.clone()).await.map_err(|_|"Remote deletion failed; some selected descendants may already be deleted")?;}
@@ -893,36 +930,49 @@ pub fn file_operation_tracked(s:&mut Connection,action:crate::file_ops::Action,s
             },
             Action::Copy=>{
                 let target=destination.ok_or("Copy requires destination")?;
-                for (path,original) in &tree {
-                    check(stop)?;
-                    let current=attrs(&s.raw,path).await?;
-                    if current.is_dir()!=original.is_dir() || current.size!=original.size || current.mtime!=original.mtime {return Err("Remote source changed; partial copy retained; source not removed".into());}
-                    let suffix=path.strip_prefix(source).ok_or("Remote source escaped tree")?;
-                    let output=format!("{target}{suffix}");
-                    absent(&s.raw,&output).await?;
-                    if original.is_dir() {s.raw.mkdir(output,FileAttributes::empty()).await.map_err(|_|"Remote copy directory creation failed; partial target retained")?;if let Some(p)=progress{p.committed();}continue;}
-                    let expected=original.size.ok_or("Remote file size unavailable; copy refused")?;
-                    let input=s.raw.open(path.clone(),OpenFlags::READ,FileAttributes::empty()).await.map_err(|_|remote_error("copy source open"))?.handle;
-                    let out=s.raw.open(output,OpenFlags::CREATE|OpenFlags::EXCLUDE|OpenFlags::WRITE,FileAttributes::empty()).await.map_err(|_|"Remote target creation failed; partial target retained; no overwrite attempted")?.handle;
-                    let mut offset=0;
-                    while offset<expected {
+                if s.copy_cap==0 {return Err("Remote server handle limit is below the two handles required for copying; no copy attempted".into());}
+                let mut at=0;
+                while at<tree.len() {
+                    let mut files=Vec::new();
+                    while at<tree.len() && files.len()<s.copy_cap {
+                        let (path,original)=&tree[at];
+                        if !files.is_empty() && (original.is_dir() || original.size.is_none_or(|v|v>sftp_copy_selection::SMALL_FILE)) {break;}
                         check(stop)?;
-                        let data=s.raw.read(input.clone(),offset,((expected-offset).min(65536)) as u32).await.map_err(|_|"Remote copy read failed; partial target retained")?.data;
-                        if data.is_empty() || data.len() as u64>expected-offset {return Err("Remote copy source size changed; partial target retained".into());}
-                        let len=data.len();s.raw.write(out.clone(),offset,data).await.map_err(|_|"Remote copy write failed; partial target retained")?;offset+=len as u64;if let Some(p)=progress{p.bytes(len as u64);}
+                        let current=if tree.len()==1 && !original.is_dir(){original.clone()}else{attrs(&s.raw,path,parents).await?};
+                        if current.is_dir()!=original.is_dir() || current.size!=original.size || current.mtime!=original.mtime {return Err("Remote source changed; partial copy retained; source not removed".into());}
+                        let suffix=path.strip_prefix(source).ok_or("Remote source escaped tree")?;
+                        let output=format!("{target}{suffix}");
+                        parents.check(&s.raw,parent(&output)).await?;
+                        if original.is_dir() {
+                            check(stop)?;
+                            s.raw.mkdir(output.clone(),FileAttributes::empty()).await.map_err(|_|"Remote copy directory creation failed; partial target retained")?;
+                            parents.0.insert(output);
+                            if let Some(p)=progress{p.committed();}
+                            at+=1;break;
+                        }
+                        let size=original.size.ok_or("Remote file size unavailable; copy refused")?;
+                        files.push(sftp_copy_selection::CopyFile{source:path.clone(),target:output,size});at+=1;
+                        if size>sftp_copy_selection::SMALL_FILE {break;}
                     }
-                    if let Some(p)=progress{p.phase("finalizing");}
-                    s.raw.close(input).await.map_err(|_|remote_error("copy source close"))?;
-                    s.raw.close(out).await.map_err(|_|remote_error("copy target close"))?;
-                    let after=attrs(&s.raw,path).await?;
-                    if after.size!=original.size || after.mtime!=original.mtime {return Err("Remote source changed during copy; partial target retained".into());}
-                    if let Some(p)=progress{p.committed();p.phase("copying");}
+                    if !files.is_empty() {
+                        let slots:Vec<_>=files.iter().map(|_|std::cell::RefCell::new(None)).collect();
+                        let started:Vec<_>=files.iter().map(|_|std::cell::Cell::new(false)).collect();
+                        sftp_copy_selection::files_async(s,&files,stop,progress,false,&slots,&started).await;
+                        for slot in slots {slot.into_inner().unwrap_or_else(||Err("Copy cancelled before admission".into()))?;}
+                    }
                 }
             },
         }
         if let Some(p)=progress{p.phase("finalizing");}
         Ok(Outcome {items:vec![],completed:tree.len(),message:"Remote operation completed; refresh both folders.".into()})
-    })
+    };
+    if action==Action::Copy {
+        // Settle admitted requests on cancellation; individual requests retain
+        // the existing timeout. Do not lose acknowledged sibling results.
+        let result=runtime().block_on(operation);
+        if result.is_err(){let _=s.abort.0.shutdown(Shutdown::Both);}
+        result
+    } else {s.run(stop,operation)}
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteStamp {

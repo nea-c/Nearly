@@ -210,3 +210,49 @@ test("additional native archive codes and malformed errors stay explicit and rea
 });
 
 test('ZIP dialog owned action and destination labels use exact catalog keys',async()=>{const {t,setLanguage}=await import('../.test-build/i18n.js');setLanguage('en');for(const [ja,en]of [['対象','Target'],['実行','Run'],['展開先フォルダー名','Extraction folder name'],['ZIPファイル名','ZIP file name']])assert.equal(t(ja),en);});
+
+
+test("remote ZIP requires a connected native session and preserves selection rules", async () => {
+  const { archiveEligibility } = await load();
+  assert.deepEqual(archiveEligibility("remote", [entry("a.ZIP")], true, true), { compress: true, extract: true });
+  for (const connected of [false, undefined, null, 1, "true"])
+    assert.deepEqual(archiveEligibility("remote", [entry("a.zip")], true, connected), { compress: false, extract: false });
+  assert.deepEqual(archiveEligibility("remote", [entry("a.zip")], false, true), { compress: false, extract: false });
+  assert.deepEqual(archiveEligibility("remote", [entry("a.zip"), entry("b.zip")], true, true), { compress: true, extract: false });
+  assert.deepEqual(archiveEligibility("remote", [entry("folder.zip", true)], true, true), { compress: true, extract: false });
+  assert.deepEqual(archiveEligibility("remote", [entry("bad/name")], true, true), { compress: false, extract: false });
+});
+
+test("remote refusals and unknown outcome are translated without claiming cancellation", async () => {
+  const { formatArchiveError } = await load();
+  const { setLanguage } = await import("../.test-build/i18n.js");
+  for (const language of ["en", "ja"]) {
+    setLanguage(language);
+    for (const code of ["remote_exec_unavailable", "remote_platform_unsupported", "remote_tool_unavailable", "remote_publish_unavailable", "remote_path_mismatch", "remote_outcome_unknown"]) {
+      const message = formatArchiveError({ code, committed: false });
+      assert.ok(message.length > 20);
+      assert.ok(!message.includes(code));
+      if (language === "en") assert.ok(!/[\u3040-\u30ff\u3400-\u9fff]/.test(message));
+    }
+    const unknown = formatArchiveError({ code: "remote_outcome_unknown", stagePath: '/srv/<stage>&"', committed: false });
+    assert.ok(unknown.endsWith('/srv/<stage>&"'));
+    assert.ok(!unknown.includes(language === "en" ? "was cancelled" : "中止しました"));
+    assert.ok(unknown.includes(language === "en" ? "before retrying" : "再実行する前"));
+  }
+});
+
+
+test("remote runtime and atomic publication capability errors have distinct bilingual guidance", async () => {
+  const { formatArchiveError } = await load();
+  const { setLanguage } = await import("../.test-build/i18n.js");
+  for (const language of ["en", "ja"]) {
+    setLanguage(language);
+    const runtime = formatArchiveError({code:"remote_tool_unavailable",committed:false});
+    assert.ok(runtime.includes("Python 3.8"));
+    assert.ok(runtime.includes("zipfile"));
+    assert.ok(runtime.includes("zlib"));
+    const publication = formatArchiveError({code:"remote_publish_unavailable",committed:false});
+    assert.ok(publication.includes(language === "en" ? "safe atomic publication" : "安全な出力の確定"));
+    assert.ok(!publication.includes("Python"));
+  }
+});

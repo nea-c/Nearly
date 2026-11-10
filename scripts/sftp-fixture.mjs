@@ -15,7 +15,7 @@ const mpint = (b) => {
   return sshString(b[0] & 128 ? Buffer.concat([Buffer.from([0]), b]) : b);
 };
 const sha1 = (b) => crypto.createHash("sha1").update(b).digest();
-export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, mapRealpath, beforeRename, posixRename = true, advertisedOpenHandles, rejectLimits = false, responseDelayMs = 0, observeRequest, observeResponse} = {}) {
+export async function createFixture(output, {firstHandle = 1, beforeStat, beforeOpen, beforeWrite, beforeRead, beforeClose, beforeReadDir, beforeRmdir, beforeSetStat, mapReadDir, mapStat, mapRealpath, beforeRename, posixRename = true, copyData = false, rejectCopyData = false, beforeCopyData, maxReadLength = 65536, advertisedOpenHandles, rejectLimits = false, responseDelayMs = 0, holdLargeWrites = true, observeRequest, observeResponse} = {}) {
   if (!Number.isInteger(responseDelayMs) || responseDelayMs < 0 || responseDelayMs > 100) throw Error('Invalid generated response delay');
   output = path.resolve(output);
   fs.mkdirSync(output, { recursive: true });
@@ -158,9 +158,10 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
     const limitReplies=new Map();
     client._protocol.channelData = (channel, data) => {
       if (data.length>=9&&data[4]===101&&limitReplies.has(data.readUInt32BE(5))){const id=data.readUInt32BE(5),payload=limitReplies.get(id);limitReplies.delete(id);const reply=Buffer.alloc(9+payload.length);reply.writeUInt32BE(reply.length-4);reply[4]=201;reply.writeUInt32BE(id,5);payload.copy(reply,9);return send(channel,reply);}
-      if ((posixRename||advertisedOpenHandles!==undefined) && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
+      if ((posixRename||copyData||advertisedOpenHandles!==undefined) && data.length === 9 && data.readUInt32BE(0) === 5 && data[4] === 2) {
         const version = Buffer.concat([
           data,
+          ...(copyData?[sshString("copy-data"),sshString("1")]:[]),
           ...(posixRename?[sshString("posix-rename@openssh.com"),sshString("1")]:[]),
           ...(advertisedOpenHandles!==undefined?[sshString("limits@openssh.com"),sshString("1")]:[]),
         ]);
@@ -324,7 +325,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
                 data.length,
                 offset,
               );
-              if (data.length >= 32768) {
+              if (holdLargeWrites && data.length >= 32768) {
                 largeWrites++;
                 setTimeout(() => {
                   if (!stream.destroyed)
@@ -344,7 +345,7 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
             const source=entry?.p ? '/'+path.relative(remote,entry.p).split(path.sep).join('/') : '';
             if(beforeRead){const injected=await beforeRead(source,offset,length);if(typeof injected==='number'){stream.status(id,injected);return;}}
             try {
-              const buffer = Buffer.alloc(Math.min(length, 65536));
+              const buffer = Buffer.alloc(Math.min(length, maxReadLength));
               const count = fs.readSync(handles.get(h.toString("hex")).fd, buffer, 0, buffer.length, offset);
               if (count) stream.data(id, buffer.subarray(0, count));
               else stream.status(id, EOF);
@@ -374,7 +375,10 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               if (e?.fd !== undefined) {fs.closeSync(e.fd);openFileHandles--;}
               if (e?.list !== undefined) openDirectoryHandles--;
               handles.delete(h.toString("hex"));
-              status(id);
+              const target=e?.p ? '/'+path.relative(remote,e.p).split(path.sep).join('/') : '';
+              const override=beforeClose ? await beforeClose(target) : undefined;
+              if(stream.destroyed)return;
+              if(override!==undefined)stream.status(id,override);else status(id);
             } catch (e) {
               status(id, e);
             }
@@ -420,7 +424,21 @@ export async function createFixture(output, {firstHandle = 1, beforeStat, before
               status(id);
             } catch (e) { status(id, e); }
           });
-          stream.on("EXTENDED", (id, request, data) => {
+          stream.on("EXTENDED", async (id, request, data) => {
+            if(request==='copy-data' && copyData){
+              if(rejectCopyData)return stream.status(id,8);
+              const injected=await beforeCopyData?.();if(typeof injected==='number')return stream.status(id,injected);
+              try {
+                let offset=0;
+                const handle=()=>{const n=data.readUInt32BE(offset);offset+=4;const h=data.subarray(offset,offset+n);offset+=n;return handles.get(h.toString('hex'));};
+                const integer=()=>{const n=Number(data.readBigUInt64BE(offset));offset+=8;if(!Number.isSafeInteger(n))throw Error('Invalid offset');return n;};
+                const input=handle(),from=integer(),length=integer(),output=handle(),to=integer();
+                if(offset!==data.length||!input||!output||!length)throw Error('Invalid copy-data');
+                const buffer=Buffer.alloc(Math.min(length,65536));let copied=0;
+                while(copied<length){const n=fs.readSync(input.fd,buffer,0,Math.min(buffer.length,length-copied),from+copied);if(!n)throw Error('Short source');fs.writeSync(output.fd,buffer,0,n,to+copied);copied+=n;}
+                return stream.status(id,OK);
+              }catch{return stream.status(id,FAILURE);}
+            }
             if(request==='limits@openssh.com'&&advertisedOpenHandles!==undefined){if(rejectLimits)return stream.status(id,8);const payload=Buffer.alloc(32);[1048576,32768,32768,advertisedOpenHandles].forEach((n,i)=>payload.writeBigUInt64BE(BigInt(n),i*8));limitReplies.set(id,payload);return stream.status(id,0);}
             if (request !== "posix-rename@openssh.com")
               return stream.status(id, 8);
