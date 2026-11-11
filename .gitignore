@@ -186,3 +186,5 @@ Thumbs.db
 !/docs/remote-zip.md
 
 !/scripts/remote-zip-test.mjs
+
+!/docs/updater-recovery-redesign.md

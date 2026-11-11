@@ -1,6 +1,8 @@
 //! Protocol-3 native recovery adapter. Persisted records are never capabilities.
 #[path = "update_recovery_cleanup.rs"]
 mod cleanup;
+#[path = "update_recovery_feedback.rs"]
+mod feedback;
 use crate::update_cleanup::codec;
 use crate::update_transaction::windows_impl as fs;
 use crate::update_transaction::{Error, Result};
@@ -434,6 +436,31 @@ impl RegistryKey {
     }
 }
 
+// Each retry is bounded and only sees a genuine native sharing/lock error.
+// Callers must ensure a returned LockContention means no effect occurred, or
+// exact endpoint reinspection proved no effect. Uncertainty is never retried.
+const CONTENTION_ATTEMPTS: u32 = 6;
+fn classify_file_error(error: &std::io::Error) -> Error {
+    match error.raw_os_error() {
+        Some(code @ (32 | 33)) => Error::LockContention(code as u32),
+        _ if error.kind() == std::io::ErrorKind::NotFound => Error::Missing,
+        _ => Error::Io,
+    }
+}
+fn retry_contention<T>(mut operation: impl FnMut() -> Result<T>, mut report: impl FnMut(u32, &Error)) -> Result<T> {
+    for attempt in 1..=CONTENTION_ATTEMPTS {
+        match operation() {
+            Err(error @ Error::LockContention(_)) => {
+                report(attempt, &error);
+                if attempt == CONTENTION_ATTEMPTS { return Err(error); }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FileProof {
@@ -448,7 +475,7 @@ impl FileProof {
             .share_mode(5)
             .custom_flags(REPARSE)
             .open(path)
-            .map_err(|_| Error::Io)?;
+            .map_err(|error| classify_file_error(&error))?;
         let information = fs::regular(&file)?;
         require_default_stream(path)?;
         let (length, digest) = fs::hash_file(&mut file, crate::update_package::MAX_PACKAGE as u64)?;
@@ -481,11 +508,7 @@ impl FileProof {
             options.access_mode(0x80000000 | 0x00010000);
         }
         let mut file = options.open(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::Missing
-            } else {
-                Error::Io
-            }
+            classify_file_error(&e)
         })?;
         let information = fs::regular(&file)?;
         require_default_stream(path)?;
@@ -536,6 +559,8 @@ pub(crate) enum FileOperation {
     CreateRestoreCandidate,
     DisplaceNew,
     PromoteOld,
+    ReplaceOld,
+    ReplaceNew,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1001,7 +1026,12 @@ impl RecoverySession {
             .join(format!("restore-{}", LIVE_NAMES[index]))
     }
     fn publish(&mut self) -> Result<()> {
-        self.store.publish(&mut self.record)
+        // Publication failure is never a retryable file operation. The durable
+        // record may differ from memory even when a low-level API reports failure.
+        self.store.publish(&mut self.record).map_err(|error| {
+            feedback::record(self, "publicationUncertain", Some(&error));
+            Error::Uncertain
+        })
     }
     fn index(object: InstallObject) -> Result<usize> {
         match object {
@@ -1022,13 +1052,16 @@ impl RecoverySession {
     fn observe_file(&self, index: usize) -> Result<ObservedObject> {
         let state = &self.record.files[index];
         let live = self.live_path(index);
-        match FileProof::open(&live, false) {
+        match retry_contention(|| FileProof::open(&live, false), |attempt, error| {
+            feedback::record(self, &format!("observeFileLockRetry{attempt}"), Some(error));
+        }) {
             Ok((_, p)) if p == state.old || state.restore.as_ref() == Some(&p) => {
                 return Ok(ObservedObject::Old)
             }
             Ok((_, p)) if state.candidate.as_ref() == Some(&p) => return Ok(ObservedObject::New),
             Ok(_) => return Ok(ObservedObject::Foreign),
             Err(Error::Missing) => (),
+            Err(error @ Error::LockContention(_)) => return Err(error),
             Err(_) => return Ok(ObservedObject::Uncertain),
         }
         self.validate_backups()?;
@@ -1073,6 +1106,11 @@ impl RecoverySession {
         Ok(ObservedTuple { objects })
     }
     fn rename(&self, source: &Path, destination: &Path, expected: &FileProof) -> Result<()> {
+        retry_contention(|| self.rename_once(source, destination, expected), |attempt, error| {
+            feedback::record(self, &format!("renameLockAttempt{attempt}of{CONTENTION_ATTEMPTS}"), Some(error));
+        })
+    }
+    fn rename_once(&self, source: &Path, destination: &Path, expected: &FileProof) -> Result<()> {
         self.store.root.verify()?;
         let (handle, p) = FileProof::open(source, true)?;
         if &p != expected {
@@ -1130,14 +1168,72 @@ impl RecoverySession {
         // Retained source handle permits identity verification through rename.
         let endpoint = FileProof::open(destination, true);
         let source_absent = matches!(FileProof::open(source, false), Err(Error::Missing));
-        if !source_absent || !endpoint.is_ok_and(|(_, p)| p == *expected) {
-            return Err(if status < 0 {
-                Error::Io
-            } else {
-                Error::Uncertain
+        if source_absent && endpoint.is_ok_and(|(_, p)| p == *expected) {
+            return Ok(()); // Exact completion wins over a lost native acknowledgment.
+        }
+        drop(handle); // Do not let our own DELETE access block read-only reinspection.
+        // Only a classified lock with exact unchanged endpoints is retryable.
+        // Never infer "not executed" from an API's return code alone.
+        if status < 0 && expected.matches(source)
+            && matches!(FileProof::open(destination, false), Err(Error::Missing)) {
+            return Err(match status as u32 {
+                0xc0000043 | 0xc0000054 | 0xc0000055 => Error::LockContention(status as u32),
+                _ => Error::Io,
             });
         }
-        Ok(())
+        Err(Error::Uncertain)
+    }
+    /// Same-volume namespace replacement. Keep both immutable objects pinned.
+    /// Shared-delete read pins prevent byte writers, and the transaction lease
+    /// excludes cooperating updaters. POSIX rename keeps old shared-delete
+    /// handles usable across replacement; non-delete-sharing locks still fail.
+    /// This is not destination-ID CAS against arbitrary same-user namespace
+    /// substitution, nor a power-loss durability guarantee.
+    fn replace(&self, source: &Path, destination: &Path, expected: &FileProof, previous: &FileProof) -> Result<()> {
+        retry_contention(|| self.replace_once(source, destination, expected, previous), |attempt, error| {
+            feedback::record(self, &format!("replaceLockAttempt{attempt}"), Some(error));
+        })
+    }
+    fn replace_once(&self, source: &Path, destination: &Path, expected: &FileProof, previous: &FileProof) -> Result<()> {
+        self.store.root.verify()?;
+        let (source_pin, source_proof) = FileProof::open(source, true)?;
+        let destination_pin = FileProof::pin_shared(destination, previous)?;
+        let destination_proof = previous.clone();
+        if source_proof != *expected || destination_proof != *previous
+            || expected.identity.volume != previous.identity.volume {
+            return Err(Error::Unsafe);
+        }
+        let parent_pin = fs::directory(destination.parent().ok_or(Error::Unsafe)?, 0x82)?;
+        let name: Vec<u16> = destination.file_name().ok_or(Error::Unsafe)?.encode_wide().collect();
+        #[repr(C)]
+        struct RenameEx { flags: u32, root: RawHandle, length: u32, name: [u16; 1] }
+        let offset = std::mem::offset_of!(RenameEx, name);
+        let mut data = vec![0u64; (offset + name.len() * 2 + 7) / 8];
+        let ptr = data.as_mut_ptr().cast::<u8>();
+        unsafe {
+            let header = ptr.cast::<RenameEx>();
+            (*header).flags = 3; // REPLACE_IF_EXISTS | POSIX_SEMANTICS; no copy/delayed fallback.
+            (*header).root = parent_pin.as_raw_handle();
+            (*header).length = (name.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(name.as_ptr().cast::<u8>(), ptr.add(offset), name.len() * 2);
+        }
+        let mut io = windows::Win32::System::IO::IO_STATUS_BLOCK::default();
+        let status = unsafe { NtSetInformationFile(source_pin.as_raw_handle(), &mut io,
+            ptr.cast(), (offset + name.len() * 2) as u32, 65) };
+        let complete = matches!(FileProof::open(source, false), Err(Error::Missing))
+            && FileProof::open(destination, true).is_ok_and(|(_, proof)| proof == *expected);
+        if complete { return Ok(()); }
+        drop(source_pin);
+        // Unsupported filesystems/OS, readonly destinations and other errors
+        // preserve old bytes. Never degrade to the legacy two-rename hole.
+        if status < 0 && expected.matches(source) && previous.matches(destination) {
+            return Err(match status as u32 {
+                0xc0000043 | 0xc0000054 | 0xc0000055 => Error::LockContention(status as u32),
+                _ => Error::Io,
+            });
+        }
+        drop(destination_pin);
+        Err(Error::Uncertain)
     }
     fn file_operation(
         &mut self,
@@ -1154,7 +1250,7 @@ impl RecoverySession {
                 self.displaced_path(index, false),
                 self.record.files[index].old.clone(),
             ),
-            FileOperation::PromoteNew => (
+            FileOperation::PromoteNew | FileOperation::ReplaceOld => (
                 self.candidate_path(index),
                 self.live_path(index),
                 self.record.files[index]
@@ -1175,7 +1271,7 @@ impl RecoverySession {
                     .clone()
                     .ok_or(Error::Invalid)?,
             ),
-            FileOperation::PromoteOld => (
+            FileOperation::PromoteOld | FileOperation::ReplaceNew => (
                 self.restore_path(index),
                 self.live_path(index),
                 self.record.files[index]
@@ -1203,6 +1299,13 @@ impl RecoverySession {
             let restored = proof.copy_to(&source, &destination)?;
             self.restore_pins[index] = Some(FileProof::pin_shared(&destination, &restored)?);
             self.record.files[index].restore = Some(restored);
+        } else if matches!(operation, FileOperation::ReplaceOld | FileOperation::ReplaceNew) {
+            let previous = if operation == FileOperation::ReplaceOld {
+                self.record.files[index].old.clone()
+            } else {
+                self.record.files[index].candidate.clone().ok_or(Error::Invalid)?
+            };
+            self.replace(&source, &destination, &proof, &previous)?;
         } else {
             self.rename(&source, &destination, &proof)?;
         }
@@ -1241,19 +1344,17 @@ impl RecoverySession {
             }
             match direction {
                 Direction::Apply => {
-                    if observed == ObservedObject::Old {
-                        self.file_operation(index, FileOperation::DisplaceOld, fault)?;
-                    }
-                    self.file_operation(index, FileOperation::PromoteNew, fault)?;
+                    self.file_operation(index, if observed == ObservedObject::Old {
+                        FileOperation::ReplaceOld
+                    } else { FileOperation::PromoteNew }, fault)?;
                 }
                 Direction::Restore => {
                     if self.record.files[index].restore.is_none() {
                         self.file_operation(index, FileOperation::CreateRestoreCandidate, fault)?;
                     }
-                    if observed == ObservedObject::New {
-                        self.file_operation(index, FileOperation::DisplaceNew, fault)?;
-                    }
-                    self.file_operation(index, FileOperation::PromoteOld, fault)?;
+                    self.file_operation(index, if observed == ObservedObject::New {
+                        FileOperation::ReplaceNew
+                    } else { FileOperation::PromoteOld }, fault)?;
                 }
             }
         } else {
@@ -1525,12 +1626,36 @@ pub(crate) fn ordinary_startup_allowed() -> std::result::Result<(), String> {
             return Ok(());
         }
         let root = capture_admitted_root(installation)?;
-        observed_startup_admission(&root)
+        observed_startup_admission_under_gate(&root, "Global\\NearlyInstallMutation-local.syncfiles.native-v3")
     })()
-    .map_err(|_| "An incomplete native update requires recovery before Nearly can open".into())
+    .map_err(|error| match error {
+        Error::Busy => "The previous update is incomplete or its updater is still running. Its recovery state has been kept.".into(),
+        _ => format!("The updater could not verify the installation or recovery record ({error:?}). No recovery changes were made."),
+    })
+}
+pub(crate) fn startup_admission_with_feedback() -> bool {
+    loop {
+        match ordinary_startup_allowed() {
+            Ok(()) => return true,
+            Err(reason) if feedback::startup_blocked(&reason) => continue,
+            Err(_) => return false,
+        }
+    }
 }
 pub(crate) fn cleanup_after_success() -> std::result::Result<bool, &'static str> {
     cleanup::current()
+}
+fn observed_startup_admission_under_gate(root: &PinnedRoot, name: &str) -> Result<()> {
+    // A freshly restored child may start before its helper has returned and
+    // dropped this gate. Wait briefly without presenting a spurious dialog.
+    for attempt in 0..20 {
+        match MutationMutex::acquire(name) {
+            Ok(_gate) => return observed_startup_admission(root),
+            Err(Error::Busy) if attempt < 19 => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Busy)
 }
 fn observed_startup_admission(root: &PinnedRoot) -> Result<()> {
     let state = root.path().join(crate::update_transaction::STATE_DIRECTORY);
@@ -2537,7 +2662,6 @@ impl RecoverySession {
         if self.record.engine.phase != RecoveryPhase::Restored
             || self.record.old_restart_attempted
             || !self.settings_compatible()
-            || !no_file_users(&self.store.root, child)?
         {
             return Err(Error::Unsafe);
         }
@@ -2576,7 +2700,6 @@ impl RecoverySession {
             || proof.verified.elapsed() > Duration::from_secs(1)
             || self.record.old_restart_attempted
             || !self.settings_compatible()
-            || !no_file_users(&self.store.root, proof.child)?
         {
             return Err(Error::Unsafe);
         }
@@ -2593,9 +2716,10 @@ impl RecoverySession {
         }
         self.record.old_restart_attempted = true;
         self.publish()?;
-        let child = Command::new(self.live_path(0))
-            .spawn()
-            .map_err(|_| Error::Io)?;
+        let mut command = Command::new(self.live_path(0));
+        let child = retry_contention(|| command.spawn().map_err(|e| classify_file_error(&e)), |_, error| {
+            feedback::record(self, "oldLaunchLockRetry", Some(error));
+        })?;
         let identity = process_identity(child.as_raw_handle(), child.id())?;
         let _peer = LivePeer::open(&identity, &self.live_path(0), &proof.proof)?;
         Ok(child)
@@ -2683,7 +2807,12 @@ fn run_helper(args: HelperArgs) -> Result<()> {
     )?;
     // Retain exact parent wait, immutable self/package handles and all events
     // throughout the sole-writer apply/health/recovery loop.
-    supervise(&mut session, &events, &parent, &package)
+    let result = supervise(&mut session, &events, &parent, &package);
+    if let Err(ref error) = result {
+        feedback::record(&session, "helperStopped", Some(error));
+        if !matches!(error, Error::LockContention(_)) || session.record.old_restart_attempted { feedback::stopped(error); }
+    }
+    result
 }
 
 struct WorkerExit {
@@ -2697,7 +2826,6 @@ fn stage_worker(session: &mut RecoverySession) -> Result<Option<WorkerExit>> {
     session.revalidate_registration()?;
     if session.record.engine.phase != RecoveryPhase::Staging
         || session.record.worker.is_some()
-        || !no_file_users(&session.store.root, None)?
     {
         return Err(Error::Unsafe);
     }
@@ -2959,6 +3087,9 @@ fn verify_version_resource(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 trait SupervisorIo {
+    fn blocked(&mut self, operation: &str, can_restore: bool) -> feedback::Choice {
+        feedback::blocked(operation, can_restore)
+    }
     fn stage(&mut self, session: &mut RecoverySession) -> Result<Option<WorkerExit>>;
     fn inspect(
         &mut self,
@@ -2997,9 +3128,6 @@ fn launch_health_command(
     command: &mut Command,
 ) -> Result<(Child, LivePeer)> {
     session.revalidate_registration()?;
-    if !no_file_users(&session.store.root, None)? {
-        return Err(Error::Busy);
-    }
     let expected = session.record.files[0]
         .candidate
         .clone()
@@ -3008,9 +3136,13 @@ fn launch_health_command(
     if !expected.matches(&path) {
         return Err(Error::Unsafe);
     }
-    let process = command.spawn().map_err(|_| Error::Io)?;
-    let identity = process_identity(process.as_raw_handle(), process.id())?;
-    let peer = LivePeer::open(&identity, &path, &expected)?;
+    let process = retry_contention(|| command.spawn().map_err(|e| classify_file_error(&e)), |_, error| {
+        feedback::record(session, "launchLockRetry", Some(error));
+    })?;
+    // Once CreateProcess succeeds, failure is not proof that no child exists.
+    // Never restore under an unretained or unbound probation child.
+    let identity = process_identity(process.as_raw_handle(), process.id()).map_err(|_| Error::Uncertain)?;
+    let peer = LivePeer::open(&identity, &path, &expected).map_err(|_| Error::Uncertain)?;
     session.record.child = Some(identity);
     session.publish()?;
     Ok((process, peer))
@@ -3029,6 +3161,19 @@ fn supervisor_observation<T>(result: Result<T>, site: &'static str) -> Result<T>
     let _ = site;
     result
 }
+fn inspect_for_supervisor<I: SupervisorIo>(session: &RecoverySession, io: &mut I) -> Result<ObservedTuple> {
+    loop {
+        match session.inspect_tuple() {
+            Err(error @ Error::LockContention(_)) => {
+                feedback::record(session, "proofReadLockExhausted", Some(&error));
+                if io.blocked("checking the installation files", false) != feedback::Choice::Retry {
+                    return Err(error);
+                }
+            }
+            result => return result,
+        }
+    }
+}
 fn supervise_with<I: SupervisorIo>(
     session: &mut RecoverySession,
     events: &RecoveryEvents,
@@ -3041,11 +3186,15 @@ fn supervise_with<I: SupervisorIo>(
     let mut child: Option<(Child, LivePeer)> = None;
     let (mut failed, mut candidates, mut restored) = (false, false, false);
     let (mut health_started, mut close_requested) = (None, None);
+    let mut reported_file_users = false;
     #[cfg(feature="installer-qa")]
     let mut previous_child=None;
     #[cfg(feature="installer-qa")]
     crate::installer_qa::trace("helper","started");
     loop {
+        // A read-lock dialog may outlive a child. Refresh every live fact only
+        // AFTER it returns; stale pre-dialog health must never commit success.
+        let observed = supervisor_observation(inspect_for_supervisor(session, io), "tuple")?;
         if supervisor_observation(parent.exited(), "parent")?.is_none() {
             #[cfg(feature="installer-qa")]
             crate::installer_qa::trace("supervisorError", "parent");
@@ -3086,6 +3235,16 @@ fn supervise_with<I: SupervisorIo>(
         // retained child capability can exclude that stale identity, not its
         // persisted PID or a name-based filter.
         let allowed = child.as_ref().map(|(_, peer)| peer);
+        // RM is a hint, not a lease or an operating-system file lock. A scanner,
+        // stale entry or unavailable enumeration cannot veto a verified operation.
+        let no_other_users = if !reported_file_users {
+            reported_file_users = true;
+            match no_file_users(&session.store.root, allowed) {
+                Ok(true) => true,
+                Ok(false) => { feedback::record(session, "fileUsersAdvisory", None); false },
+                Err(error) => { feedback::record(session, "fileUsersUnavailable", Some(&error)); false },
+            }
+        } else { true };
         let facts = LiveFacts {
             parent: ParentState::AuthorizedExited,
             worker: match &worker {
@@ -3102,7 +3261,7 @@ fn supervise_with<I: SupervisorIo>(
             root_and_lease_verified: session.store.root.verify().is_ok(),
             snapshots_verified: session.validate_backups().is_ok(),
             candidates_verified: candidates,
-            no_other_users: supervisor_observation(settled_no_file_users(&session.store.root, allowed), "fileUsers")?,
+            no_other_users,
             failure_requested: failed,
             settings_compatible: session.settings_compatible(),
             child_idle_and_settings_settled: supervisor_observation(events.idle.is_set(), "idle")?,
@@ -3113,7 +3272,6 @@ fn supervise_with<I: SupervisorIo>(
             restored_this_session: restored,
             old_restart_attempted: session.record.old_restart_attempted,
         };
-        let observed = supervisor_observation(session.inspect_tuple(), "tuple")?;
         let action=model::next_action(&session.record.engine, &observed, &facts);
         #[cfg(feature="installer-qa")]
         {
@@ -3124,9 +3282,10 @@ fn supervise_with<I: SupervisorIo>(
                 A::LaunchNew=>Some("LaunchNew"),A::RequestChildExit=>Some("RequestChildExit"),A::RestartOld=>Some("RestartOld"),A::Complete=>Some("Complete"),A::ManualRepair=>Some("ManualRepair")};
             if let Some(code)=code{crate::installer_qa::trace("supervisorAction",code)}
             if matches!(action,A::ManualRepair){
-                for (failed,code) in [(!facts.root_and_lease_verified,"rootLeaseInvalid"),(!facts.snapshots_verified,"snapshotsChanged"),(!facts.no_other_users,"otherFileUsers"),(!facts.child_idle_and_settings_settled,"childNotIdle"),(facts.child_exit_timed_out,"childExitTimedOut"),(!facts.settings_compatible,"settingsChanged")]{if failed{crate::installer_qa::trace("supervisorBlock",code)}}
+                for (failed,code) in [(!facts.root_and_lease_verified,"rootLeaseInvalid"),(!facts.snapshots_verified,"snapshotsChanged"),(!facts.child_idle_and_settings_settled,"childNotIdle"),(facts.child_exit_timed_out,"childExitTimedOut"),(!facts.settings_compatible,"settingsChanged")]{if failed{crate::installer_qa::trace("supervisorBlock",code)}}
             }
         }
+        if !matches!(action, A::Wait) { feedback::record(session, "supervisorProgress", None); }
         match action {
             A::Wait => std::thread::sleep(Duration::from_millis(25)),
             A::Publish(record) => {
@@ -3164,7 +3323,7 @@ fn supervise_with<I: SupervisorIo>(
                 }
                 Ok(None) => failed = true,
                 Err(error) => {
-                    let _ = session.mark_manual_repair();
+                    if !matches!(error, Error::Uncertain) { let _ = session.mark_manual_repair(); }
                     return Err(error);
                 }
             },
@@ -3173,6 +3332,7 @@ fn supervise_with<I: SupervisorIo>(
                     return Err(Error::Unsafe);
                 };
                 if let Err(error) = io.inspect(session, proof, package) {
+                    if matches!(error, Error::Uncertain) { return Err(error); }
                     #[cfg(test)]
                     eprintln!("fixture candidate verification failed: {error:?}");
                     let old = session
@@ -3183,7 +3343,6 @@ fn supervise_with<I: SupervisorIo>(
                     if proof.peer.exited()? == Some(0)
                         && old
                         && session.validate_backups().is_ok()
-                        && no_file_users(&session.store.root, None)?
                     {
                         failed = true;
                     } else {
@@ -3201,15 +3360,13 @@ fn supervise_with<I: SupervisorIo>(
                         return Err(Error::Busy);
                     }
                 }
-                if !settled_no_file_users(&session.store.root, allowed)? {
-                    let _ = session.mark_manual_repair();
-                    return Err(Error::Busy);
-                }
                 let result = match direction {
                     Direction::Apply => session.apply_one(object),
                     Direction::Restore => session.restore_one(object),
                 };
                 if let Err(error) = result {
+                    feedback::record(session, "mutationStopped", Some(&error));
+                    if matches!(error, Error::Uncertain) { return Err(error); }
                     // Reinspect real endpoints after an API failure. A forward
                     // known partial tuple can enter reverse restoration; failed
                     // restoration or any foreign/uncertain object stops here.
@@ -3221,14 +3378,24 @@ fn supervise_with<I: SupervisorIo>(
                         return Err(Error::Uncertain);
                     }
                     session.record = actual;
-                    if direction == Direction::Restore
-                        || session.inspect_tuple()?.objects.iter().any(|o| {
+                    if inspect_for_supervisor(session, io)?.objects.iter().any(|o| {
                             matches!(o, ObservedObject::Foreign | ObservedObject::Uncertain)
                         })
                     {
                         let _ = session.mark_manual_repair();
                         return Err(error);
                     }
+                    if direction == Direction::Restore {
+                        if matches!(error, Error::LockContention(_))
+                            && io.blocked("restoring the previous version", false) == feedback::Choice::Retry {
+                            continue; // Reobserve journal, endpoints and retained peers next iteration.
+                        }
+                        // Retain the exact phase/intent so a lock does not destroy
+                        // recovery evidence. Closing never grants offline replay.
+                        return Err(error);
+                    }
+                    // Before replacement this publishes Restored without a file
+                    // mutation. A known partial/new tuple is restored in reverse.
                     failed = true;
                 }
             }
@@ -3237,7 +3404,14 @@ fn supervise_with<I: SupervisorIo>(
                     return Err(Error::Unsafe);
                 }
                 match io.launch(session) {
-                    Err(_) => failed = true,
+                    Err(error) => {
+                        feedback::record(session, "newLaunchStopped", Some(&error));
+                        if matches!(error, Error::Uncertain) { return Err(error); }
+                        // Native launch already exhausted its bounded lock retries.
+                        // A definite no-child failure automatically restores the
+                        // verified old tuple; it is not a user recovery decision.
+                        failed = true;
+                    },
                     Ok(process) => {
                         child = Some(process);
                         health_started = Some(Instant::now());
@@ -3249,9 +3423,28 @@ fn supervise_with<I: SupervisorIo>(
                 close_requested = Some(Instant::now());
             }
             A::RestartOld => {
-                let proof = session.verify_restored_tuple(allowed)?;
+                let proof = match retry_contention(|| session.verify_restored_tuple(allowed), |_, error| {
+                    feedback::record(session, "oldRestartProofLockRetry", Some(error));
+                }) {
+                    Ok(proof) => proof,
+                    Err(error @ Error::LockContention(_)) => {
+                        if io.blocked("checking the restored version", false) == feedback::Choice::Retry { continue; }
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
                 #[cfg(feature="installer-qa")] crate::installer_qa::trace("restoration","verified");
-                let _child = session.restart_previous(proof)?;
+                let _child = match session.restart_previous(proof) {
+                    Ok(child) => child,
+                    Err(error @ Error::LockContention(_)) => {
+                        // A second validation may encounter a new lock after the
+                        // proof was captured. Retry only before the launch marker.
+                        if !session.record.old_restart_attempted
+                            && io.blocked("checking the restored version", false) == feedback::Choice::Retry { continue; }
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
                 #[cfg(feature="installer-qa")] crate::installer_qa::trace("restoration","restartIssued");
                 return Ok(());
             }

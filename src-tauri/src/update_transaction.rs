@@ -21,6 +21,8 @@ pub(crate) enum Error {
     Invalid,
     Unsafe,
     Busy,
+    /// A known sharing/lock conflict, not an uncertain mutation outcome.
+    LockContention(u32),
     Missing,
     Io,
     Protection,

@@ -87,6 +87,8 @@ Var NearlyCommitHandle
 Var NearlyStageDirectory
 Var NearlyReadyHandle
 Var NearlyMutationHandle
+Var NearlyRepairHandle
+Var NearlyRepairBuffer
 Var NearlyWorkerPid
 Var NearlyWorkerCreated
 Var NearlyRequestedRoot
@@ -1033,6 +1035,83 @@ Function un.NearlyAcquireMutation
   !insertmacro NearlyAcquireMutationBody
 FunctionEnd
 
+; Manual reinstall is the escape hatch for an incomplete update. Hold the
+; exact stale state directory across installation, without trusting its journal
+; or process IDs. Never enumerate, delete, or reconstruct its contents.
+Function NearlyRepairCleanup
+  StrCmp $NearlyRepairHandle 0 +2
+    System::Call 'kernel32::CloseHandle(p $NearlyRepairHandle)'
+  StrCpy $NearlyRepairHandle 0
+  StrCmp $NearlyRepairBuffer 0 +2
+    System::Free $NearlyRepairBuffer
+  StrCpy $NearlyRepairBuffer 0
+FunctionEnd
+Function NearlyRepairFail
+  Call NearlyRepairCleanup
+  SetErrorLevel 6
+  Abort "Setup could not safely finish update recovery. Close Nearly and any updater, then retry Setup. Recovery evidence and settings were retained."
+FunctionEnd
+Function NearlyOpenRepairState
+  ; Root and ancestors are already pinned and the shared mutation mutex held.
+  ; DELETE access plus no write/delete sharing rejects any live helper's pin.
+  System::Call 'kernel32::CreateFileW(w "$INSTDIR\.Nearly-update-state", i 0x10081, i 1, p 0, i 3, i 0x02200000, p 0) p.r0 ?e'
+  Pop $1
+  StrCmp $0 -1 nearly_repair_missing
+  StrCpy $NearlyRepairHandle $0
+  StrCmp $NearlyOwnedUpgrade 1 0 nearly_repair_bad
+  ; Legacy owned registrations may predate this marker. The captured root pin
+  ; still binds this repair; a persisted but conflicting identity is refused.
+  ReadRegStr $0 HKCU "${UNINSTKEY}" "NearlyRootIdentity"
+  StrCmp $0 "" nearly_repair_identity_ready
+  StrCmp $0 $NearlyRootIdentity 0 nearly_repair_bad
+  nearly_repair_identity_ready:
+  System::Alloc 52
+  Pop $NearlyRepairBuffer
+  StrCmp $NearlyRepairBuffer 0 nearly_repair_bad
+  System::Call 'kernel32::GetFileInformationByHandle(p $NearlyRepairHandle, p $NearlyRepairBuffer) i.r0'
+  StrCmp $0 1 0 nearly_repair_bad
+  System::Call '*$NearlyRepairBuffer(i .r0)'
+  IntOp $0 $0 & 0x410
+  IntCmp $0 0x10 0 nearly_repair_bad nearly_repair_bad
+  System::Free $NearlyRepairBuffer
+  StrCpy $NearlyRepairBuffer 0
+  System::Call 'kernel32::GetFinalPathNameByHandleW(p $NearlyRepairHandle, w .r1, i ${NSIS_MAX_STRLEN}, i 0) i.r0'
+  StrCmp $0 0 nearly_repair_bad
+  StrCmp $1 "\\?\$INSTDIR\.Nearly-update-state" 0 nearly_repair_bad
+  Return
+  nearly_repair_missing:
+  StrCmp $1 2 nearly_repair_absent nearly_repair_bad
+  nearly_repair_absent:
+  Return
+  nearly_repair_bad:
+  Call NearlyRepairFail
+FunctionEnd
+Function NearlyArchiveRepairState
+  StrCmp $NearlyRepairHandle 0 nearly_repair_archive_done
+  ; A collision fails closed. Do not overwrite an earlier diagnostic archive.
+  System::Call 'kernel32::GetCurrentProcessId() i.r0'
+  System::Call 'kernel32::GetTickCount() i.r1'
+  StrCpy $2 "$INSTDIR\.Nearly-update-state-reinstalled-$0-$1"
+  StrLen $1 $2
+  IntOp $1 $1 * 2
+  IntOp $3 $1 + 12
+  IntOp $4 $3 + 2
+  System::Alloc $4
+  Pop $NearlyRepairBuffer
+  StrCmp $NearlyRepairBuffer 0 nearly_repair_archive_bad
+  ; FILE_RENAME_INFO uses the 32-bit NSIS ABI: flags, root, byte count, UTF-16.
+  System::Call '*$NearlyRepairBuffer(i 0, p 0, i r1)'
+  IntOp $0 $NearlyRepairBuffer + 12
+  System::Call 'kernel32::lstrcpyW(p r0, w r2)'
+  System::Call 'kernel32::SetFileInformationByHandle(p $NearlyRepairHandle, i 3, p $NearlyRepairBuffer, i r3) i.r0'
+  StrCmp $0 1 0 nearly_repair_archive_bad
+  Call NearlyRepairCleanup
+  nearly_repair_archive_done:
+  Return
+  nearly_repair_archive_bad:
+  Call NearlyRepairFail
+FunctionEnd
+
 !define MUI_PAGE_CUSTOMFUNCTION_PRE NearlySkipPassive
 !insertmacro MUI_PAGE_WELCOME
 ; Nearly modification: retain project and third-party licenses in setup itself.
@@ -1403,6 +1482,8 @@ nearly_version_done:
 FunctionEnd
 
 Function .onInit
+  StrCpy $NearlyRepairHandle 0
+  StrCpy $NearlyRepairBuffer 0
   Call NearlyIoInit
   StrCpy $NearlyGuardHead 0
   StrCpy $NearlyLeafNode 0
@@ -1485,6 +1566,7 @@ Function .onInstSuccess
 FunctionEnd
 
 Function .onGUIEnd
+  Call NearlyRepairCleanup
   Call NearlyIoCleanup
   Call NearlyReleaseGuards
   StrCmp $NearlyParentHandle 0 +2
@@ -1548,6 +1630,7 @@ Section Install
   StrCmp $0 $NearlyRootIdentity nearly_install_identity_ready
   Call NearlyRejectRoot
   nearly_install_identity_ready:
+  Call NearlyOpenRepairState
   Call NearlyIoInit
   Call NearlyValidatePayloads
   System::Call 'kernel32::GetCurrentProcessId() i.r8'
@@ -1593,6 +1676,9 @@ Section Install
     ${EndIf}
     RMDir "$SMPROGRAMS\${PRODUCTNAME}"
   ${EndIf}
+  ; Clear the startup fence only after payloads, registration and preferences
+  ; all succeeded. Preserve the evidence under a different sibling name.
+  Call NearlyArchiveRepairState
   Call NearlyIoCleanup
   ${If} $NearlyPassive = 1
     SetAutoClose true
@@ -1600,6 +1686,11 @@ Section Install
   ; A corrected destination may have left a prior admission error level.
   ; Only this fully completed path may report successful installation.
   SetErrorLevel 0
+  ; The finish page may launch Nearly before onGUIEnd. No mutation remains;
+  ; release the startup exclusion now, rather than blocking that explicit run.
+  System::Call 'kernel32::ReleaseMutex(p $NearlyMutationHandle)'
+  System::Call 'kernel32::CloseHandle(p $NearlyMutationHandle)'
+  StrCpy $NearlyMutationHandle 0
 SectionEnd
 
 ; NSIS normally executes a byte-for-byte Temp self-copy. INSTDIR alone is not

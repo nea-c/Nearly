@@ -1050,11 +1050,17 @@ fn competing_ordinary_startup_is_fenced_by_incomplete_or_missing_record() {
     assert!(observed_startup_admission(&root).is_err());
 }
 struct FixtureSupervisor {
+    launch_failure: bool,
     healthy: bool,
     stage_exit: i32,
     bad_candidate: bool,
 }
 impl SupervisorIo for FixtureSupervisor {
+    fn blocked(&mut self, operation: &str, can_restore: bool) -> feedback::Choice {
+        assert!(!self.launch_failure, "known failed new launch must restore automatically, not prompt: {operation}");
+        feedback::blocked(operation, can_restore)
+    }
+
     fn stage(&mut self, s: &mut RecoverySession) -> Result<Option<WorkerExit>> {
         let path = std::env::current_exe().unwrap();
         let proof = FileProof::open(&path, false)?.1;
@@ -1124,6 +1130,7 @@ impl SupervisorIo for FixtureSupervisor {
         inspect_candidate_files(s, p)
     }
     fn launch(&mut self, s: &mut RecoverySession) -> Result<(Child, LivePeer)> {
+        if self.launch_failure { return Err(Error::LockContention(32)); }
         let mut command = Command::new(s.live_path(0));
         command
             .args([
@@ -1245,7 +1252,7 @@ fn generated_health_fixture() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-fn generated_supervisor_case(healthy: bool, stage_exit: i32, bad_candidate: bool) {
+fn generated_supervisor_case(healthy: bool, stage_exit: i32, bad_candidate: bool, launch_failure: bool) {
     let f = Fixture::new();
     std::fs::write(f.0.join("owned-shortcut.lnk"), b"shortcut sentinel").unwrap();
     let root = PinnedRoot::fixture(&f.0).unwrap();
@@ -1256,9 +1263,14 @@ fn generated_supervisor_case(healthy: bool, stage_exit: i32, bad_candidate: bool
     }
     let payload = std::fs::read(std::env::current_exe().unwrap()).unwrap();
     let (mut stage, candidate, key) =
-        crate::update_package::fixture_stage(&f.0, "2.0.0", &sha256(&payload));
+        crate::update_package::fixture_stage(&f.0, env!("CARGO_PKG_VERSION"), &sha256(&payload));
     let snapshot = stage.transaction_snapshot(&candidate, &key).unwrap();
     let package = snapshot.package().clone();
+    // The candidate is a copied current test binary, so its signed target must
+    // match its real version resource (not the old fixed 2.0.0 fixture label).
+    tx.session.record.target_version = package.target_version().into();
+    tx.session.record.public_label = package.public_label().into();
+    tx.session.record.installer_name = format!("Nearly_{}_x64-setup.exe", package.public_label());
     tx.session.record.installer = FileProof::open(snapshot.path(), false).unwrap().1;
     tx.session.record.package_signature = String::from_utf8(package.signature().to_vec()).unwrap();
     tx.session.record.payload_sha256 = sha256(&payload);
@@ -1281,6 +1293,7 @@ fn generated_supervisor_case(healthy: bool, stage_exit: i32, bad_candidate: bool
         &parent_peer,
         &package,
         &mut FixtureSupervisor {
+            launch_failure,
             healthy,
             stage_exit,
             bad_candidate,
@@ -1331,21 +1344,21 @@ fn generated_supervisor_case(healthy: bool, stage_exit: i32, bad_candidate: bool
 }
 #[test]
 fn generated_supervisor_exact_nonzero_stage_restores_real_tuple() {
-    generated_supervisor_case(false, 9, false);
+    generated_supervisor_case(false, 9, false, false);
 }
 #[test]
 fn generated_supervisor_bad_candidate_restores_real_tuple() {
-    generated_supervisor_case(false, 0, true);
+    generated_supervisor_case(false, 0, true, false);
 }
 #[test]
 #[ignore = "Manual generated-process qualification; requires exclusive fixture-file access"]
 fn generated_supervisor_success_real_tuple() {
-    generated_supervisor_case(true, 0, false);
+    generated_supervisor_case(true, 0, false, false);
 }
 #[test]
 #[ignore = "Manual generated-process qualification; requires exclusive fixture-file access"]
 fn generated_supervisor_failed_health_restore_real_tuple() {
-    generated_supervisor_case(false, 0, false);
+    generated_supervisor_case(false, 0, false, false);
 }
 #[test]
 #[ignore]
@@ -1472,4 +1485,264 @@ fn old_restart_attempt_is_durable_before_failed_spawn_and_cannot_repeat() {
             .old_restart_attempted
     );
     assert!(tx.session.verify_restored_tuple(None).is_err());
+}
+
+#[test]
+fn rename_retries_only_a_temporary_actual_sharing_violation() {
+    let f = Fixture::new();
+    let root = PinnedRoot::fixture(&f.0).unwrap();
+    let tx = FixtureTransaction::prepare(&root).unwrap();
+    let source = tx.session.live_path(0);
+    let destination = tx.session.displaced_path(0, false);
+    let locked = FileProof::open(&source, false).unwrap().0;
+    let release = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(150)); drop(locked); });
+    let result = tx.session.rename(&source, &destination, &tx.session.record.files[0].old);
+    release.join().unwrap();
+    assert!(result.is_ok(), "temporary actual lock should settle: {result:?}");
+    assert!(!source.exists());
+    assert!(tx.session.record.files[0].old.matches(&destination));
+}
+
+#[test]
+fn recovery_retry_budget_never_replays_uncertain_or_unclassified_errors() {
+    for error in [Error::Uncertain, Error::Io, Error::Unsafe, Error::Busy] {
+        let mut error = Some(error);
+        let mut calls = 0;
+        let result: Result<()> = retry_contention(|| { calls += 1; Err(error.take().expect("must not retry")) }, |_, _| panic!("not contention"));
+        assert!(result.is_err()); assert_eq!(calls, 1);
+    }
+    let mut calls = 0;
+    let mut reports = Vec::new();
+    let result: Result<()> = retry_contention(|| { calls += 1; Err(Error::LockContention(32)) }, |attempt, _| reports.push(attempt));
+    assert!(matches!(result, Err(Error::LockContention(32))));
+    assert_eq!(calls, CONTENTION_ATTEMPTS);
+    assert_eq!(reports, (1..=CONTENTION_ATTEMPTS).collect::<Vec<_>>());
+    assert!(matches!(classify_file_error(&std::io::Error::from_raw_os_error(5)), Error::Io));
+}
+
+fn fixture_intent(tx: &mut FixtureTransaction, direction: Direction) {
+    tx.session.record.engine = RecoveryRecord {
+        sequence: 3,
+        phase: if direction == Direction::Apply { RecoveryPhase::Applying } else { RecoveryPhase::Restoring },
+        step: Some(model::MutationStep { object: InstallObject::Image, direction, status: StepStatus::Intent }),
+    };
+    tx.session.publish().unwrap();
+}
+
+#[test]
+fn persistent_lock_before_replacement_keeps_old_tuple_and_durable_intent() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap(); fixture_intent(&mut tx, Direction::Apply);
+    let lock = FileProof::open(&tx.session.live_path(0), false).unwrap().0;
+    let result = tx.session.apply_one(InstallObject::Image);
+    assert!(matches!(result, Err(Error::LockContention(32 | 0xc0000043))), "expected unchanged sharing-conflict outcome: {result:?}");
+    assert!(tx.session.inspect_tuple().unwrap().objects.iter().all(|o| matches!(o, ObservedObject::Old | ObservedObject::Unchanged)));
+    assert_eq!(tx.session.store.read().unwrap().unwrap().file_step.unwrap().status, StepStatus::Intent);
+    drop(lock);
+    fixture_intent(&mut tx, Direction::Restore);
+    tx.session.restore_one(InstallObject::Image).unwrap();
+    assert_eq!(std::fs::read(f.0.join("Nearly.exe")).unwrap(), b"old image");
+}
+
+#[test]
+fn partial_displacement_reloads_durable_evidence_before_finish_or_restore() {
+    for restore in [false, true] {
+        let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+        let mut tx = FixtureTransaction::prepare(&root).unwrap(); fixture_intent(&mut tx, Direction::Apply);
+        // Crash after the rename but before its observation was published.
+        assert!(matches!(tx.session.file_operation(0, FileOperation::DisplaceOld, &mut Boundary { at: 2, count: 0 }), Err(Error::Uncertain)));
+        tx.session.record = tx.session.store.read().unwrap().unwrap();
+        assert_eq!(tx.session.observe_file(0).unwrap(), ObservedObject::RecoverablePartial);
+        if restore { fixture_intent(&mut tx, Direction::Restore); tx.session.restore_one(InstallObject::Image).unwrap(); }
+        else { tx.session.apply_one(InstallObject::Image).unwrap(); }
+        assert_eq!(std::fs::read(f.0.join("Nearly.exe")).unwrap(), if restore { b"old image" } else { b"new image" });
+        assert_eq!(std::fs::read(f.0.join("settings.json")).unwrap(), b"settings sentinel");
+    }
+}
+
+#[test]
+fn lost_observation_ack_does_not_repeat_completed_image_mutation() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap(); fixture_intent(&mut tx, Direction::Apply);
+    tx.session.apply_one(InstallObject::Image).unwrap();
+    tx.session.record = tx.session.store.read().unwrap().unwrap();
+    let before = tx.session.record.clone();
+    let image = FileProof::open(&tx.session.live_path(0), false).unwrap().1;
+    tx.session.apply_one(InstallObject::Image).unwrap();
+    assert_eq!(tx.session.record, before);
+    assert_eq!(FileProof::open(&tx.session.live_path(0), false).unwrap().1, image);
+}
+
+#[test]
+fn foreign_endpoint_never_becomes_a_retry_or_restore_target() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let tx = FixtureTransaction::prepare(&root).unwrap();
+    let destination = tx.session.displaced_path(0, false);
+    std::fs::write(&destination, b"unowned sentinel").unwrap();
+    assert!(matches!(tx.session.rename(&tx.session.live_path(0), &destination, &tx.session.record.files[0].old), Err(Error::Unsafe)));
+    assert_eq!(std::fs::read(destination).unwrap(), b"unowned sentinel");
+    assert_eq!(std::fs::read(f.0.join("Nearly.exe")).unwrap(), b"old image");
+}
+
+#[test]
+fn retained_helper_exit_after_success_before_ack_uses_fresh_durable_success() {
+    for committed in [false, true] {
+        let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+        let mut tx = FixtureTransaction::prepare(&root).unwrap();
+        let (mut process, identity, path, proof) = peer_fixture(800, 0);
+        let helper = FileProof::open(&path, false).unwrap().0;
+        tx.session.record.helper = Some(identity);
+        tx.session.record.files[0].backup = proof;
+        tx.session.record.engine = RecoveryRecord { sequence: 4, phase: RecoveryPhase::AwaitingHealth, step: None };
+        tx.session.publish().unwrap();
+        let events = RecoveryEvents::fresh(&tx.session.record.nonce).unwrap();
+        let snapshot = RecoveryHealthSnapshot {
+            root: root.clone(), record: tx.session.record.clone(), helper_path: path,
+            _installer: helper.try_clone().unwrap(), _running: helper.try_clone().unwrap(), _helper: helper,
+        };
+        let supervisor = crate::update_restart::LiveRecoverySupervisor::open(snapshot).unwrap();
+        if committed {
+            tx.session.record.engine.phase = RecoveryPhase::Succeeded;
+            tx.session.publish().unwrap();
+        }
+        events.success.set().unwrap();
+        process.wait().unwrap();
+        let result = supervisor.poll_event();
+        if committed {
+            assert_eq!(result.unwrap(), Some(crate::update_restart::SupervisorEvent::Success));
+            assert!(events.success_ack.is_set().unwrap());
+        } else {
+            assert!(result.is_err(), "exit and a success event must not substitute for the durable commit");
+            assert!(!events.success_ack.is_set().unwrap());
+        }
+    }
+}
+
+#[test]
+fn persistent_proof_read_lock_stays_classified_and_does_not_erase_phase() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let tx = FixtureTransaction::prepare(&root).unwrap();
+    let before = tx.session.record.clone();
+    let lock = OpenOptions::new().read(true).share_mode(0).open(tx.session.live_path(0)).unwrap();
+    assert!(matches!(tx.session.observe_file(0), Err(Error::LockContention(32))));
+    assert_eq!(tx.session.store.read().unwrap().unwrap(), before);
+    drop(lock);
+    assert_eq!(tx.session.observe_file(0).unwrap(), ObservedObject::Old);
+}
+
+#[test]
+fn unacknowledged_restore_copy_is_not_adopted_or_replayed_after_reload() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap(); fixture_intent(&mut tx, Direction::Apply);
+    tx.session.apply_one(InstallObject::Image).unwrap();
+    fixture_intent(&mut tx, Direction::Restore);
+    assert!(matches!(tx.session.file_operation(0, FileOperation::CreateRestoreCandidate, &mut Boundary { at: 2, count: 0 }), Err(Error::Uncertain)));
+    tx.session.record = tx.session.store.read().unwrap().unwrap();
+    assert!(tx.session.record.files[0].restore.is_none());
+    let unacknowledged = FileProof::open(&tx.session.restore_path(0), false).unwrap().1;
+    assert!(matches!(tx.session.restore_one(InstallObject::Image), Err(Error::Uncertain)));
+    assert_eq!(FileProof::open(&tx.session.restore_path(0), false).unwrap().1, unacknowledged);
+    assert_eq!(std::fs::read(f.0.join("Nearly.exe")).unwrap(), b"new image");
+    assert_eq!(std::fs::read(tx.backup_path(0)).unwrap(), b"old image");
+}
+
+#[test]
+fn same_folder_keeps_live_image_at_every_apply_boundary() {
+    let mut completed = 0;
+    for at in 0..48 {
+        let f = Fixture::new();
+        let root = PinnedRoot::fixture(&f.0).unwrap();
+        let mut tx = FixtureTransaction::prepare(&root).unwrap();
+        if tx.apply_with_fault(at).is_ok() { completed += 1; }
+        assert!(f.0.join("Nearly.exe").is_file(), "launch path absent at boundary {at}");
+        let image = std::fs::read(f.0.join("Nearly.exe")).unwrap();
+        assert!(image == b"old image" || image == b"new image", "partial image at {at}");
+        assert_eq!(std::fs::read(f.0.join("settings.json")).unwrap(), b"settings sentinel");
+    }
+    assert!(completed > 0, "preserving old bytes while blocking every update is not a passing update");
+}
+
+#[test]
+fn same_folder_known_launch_lock_restores_without_manual_choice() {
+    generated_supervisor_case(false, 0, false, true);
+}
+
+#[test]
+fn same_folder_ordinary_startup_waits_for_installer_mutation_gate() {
+    let f = Fixture::new();
+    let root = PinnedRoot::fixture(&f.0).unwrap();
+    let name = format!("Local\\NearlyStartupGate-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let held = MutationMutex::acquire(&name).unwrap();
+    let (other_root, other_name) = (root.clone(), name.clone());
+    let result = std::thread::spawn(move || observed_startup_admission_under_gate(&other_root, &other_name)).join().unwrap();
+    assert!(matches!(result, Err(Error::Busy)), "startup must not race an installing process: {result:?}");
+    drop(held);
+    observed_startup_admission_under_gate(&root, &name).unwrap();
+}
+
+#[test]
+fn same_folder_keeps_live_image_at_every_restore_boundary() {
+    let mut completed = 0;
+    for at in 0..48 {
+        let f = Fixture::new();
+        let root = PinnedRoot::fixture(&f.0).unwrap();
+        let mut tx = FixtureTransaction::prepare(&root).unwrap();
+        tx.apply_with_fault(usize::MAX).unwrap();
+        if tx.restore_with_fault(at).is_ok() { completed += 1; }
+        for (name, old, new) in [("Nearly.exe", b"old image".as_slice(), b"new image".as_slice()),
+            ("uninstall.exe", b"old uninstaller".as_slice(), b"new uninstaller".as_slice())] {
+            let bytes = std::fs::read(f.0.join(name)).unwrap_or_else(|e| panic!("{name} missing at {at}: {e}"));
+            assert!(bytes == old || bytes == new, "partial {name} at {at}");
+        }
+        assert_eq!(std::fs::read(f.0.join("settings.json")).unwrap(), b"settings sentinel");
+    }
+    assert!(completed > 0);
+}
+
+
+#[test]
+fn same_folder_destination_open_lock_is_retried_until_released() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let tx = FixtureTransaction::prepare(&root).unwrap();
+    let destination = tx.session.live_path(0);
+    let lock = OpenOptions::new().read(true).share_mode(0).open(&destination).unwrap();
+    let release = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(150)); drop(lock); });
+    let result = tx.session.replace(&tx.session.candidate_path(0), &destination,
+        tx.session.record.files[0].candidate.as_ref().unwrap(), &tx.session.record.files[0].old);
+    release.join().unwrap();
+    assert!(result.is_ok(), "destination open conflict skipped retry: {result:?}");
+    assert_eq!(std::fs::read(destination).unwrap(), b"new image");
+}
+
+#[test]
+fn same_folder_startup_waits_through_short_completed_helper_handoff() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let name = format!("Local\\NearlyShortStartupGate-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let (ready, wait) = std::sync::mpsc::channel();
+    let other_name = name.clone();
+    let helper = std::thread::spawn(move || {
+        let _gate = MutationMutex::acquire(&other_name).unwrap();
+        ready.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    });
+    wait.recv().unwrap();
+    observed_startup_admission_under_gate(&root, &name).unwrap();
+    helper.join().unwrap();
+}
+
+#[test]
+fn same_folder_single_replacement_preserves_old_open_handle_and_backup() {
+    let f = Fixture::new(); let root = PinnedRoot::fixture(&f.0).unwrap();
+    let mut tx = FixtureTransaction::prepare(&root).unwrap();
+    let old = tx.session.record.files[0].old.clone();
+    let mut pin = FileProof::pin_shared(&tx.session.live_path(0), &old).unwrap();
+    fixture_intent(&mut tx, Direction::Apply);
+    tx.session.apply_one(InstallObject::Image).unwrap();
+    let mut bytes = Vec::new(); pin.seek(SeekFrom::Start(0)).unwrap(); pin.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"old image");
+    // The replaced old object is intentionally unlinked, but its open handle remains readable.
+    assert_eq!(fs::identity(&fs::info(&pin).unwrap()), old.identity);
+    assert_eq!(std::fs::read(tx.session.live_path(0)).unwrap(), b"new image");
+    assert_eq!(std::fs::read(tx.backup_path(0)).unwrap(), b"old image");
+    assert!(!tx.session.displaced_path(0, false).exists());
 }

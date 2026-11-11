@@ -24,6 +24,18 @@ impl LiveInstaller {
 #[derive(Debug,PartialEq,Eq)]
 pub(crate) enum SupervisorEvent { Success, ExitRequest }
 fn valid_nonce(nonce:&str)->bool{nonce.len()==32&&nonce.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
+// This policy consumes observations from an already retained process handle.
+// A terminated process is not success proof: fresh durable success and the
+// non-conflicting success channel are both required, irrespective of exit code.
+fn retained_success_after_exit(
+    wait: u32, identity_matches: bool, success: u32, exit_request: u32,
+    confirm: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if wait != 0 || !identity_matches || success != 0 || exit_request != 258 {
+        return Err("Exited supervisor success evidence unavailable".into());
+    }
+    confirm()
+}
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -150,12 +162,22 @@ mod native {
             self.snapshot.verify_helper_image()
         }
         pub(crate) fn signal_healthy(&self)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.healthy.0)}==0{return Err("Health signal failed".into());}Ok(())}
+        fn confirm_exited_success(&self, success:u32, exit_request:u32)->Result<(),String>{
+            let expected=self.snapshot.helper_identity();
+            retained_success_after_exit(
+                unsafe{WaitForSingleObject(self.process.0,0)},
+                identity(&self.process,expected.pid)?==*expected,
+                success,exit_request,
+                ||{self.snapshot.verify_helper_image()?;self.snapshot.confirm_succeeded()},
+            )
+        }
         pub(crate) fn poll_event(&self)->Result<Option<SupervisorEvent>,String>{
-            self.verify()?;
+            let live=self.verify();
             let success=unsafe{WaitForSingleObject(self.success.0,0)};
             let exit=unsafe{WaitForSingleObject(self.exit_request.0,0)};
             if ![0,258].contains(&success)||![0,258].contains(&exit)||success==0&&exit==0{return Err("Supervisor events uncertain".into());}
-            if success==0{self.snapshot.confirm_succeeded()?;self.verify()?;if unsafe{SetEvent(self.success_ack.0)}==0{return Err("Success acknowledgment failed".into());}return Ok(Some(SupervisorEvent::Success));}
+            if live.is_err(){self.confirm_exited_success(success,exit)?;}
+            if success==0{self.snapshot.confirm_succeeded()?;self.verify().or_else(|_|self.confirm_exited_success(success,exit))?;if unsafe{SetEvent(self.success_ack.0)}==0{return Err("Success acknowledgment failed".into());}return Ok(Some(SupervisorEvent::Success));}
             if exit==0{return Ok(Some(SupervisorEvent::ExitRequest));}Ok(None)
         }
         pub(crate) fn signal_probation_idle(&self,_proof:&crate::HealthIdleProof)->Result<(),String>{self.verify()?;if unsafe{SetEvent(self.idle.0)}==0{return Err("Probation idle signal failed".into());}Ok(())}
@@ -186,3 +208,27 @@ mod native {
     }
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn restart_nonce_is_strict_lowercase_128_bit(){for nonce in ["", "abc", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "0123456789abcdef0123456789abcdeg"]{assert!(!valid_nonce(nonce));}assert!(valid_nonce("0123456789abcdef0123456789abcdef"));}}
+
+#[cfg(test)]
+mod retained_success_tests {
+    use super::*;
+    #[test]
+    fn retained_exit_accepts_fresh_durable_success_after_lost_ack() {
+        assert!(retained_success_after_exit(0,true,0,258,||Ok(())).is_ok());
+    }
+    #[test]
+    fn retained_exit_never_substitutes_for_missing_or_uncertain_success() {
+        for reason in ["missing journal", "uncertain journal", "not succeeded", "changed image"] {
+            assert!(retained_success_after_exit(0,true,0,258,||Err(reason.into())).is_err());
+        }
+    }
+    #[test]
+    fn retained_exit_rejects_live_changed_or_conflicting_channels() {
+        for (wait,matched,success,exit) in [
+            (258,true,0,258), (u32::MAX,true,0,258), (0,false,0,258),
+            (0,true,258,258), (0,true,0,0), (0,true,u32::MAX,258), (0,true,0,u32::MAX),
+        ] {
+            assert!(retained_success_after_exit(wait,matched,success,exit,||panic!("invalid evidence must not consult journal")).is_err());
+        }
+    }
+}
