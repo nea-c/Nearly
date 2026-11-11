@@ -161,6 +161,25 @@ which is then closed to complete deletion while directory guards remain held.
 
 ## Verification and scope
 
+An ordinary same-version/newer reinstall can repair a registered installation
+left fenced by an incomplete update. Setup holds the shared mutation mutex and
+the verified registered root, and opens `.Nearly-update-state` itself without
+write/delete sharing. A persisted root identity must match; legacy owned
+registrations without that marker use the freshly captured and retained root
+pin, just as normal installation does. A live helper, reparse point, changed root,
+or inaccessible state causes refusal before payload mutation.
+
+Only after both payloads, registration and shortcut preferences succeed does
+Setup rename that held state directory to a non-overwriting sibling named
+`.Nearly-update-state-reinstalled-<pid>-<tick>`. No recovery contents are read,
+deleted or reconstructed; retained archives are diagnostic evidence. A failed
+archive keeps the startup fence and reports failure so Setup can be retried.
+Settings, profiles, trust data and other user files are untouched. This is a
+manual reinstall fallback, not offline reconstruction or atomic installer
+rollback. `reinstall-recovery.test.mjs` checks the source contract; actual NSIS
+repair, collision, interrupted installation and live-helper refusal still need
+disposable Windows qualification before release.
+
 Run `node --test src-tauri/windows/template.test.mjs`. On Windows, set
 `NEARLY_NSIS_ROOT` to the **existing** NSIS cache if the execution environment
 redirects `LOCALAPPDATA`. The test renders a minimal compile-only fixture and

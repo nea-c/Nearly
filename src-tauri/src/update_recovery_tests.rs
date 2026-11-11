@@ -186,12 +186,11 @@ fn foreign_or_uncertain_objects_and_missing_native_authority_never_mutate() {
             );
         }
     }
-    for guard in 0..3 {
+    for guard in 0..2 {
         let mut f = facts();
         match guard {
             0 => f.root_and_lease_verified = false,
-            1 => f.snapshots_verified = false,
-            _ => f.no_other_users = false,
+            _ => f.snapshots_verified = false,
         }
         assert_eq!(
             next_action(
@@ -356,4 +355,14 @@ fn preparation_staging_and_health_require_actual_peer_outcomes() {
         panic!("publish success before cleanup/unblock")
     };
     assert_eq!(success.phase, RecoveryPhase::Succeeded);
+}
+#[test]
+fn restart_manager_report_is_not_mutation_authority() {
+    let mut f = facts();
+    f.no_other_users = false;
+    for phase in [RecoveryPhase::Armed, RecoveryPhase::Applying, RecoveryPhase::Restoring] {
+        assert!(matches!(next_action(&record(phase), &tuple(ObservedObject::Old), &f), RecoveryAction::Publish(_)));
+    }
+    f.child = ChildState::LiveHealthy;
+    assert!(matches!(next_action(&record(RecoveryPhase::AwaitingHealth), &tuple(ObservedObject::New), &f), RecoveryAction::Publish(RecoveryRecord { phase: RecoveryPhase::Succeeded, .. })));
 }

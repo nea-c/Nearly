@@ -108,6 +108,7 @@ pub(crate) struct LiveFacts {
     pub root_and_lease_verified: bool,
     pub snapshots_verified: bool,
     pub candidates_verified: bool,
+    /// Restart Manager is diagnostic only; actual native I/O decides contention.
     pub no_other_users: bool,
     pub failure_requested: bool,
     pub settings_compatible: bool,
@@ -228,7 +229,6 @@ pub(crate) fn next_action(
         .any(|v| matches!(v, ObservedObject::Foreign | ObservedObject::Uncertain))
         || !facts.root_and_lease_verified
         || !facts.snapshots_verified
-        || !facts.no_other_users
         || facts.worker == WorkerState::Uncertain
         || facts.child == ChildState::Uncertain
     {

@@ -2240,7 +2240,7 @@ fn main() {
     if probation&&(!startup_update::handoff_validated()||update_package::runtime_key().is_none()){return;}
     #[cfg(windows)]
     if !probation&&startup_update::handoff_validated()&&update_package::runtime_key().is_some()
-        &&update_recovery_windows::ordinary_startup_allowed().is_err(){
+        &&!update_recovery_windows::startup_admission_with_feedback(){
             #[cfg(feature="installer-qa")] installer_qa::trace_runtime("recoveryRequired",Some("transactionUnavailable"));return;
         }
     #[cfg(windows)]

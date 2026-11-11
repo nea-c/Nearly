@@ -141,7 +141,7 @@ mod guest {
     }
     pub(crate) fn trace_error(error:&crate::update_transaction::Error){
         use crate::update_transaction::Error::*;
-        trace("nativeError",match error{Disabled=>"Disabled",Invalid=>"Invalid",Unsafe=>"Unsafe",Busy=>"Busy",Missing=>"Missing",Io=>"Io",Protection=>"Protection",Uncertain=>"Uncertain"});
+        trace("nativeError",match error{Disabled=>"Disabled",Invalid=>"Invalid",Unsafe=>"Unsafe",Busy=>"Busy",LockContention(_)=>"LockContention",Missing=>"Missing",Io=>"Io",Protection=>"Protection",Uncertain=>"Uncertain"});
     }
     pub(crate) fn trace_runtime(phase:&'static str,reason:Option<&'static str>){
         if matches!(phase,"idle"|"waitingForUi"|"checking"|"awaitingSuccess"|"succeeded"|"recoveryRequired"){trace("runtime",phase)}
