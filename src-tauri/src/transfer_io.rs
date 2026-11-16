@@ -66,12 +66,13 @@ async fn lookup(s: &Connection, path: &str) -> Result<Option<FileAttributes>, St
         Err(_) => Err("SFTP target lookup failed".into()),
     }
 }
+// a is the inventory/confirmed observation; READDIR may omit owner fields.
 fn same(a: &FileAttributes, b: &FileAttributes) -> bool {
     a.permissions == b.permissions
         && a.size == b.size
         && a.mtime == b.mtime
-        && a.uid == b.uid
-        && a.gid == b.gid
+        && a.uid.is_none_or(|uid| b.uid == Some(uid))
+        && a.gid.is_none_or(|gid| b.gid == Some(gid))
 }
 pub(crate) async fn unchanged(
     s: &Connection,
@@ -184,6 +185,7 @@ pub(crate) async fn remote_inventory(
         return Err("Select 1 to 10,000 sources".into());
     }
     let mut pending = Vec::new();
+    let mut parents = crate::sftp::OperationParents::default();
     for source in sources.iter().rev() {
         if source.split('/').any(|p| p == "." || p == "..") {
             return Err("Remote traversal refused".into());
@@ -195,11 +197,13 @@ pub(crate) async fn remote_inventory(
             .filter(|n| !n.is_empty())
             .ok_or("Remote roots cannot be downloaded")?
             .to_owned();
-        pending.push((path, name, 0));
+        let parent = path.rsplit_once('/').unwrap().0;
+        parents.check(&s.raw, if parent.is_empty() { "/" } else { parent }).await?;
+        pending.push((path, name, 0, None));
     }
     let mut entries = Vec::new();
     let mut names = HashSet::new();
-    while let Some((path, relative, depth)) = pending.pop() {
+    while let Some((path, relative, depth, listed)) = pending.pop() {
         check(stop)?;
         if depth > 64 || entries.len() >= 10000 {
             return Err("Download exceeds 10,000 entries or depth 64".into());
@@ -211,9 +215,13 @@ pub(crate) async fn remote_inventory(
         if !names.insert(relative.to_uppercase()) {
             return Err("Duplicate or case-ambiguous source names".into());
         }
-        let parent = path.rsplit_once('/').unwrap().0;
-        checked_directory(&s.raw, if parent.is_empty() { "/" } else { parent }, false).await?;
-        let attrs = lookup(s, &path).await?.ok_or("Remote source disappeared")?;
+        // Each descendant comes from a directory already visited in this scan.
+        // Reuse READDIR metadata rather than rewalking every ancestor per file.
+        // Source streams still validate the leaf when opening for actual reads.
+        let attrs = match listed {
+            Some(attrs) => attrs,
+            None => lookup(s, &path).await?.ok_or("Remote source disappeared")?,
+        };
         if attrs.is_dir() {
             let handle = s
                 .raw
@@ -242,6 +250,15 @@ pub(crate) async fn remote_inventory(
                                     format!("{path}/{name}"),
                                     format!("{relative}/{name}"),
                                     depth + 1,
+                                    if entry.attrs.is_symlink() {
+                                        return Err("Unsafe or unsupported destination type".into());
+                                    } else if entry.attrs.is_dir()
+                                        || (entry.attrs.file_type().is_file() && entry.attrs.size.is_some() && entry.attrs.mtime.is_some()) {
+                                        Some(entry.attrs)
+                                    } else {
+                                        // Some servers omit type/size/time in READDIR.
+                                        None
+                                    },
                                 ));
                             }
                         }
@@ -555,6 +572,19 @@ pub fn download(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn listing_without_owner_metadata_matches_fresh_file_attributes() {
+        let listed = russh_sftp::protocol::FileAttributes {
+            size: Some(4), mtime: Some(10), permissions: Some(0o100644),
+            ..russh_sftp::protocol::FileAttributes::empty()
+        };
+        let mut fresh = listed.clone(); fresh.uid = Some(1000); fresh.gid = Some(1000);
+        assert!(super::attributes_match(&listed, &fresh));
+        fresh.size = Some(5);
+        assert!(!super::attributes_match(&listed, &fresh));
+        fresh.size = listed.size; fresh.mtime = Some(11);
+        assert!(!super::attributes_match(&listed, &fresh));
+    }
     use super::*;
     #[test]
     fn outcomes_keep_items_committed_bytes_staged_bytes_and_skips_distinct() {
@@ -603,7 +633,7 @@ mod generated {
         sync::Arc,
         time::{Duration, Instant},
     };
-    fn fixture() -> (serde_json::Value, PathBuf, PathBuf, crate::sftp::Profile) {
+    pub(super) fn fixture() -> (serde_json::Value, PathBuf, PathBuf, crate::sftp::Profile) {
         let v: serde_json::Value = serde_json::from_slice(
             &fs::read(std::env::var("NEARLY_TRANSFER_FIXTURE").expect("generated fixture only"))
                 .unwrap(),
@@ -1387,5 +1417,22 @@ mod progress_fixture {
             serde_json::to_vec_pretty(&evidence).unwrap(),
         )
         .unwrap();
+    }
+}
+#[cfg(test)]
+mod inventory_regression {
+    use super::*;
+    #[test]
+    #[ignore = "generated localhost inventory runner only"]
+    fn generated_download_inventory_roundtrips() {
+        let (v, _, _, profile) = super::generated::fixture();
+        let stop = AtomicBool::new(false);
+        let (connection, _) = crate::sftp::connect(&profile, v["passphrase"].as_str().unwrap(), &stop).unwrap();
+        let entries = connection.run(&stop, remote_inventory(&connection, &["/bench/data".into(), "/bench/dimensions".into()], &stop));
+        if v["mode"] == "symlink" || v["mode"] == "ancestor" { assert!(entries.is_err()); return; }
+        let entries = entries.unwrap();
+        assert_eq!(entries.len(), 103);
+        assert_eq!(entries.iter().filter(|e| !e.attrs.is_dir()).count(), 100);
+        assert_eq!(entries.iter().filter_map(|e| if e.attrs.is_dir(){None}else{e.attrs.size}).sum::<u64>(), 400);
     }
 }
