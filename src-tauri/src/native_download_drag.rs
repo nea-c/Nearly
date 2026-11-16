@@ -166,7 +166,7 @@ impl Reader for RemoteReader {
                     .await
                     .map_err(|_| "Remote stream metadata unavailable")?
                     .attrs;
-                if !crate::transfer_io::attributes_match(&attrs, &entry.attrs) {
+                if !crate::transfer_io::attributes_match(&entry.attrs, &attrs) {
                     let _ = s.raw.close(opened).await;
                     return Err("Remote source changed".into());
                 }
@@ -197,9 +197,9 @@ impl Reader for RemoteReader {
             }
             Ok(data)
         });
-        if result.is_err() {
+        if let Err(reason) = &result {
             if let Ok(mut error) = self.error.lock() {
-                *error = Some("Remote read failed or source changed. Sources retained.".into());
+                *error = Some(reason.clone());
             }
             guard.take();
         }
@@ -533,15 +533,25 @@ fn run_sta(
         final_status = UploadStatus::Partial;
     }
     files.finish();
-    let message = match final_status {
-        UploadStatus::Completed => "Windows reports the copy finished; remote sources retained. Explorer manages destination conflicts and partial output.",
-        UploadStatus::Cancelled => "Windows copy cancelled; remote sources retained. Explorer owns any partial output.",
-        UploadStatus::Partial => "Windows did not complete the copy or timed out; remote sources retained. Check Explorer.",
-    };
+    let message = extraction_message(&final_status, reader.error().as_deref());
     Ok(DragOutcome { internal_position: None, outcome: UploadOutcome {
         status: final_status, completed: reader.completed(), bytes: reader.completed_bytes(),
         skipped: 0, transferred_bytes: reader.bytes.load(Ordering::SeqCst), message: message.into(),
     }})
+}
+
+fn extraction_message(status: &UploadStatus, source_error: Option<&str>) -> String {
+    if *status == UploadStatus::Partial {
+        if let Some(reason) = source_error {
+            return format!("{reason}; remote sources retained. Check Explorer for partial output.");
+        }
+    }
+    let message = match status {
+        UploadStatus::Completed => "Windows reports the copy finished; remote sources retained. Explorer manages destination conflicts and partial output.",
+        UploadStatus::Cancelled => "Windows copy cancelled; remote sources retained. Explorer owns any partial output.",
+        UploadStatus::Partial => "Windows did not complete the copy or timed out; remote sources retained. Check Explorer.",
+    };
+    message.into()
 }
 
 fn wait_for_extraction(
@@ -602,6 +612,13 @@ mod tests {
         }
         let own_return = unaccepted_drag_outcome(DRAGDROP_S_CANCEL, true, Err(MetadataError { message: "Remote directory read failed".into(), cancelled: false }));
         assert_eq!(own_return.status, UploadStatus::Cancelled);
+    }
+    #[test]
+    fn partial_copy_message_preserves_source_failure_reason() {
+        let message = extraction_message(&UploadStatus::Partial, Some("Remote stream metadata unavailable"));
+        assert!(message.contains("Remote stream metadata unavailable"));
+        assert!(message.contains("sources retained"));
+        assert!(!extraction_message(&UploadStatus::Completed, Some("stale error")).contains("stale error"));
     }
     #[test]
     fn active_state_snapshot_survives_renderer_delay_but_is_only_defense_in_depth() {

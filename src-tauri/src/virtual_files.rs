@@ -189,18 +189,49 @@ impl DeferredFiles {
     pub fn timed_out(&self) -> bool { self.timed_out.load(Ordering::SeqCst) }
     pub fn get(&self) -> WinResult<Arc<VirtualFiles>> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let mut value = self.value.lock().map_err(|_| failed(E_FAIL))?;
         loop {
+            let value = self.value.lock().map_err(|_| failed(E_FAIL))?;
             if self.stop.load(Ordering::SeqCst) { return Err(failed(STG_E_REVERTED)); }
-            if let Some(result) = value.as_ref() { return result.clone().map_err(|_| failed(STG_E_READFAULT)); }
+            if let Some(result) = value.as_ref() {
+                return result.clone().map_err(|reason| Error::new(STG_E_READFAULT, reason));
+            }
             if std::time::Instant::now() >= deadline {
                 self.timed_out.store(true, Ordering::SeqCst);
                 self.stop.store(true, Ordering::SeqCst);
-                return Err(failed(STG_E_READFAULT));
+                return Err(Error::new(STG_E_READFAULT, "Drag metadata timed out"));
             }
-            value = self.ready.wait_timeout(value, std::time::Duration::from_millis(25)).map_err(|_| failed(E_FAIL))?.0;
+            let (value, _) = self.ready.wait_timeout(value, std::time::Duration::from_millis(25))
+                .map_err(|_| failed(E_FAIL))?;
+            // GetData can run on the window's STA. Never keep the metadata
+            // mutex held while dispatching callbacks (which may reenter COM).
+            drop(value);
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, PeekMessageW, PostQuitMessage, MSG, PM_REMOVE,
+                WM_PAINT, WM_QUIT, WM_TIMER, WM_USER,
+            };
+            let mut message = MSG::default();
+            for _ in 0..32 {
+                // This is nested inside OLE, not the application's outer loop.
+                // Leave keyboard/mouse/pointer input queued for DoDragDrop so
+                // button release and Escape cannot disappear into this wait.
+                // PeekMessage also dispatches incoming sent (including COM)
+                // messages; high-range messages service the app's posted work.
+                let found = [(WM_PAINT, WM_PAINT), (WM_TIMER, WM_TIMER), (WM_USER, 0xffff)]
+                    .into_iter().any(|(first, last)| unsafe {
+                        PeekMessageW(&mut message, None, first, last, PM_REMOVE)
+                    }.as_bool());
+                if !found { break; }
+                if message.message == WM_QUIT {
+                    self.stop.store(true, Ordering::SeqCst);
+                    // The application's outer loop must still observe shutdown.
+                    unsafe { PostQuitMessage(message.wParam.0 as i32) };
+                    return Err(failed(STG_E_REVERTED));
+                }
+                unsafe { DispatchMessageW(&message); }
+            }
         }
     }
+
     pub fn object(self: &Arc<Self>) -> WinResult<IDataObject> {
         Ok(VirtualData { source: self.clone(), formats: Formats::new()? }.into())
     }
@@ -636,6 +667,77 @@ mod tests {
         let mut medium = unsafe { object.GetData(&descriptors).unwrap() };
         unsafe { ReleaseStgMedium(&mut medium) };
         assert_eq!(fake.reads.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn deferred_metadata_wait_dispatches_ui_messages_without_holding_value_lock() {
+        use std::cell::RefCell;
+        use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+        thread_local! {
+            static PENDING: RefCell<Option<Arc<DeferredFiles>>> = const { RefCell::new(None) };
+        }
+        static MESSAGE_DISPATCHED: AtomicBool = AtomicBool::new(false);
+        static LOCK_AVAILABLE: AtomicBool = AtomicBool::new(false);
+        unsafe extern "system" fn on_timer(_: HWND, _: u32, _: usize, _: u32) {
+            MESSAGE_DISPATCHED.store(true, Ordering::SeqCst);
+            PENDING.with(|pending| {
+                if let Some(pending) = pending.borrow().as_ref() {
+                    LOCK_AVAILABLE.store(pending.value.try_lock().is_ok(), Ordering::SeqCst);
+                }
+            });
+        }
+        let _com = Com::new();
+        MESSAGE_DISPATCHED.store(false, Ordering::SeqCst);
+        LOCK_AVAILABLE.store(false, Ordering::SeqCst);
+        let pending = DeferredFiles::new(Arc::new(AtomicBool::new(false)));
+        PENDING.with(|slot| *slot.borrow_mut() = Some(pending.clone()));
+        let timer = unsafe { SetTimer(None, 0, 10, Some(on_timer)) };
+        assert_ne!(timer, 0);
+        let publish = pending.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            publish.publish(Err("fixture metadata failure".into()));
+        });
+        let object = pending.object().unwrap();
+        let result = unsafe { object.GetData(&format(CFSTR_FILEDESCRIPTORW, -1, TYMED_HGLOBAL)) };
+        unsafe { KillTimer(None, timer).unwrap() };
+        worker.join().unwrap();
+        PENDING.with(|slot| *slot.borrow_mut() = None);
+        assert!(result.is_err());
+        assert!(MESSAGE_DISPATCHED.load(Ordering::SeqCst), "metadata waiting must dispatch UI messages");
+        assert!(LOCK_AVAILABLE.load(Ordering::SeqCst), "callbacks must run outside the metadata mutex");
+    }
+    #[test]
+    fn deferred_metadata_wait_preserves_ole_gesture_input() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            PeekMessageW, PostMessageW, MSG, PM_REMOVE, WM_KEYDOWN, WM_LBUTTONUP,
+        };
+        let _com = Com::new();
+        // Synthetic messages belong only to this test thread; no desktop input.
+        unsafe {
+            PostMessageW(None, WM_LBUTTONUP, WPARAM(0), LPARAM(0)).unwrap();
+            PostMessageW(None, WM_KEYDOWN, WPARAM(27), LPARAM(0)).unwrap();
+        }
+        let pending = DeferredFiles::new(Arc::new(AtomicBool::new(false)));
+        let publish = pending.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            publish.publish(Err("fixture metadata failure".into()));
+        });
+        assert!(pending.get().is_err());
+        worker.join().unwrap();
+        let mut message = MSG::default();
+        let mouse = unsafe { PeekMessageW(&mut message, None, WM_LBUTTONUP, WM_LBUTTONUP, PM_REMOVE) }.as_bool();
+        let key = unsafe { PeekMessageW(&mut message, None, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE) }.as_bool();
+        assert!(mouse, "nested metadata wait must leave button release for DoDragDrop");
+        assert!(key, "nested metadata wait must leave Escape for DoDragDrop");
+    }
+    #[test]
+    fn deferred_metadata_failure_preserves_source_reason() {
+        let pending = DeferredFiles::new(Arc::new(AtomicBool::new(false)));
+        pending.publish(Err("Remote directory read failed".into()));
+        let error = pending.get().err().unwrap();
+        assert_eq!(error.code(), STG_E_READFAULT);
+        assert!(error.message().contains("Remote directory read failed"));
     }
     #[test]
     fn cancelled_deferred_metadata_never_revives_a_gesture() {

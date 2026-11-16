@@ -824,7 +824,7 @@ pub fn file_operation(
 #[derive(Default)]
 pub(crate) struct OperationParents(std::collections::HashSet<String>);
 impl OperationParents {
-    async fn check(&mut self, raw: &RawSftpSession, path: &str) -> Result<(), String> {
+    pub(crate) async fn check(&mut self, raw: &RawSftpSession, path: &str) -> Result<(), String> {
         let mut current = String::new();
         for component in std::iter::once("").chain(path.split('/').filter(|s| !s.is_empty())) {
             if component.is_empty() { current.push('/'); }
